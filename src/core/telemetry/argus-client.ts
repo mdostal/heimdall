@@ -23,6 +23,16 @@ export interface ArgusEmitter {
     from: string;
     to: string;
   }): void;
+  /** hda-03: one emission per actuation attempt (success or failure) — the
+   * partial-failure visibility requirement from the design discussion. */
+  emitActuationResult(params: {
+    laneId: string;
+    provider: string;
+    agentId: string;
+    action: string;
+    success: boolean;
+    reason?: string;
+  }): void;
 }
 
 export interface ArgusClientOptions {
@@ -64,6 +74,24 @@ export class ArgusClient implements ArgusEmitter {
       "lane.provider": params.provider,
       "status.from": params.from,
       "status.to": params.to,
+    });
+  }
+
+  emitActuationResult(params: {
+    laneId: string;
+    provider: string;
+    agentId: string;
+    action: string;
+    success: boolean;
+    reason?: string;
+  }): void {
+    this.safeEmit("heimdall.actuation.result", {
+      "lane.id": params.laneId,
+      "lane.provider": params.provider,
+      "agent.id": params.agentId,
+      action: params.action,
+      success: String(params.success),
+      ...(params.reason !== undefined ? { reason: params.reason } : {}),
     });
   }
 
