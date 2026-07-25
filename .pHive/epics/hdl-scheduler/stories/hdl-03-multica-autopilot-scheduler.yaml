@@ -10,8 +10,26 @@ parallel_rationale: bounded-slice
 files_to_modify:
   - file: src/core/scheduler/multica-autopilot-scheduler.ts
     change: new — implements Scheduler, registers a cron-driven Multica autopilot per lane via an injectable CommandRunner
+  - file: src/core/scheduler/command-runner.ts
+    change: "new — injectable CommandRunner interface + NodeCommandRunner (real execFile), split out during implementation"
   - file: .env.example
-    change: "add MULTICA_AUTOPILOT_AGENT (required) and default cron expression documentation"
+    change: "add MULTICA_AUTOPILOT_AGENT (required) and Argus OTLP endpoint overrides"
+
+implementation_note: |
+  CORRECTED DURING IMPLEMENTATION (2026-07-25) via direct live-CLI inspection
+  against the real, running Multica instance (`multica auth status` confirmed
+  authenticated; `multica autopilot --help`/`get`/`list --output json`):
+  registering a schedule is a TWO-STEP model, not the one-shot `trigger-add`
+  this story's original description assumed. `trigger-add <autopilot-id>`
+  requires a real server-assigned autopilot ID (a UUID) — it does not create
+  an autopilot, only adds a trigger to one that must already exist via
+  `multica autopilot create --title --mode --agent --description`. The
+  implementation checks for an existing autopilot by title (Multica's CLI has
+  no upsert-by-title verb itself) and an existing schedule trigger via `get`
+  before calling create/trigger-add, making start() idempotent across restarts.
+  Also added a `description` field to MulticaAutopilotSchedulerOptions —
+  supplied by the wiring layer (hdl-05), which knows the real refresh-trigger
+  command the dispatched agent should run.
 
 description: |
   Implement the default, coarse scheduling backend: on start(), registers
