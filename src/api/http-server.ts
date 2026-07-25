@@ -28,13 +28,53 @@ export function getLaneStatuses(registry: LaneRegistry, store: StateStore): Lane
   return store.getAllCurrentStatuses();
 }
 
-export function createHttpServer(registry: LaneRegistry, store: StateStore): Server {
+/**
+ * Optional: triggers a real refresh for one lane on demand — the endpoint
+ * MulticaAutopilotScheduler's dispatched agent calls (see hdl-05's decision
+ * record). Omitted (undefined) in tests/contexts that don't need it — the
+ * POST /lanes/:laneId/refresh route responds 501 when no refresh function
+ * is wired, rather than silently 404ing (distinguishes "not implemented
+ * here" from "no such route").
+ */
+export type RefreshLaneFn = (laneId: string) => Promise<void>;
+
+export function createHttpServer(
+  registry: LaneRegistry,
+  store: StateStore,
+  refreshLane?: RefreshLaneFn,
+): Server {
   return createServer((req, res) => {
     if (req.method === "GET" && req.url === "/lanes") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(getLaneStatuses(registry, store)));
       return;
     }
+
+    const refreshMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/refresh$/);
+    if (refreshMatch) {
+      const laneId = decodeURIComponent(refreshMatch[1]);
+      if (!refreshLane) {
+        res.writeHead(501, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "refresh_not_configured" }));
+        return;
+      }
+      if (!registry.get(laneId)) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "unknown_lane", lane_id: laneId }));
+        return;
+      }
+      refreshLane(laneId)
+        .then(() => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ lane_id: laneId, refreshed: true }));
+        })
+        .catch((err) => {
+          res.writeHead(500, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "refresh_failed", message: String(err) }));
+        });
+      return;
+    }
+
     res.writeHead(404, { "content-type": "application/json" });
     res.end(JSON.stringify({ error: "not_found" }));
   });

@@ -8,7 +8,8 @@
     "node": ">=22.5.0"
   },
   "scripts": {
-    "dev": "node --experimental-sqlite --import tsx src/api/http-server.ts",
+    "dev": "node --experimental-sqlite --import tsx src/main.ts",
+    "dev:http-only": "node --experimental-sqlite --import tsx src/api/http-server.ts",
     "cli": "node --experimental-sqlite --import tsx src/api/cli.ts",
     "mcp": "node --experimental-sqlite --import tsx src/api/mcp-server.ts",
     "test": "node --experimental-sqlite --import tsx --test \"src/**/*.test.ts\" \"test/**/*.test.ts\"",

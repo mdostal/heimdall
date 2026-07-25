@@ -94,6 +94,88 @@ test("GET /lanes reflects a status persisted by the Claude signal pipeline (lhs-
   }
 });
 
+test("POST /lanes/:laneId/refresh returns 501 when no refresh function is wired", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store); // no refreshLane
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/refresh`, {
+      method: "POST",
+    });
+    assert.equal(res.status, 501);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("POST /lanes/:laneId/refresh triggers the wired refresh function and returns 200", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  let refreshedLaneId: string | null = null;
+  const server = createHttpServer(registry, store, async (laneId) => {
+    refreshedLaneId = laneId;
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(
+      `http://localhost:${port}/lanes/${encodeURIComponent("claude@mathew.dostal")}/refresh`,
+      { method: "POST" },
+    );
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.lane_id, "claude@mathew.dostal");
+    assert.equal(refreshedLaneId, "claude@mathew.dostal");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("POST /lanes/:laneId/refresh returns 404 for an unknown lane", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store, async () => {});
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes/never-declared/refresh`, {
+      method: "POST",
+    });
+    assert.equal(res.status, 404);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("POST /lanes/:laneId/refresh returns 500 if the refresh function rejects", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store, async () => {
+    throw new Error("provider unreachable");
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(
+      `http://localhost:${port}/lanes/${encodeURIComponent("claude@mathew.dostal")}/refresh`,
+      { method: "POST" },
+    );
+    assert.equal(res.status, 500);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
 test("unknown routes return 404", async () => {
   const registry = registryWithOneConfiguredLane();
   const store = new StateStore(":memory:");

@@ -62,6 +62,15 @@ export class InProcessScheduler implements Scheduler {
   }
 
   private scheduleNext(): void {
+    // Always clear any existing timer first — poll() can be invoked
+    // manually (tests do this for determinism) while start()'s own timer is
+    // still pending; without this, the manual call's reschedule overwrites
+    // `this.timer`'s reference without cancelling the original underlying
+    // timer, leaking it to fire later regardless of subsequent stop() calls.
+    if (this.timer) {
+      this.clearTimeoutImpl(this.timer);
+      this.timer = null;
+    }
     if (this.stopped) return;
     this.timer = this.setTimeoutImpl(() => {
       void this.poll();

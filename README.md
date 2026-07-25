@@ -37,17 +37,30 @@ the service or silently disappearing.
 **Never commit `.env`** — it's gitignored; only `.env.example` (with empty
 secret values) is tracked.
 
-## Run the dev server
+## Run the real service
 
 ```bash
 npm run dev
 ```
 
-Starts the HTTP server on `http://localhost:4870` (override with `PORT=<n>`).
-`GET /lanes` reads real lane declarations + a SQLite state store (override the
-DB path with `HEIMDALL_DB_PATH`, default in-memory), reflecting whatever the
-Claude/Codex signal pipeline (`src/core/lane-pipeline.ts`) last persisted —
-see [`.pHive/epics/lane-health-status/docs/vertical-plan.md`](.pHive/epics/lane-health-status/docs/vertical-plan.md).
+Runs `src/main.ts` — the full composed service: lane registry + SQLite state
+store + Argus OTEL telemetry + a per-lane `MulticaAutopilotScheduler` (coarse
+cron, default) and `InProcessScheduler` (fine ~5s, suspect-lane only) + the
+HTTP server on `http://localhost:4870` (override with `PORT=<n>`). See
+[`docs/decisions/DEC-hdl-scheduler-backend.md`](docs/decisions/DEC-hdl-scheduler-backend.md)
+for the scheduler design and the `multica-native-no-box-runners` HARD LAW it
+satisfies. Requires `MULTICA_AUTOPILOT_AGENT` to be set (see `.env.example`)
+for the Multica backend to register cron triggers; missing it fails that
+lane's coarse scheduling clearly without crashing the rest of the service.
+
+`GET /lanes` reads the SQLite state store (override the DB path with
+`HEIMDALL_DB_PATH`, default in-memory), reflecting whatever the Claude/Codex
+signal pipeline (`src/core/lane-pipeline.ts`) last persisted. `POST
+/lanes/:laneId/refresh` triggers a real refresh on demand — this is the
+endpoint Multica's dispatched agent calls when a lane's autopilot fires. To
+run just the HTTP server without any scheduling (e.g. for isolated debugging),
+use `npm run dev:http-only` instead — see
+[`.pHive/epics/lane-health-status/docs/vertical-plan.md`](.pHive/epics/lane-health-status/docs/vertical-plan.md).
 
 ## Query lane status — CLI
 

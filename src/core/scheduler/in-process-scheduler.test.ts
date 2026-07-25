@@ -222,3 +222,29 @@ test("stop() prevents further polling from being scheduled", async () => {
   assert.equal(scheduleCount, 1, "no further scheduling after stop()");
   store.close();
 });
+
+test("stop() cancels the real underlying timer even after a manual poll() rescheduled it (no leaked timer)", async () => {
+  // Regression test: start() schedules a real timer; a manually-invoked
+  // poll() (as other tests do for determinism) used to overwrite `this.timer`
+  // WITHOUT cancelling the original underlying timer, leaking it to fire
+  // later regardless of a subsequent stop() call.
+  const store = seedStore("up");
+  const clearedTimers: unknown[] = [];
+  const scheduler = new InProcessScheduler({
+    lane: LANE,
+    pipeline: fakePipeline(async () => {}),
+    store,
+    argus: fakeArgus(),
+    setTimeoutImpl: ((fn: () => void) => Symbol("timer")) as unknown as typeof setTimeout,
+    clearTimeoutImpl: ((handle: unknown) => {
+      clearedTimers.push(handle);
+    }) as typeof clearTimeout,
+  });
+
+  scheduler.start(); // schedules timer A
+  await scheduler.poll(); // manually driven — must cancel timer A before scheduling timer B
+  scheduler.stop(); // must cancel timer B
+
+  assert.equal(clearedTimers.length, 2, "both the original and the rescheduled timer must be cleared");
+  store.close();
+});
