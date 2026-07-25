@@ -2,10 +2,10 @@
 // Uses Node's built-in node:sqlite (experimental as of Node 22.9 — requires
 // the --experimental-sqlite flag, wired into package.json's dev/test scripts).
 //
-// "Current status = latest row per lane_id in lane_status_history" — this
-// story (lhs-02) only wires the schema + read/write; no real signal
-// detection writes rows yet, so getCurrentStatus's "no row yet" fallback
-// (down/unconfigured) is what every lane reports for now.
+// "Current status = latest row per lane_id in lane_status_history" —
+// getCurrentStatus's "no row yet" fallback (down/unconfigured) is what a
+// lane reports until its first real status is recorded by the signal
+// pipeline (lane-pipeline.ts, lhs-03f).
 
 import { DatabaseSync } from "node:sqlite";
 import type { LaneStatus, LaneStatusValue, SignalSource } from "./status-model.js";
@@ -101,7 +101,7 @@ export class StateStore {
         `SELECT status, reset_at, reason, signal_source, observed_at
          FROM lane_status_history
          WHERE lane_id = ?
-         ORDER BY observed_at DESC
+         ORDER BY observed_at DESC, rowid DESC
          LIMIT 1`,
       )
       .get(laneId) as unknown as StatusRow | undefined;
@@ -130,6 +130,21 @@ export class StateStore {
       last_updated: row.observed_at,
       signal_source: row.signal_source,
     };
+  }
+
+  /** Timestamp of the most recent status entry recorded from a specific
+   * signal source for this lane, or null if none exists yet. Used by
+   * escalation.ts (via lane-pipeline.ts) to decide staleness per source. */
+  getLastObservedAt(laneId: string, source: SignalSource): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT observed_at FROM lane_status_history
+         WHERE lane_id = ? AND signal_source = ?
+         ORDER BY observed_at DESC, rowid DESC
+         LIMIT 1`,
+      )
+      .get(laneId, source) as unknown as { observed_at: string } | undefined;
+    return row?.observed_at ?? null;
   }
 
   getAllCurrentStatuses(): LaneStatus[] {
