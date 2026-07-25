@@ -18,3 +18,9 @@ Per-account **long-lived tokens** for every lane — the thing that makes cross-
 
 ## Ties
 model-routing-diversification · failures-are-our-automation (broken health-aware routing = root cause) · runtime-must-emit-output (probe before routing) · account-identity-model (per-account tokens) · Portunus (creds) · Vesta (config).
+
+## Finalized kickoff classification (Mathew 2026-07-25)
+
+- **project_type = SERVICE** (primary). Core = a health-aware router/dispatcher other components *call*. The framework/plugin-interface pieces are **secondary** — the adapter that lets it plug into Pantheon or run standalone.
+- **has_ui = No** for the core (headless service). A **light standalone-settings UI** exists as a secondary, **standalone-only** surface: sign up new agents/runtimes, add runtimes (API calls + a way to **SEE and verify** them). In Pantheon that config lives through other plugins (Vesta / Multica), NOT in Heimdall.
+- **OSS + STANDALONE (applies to ALL gods, not just Heimdall):** every plugin is open-source and ships a **standalone version** that works with *any* harness allowing multi-agent spin-up (choose agents + direct them), AS WELL AS plugging into the greater Pantheon for the full vision. So Heimdall builds for **two modes**: standalone (carries its own light config UI) + Pantheon-plugin (config via Vesta/Multica; the two work together). This is a distribution property, not a change to project_type.
