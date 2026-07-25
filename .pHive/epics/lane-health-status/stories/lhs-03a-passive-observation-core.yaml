@@ -1,0 +1,78 @@
+id: lhs-03a-passive-observation-core
+epic: lane-health-status
+title: "Passive observation core — pure function, no provider-specific logic (REQ-01 mechanism)"
+status: pending
+complexity: low
+methodology: classic
+depends_on: [lhs-01-service-skeleton-fixture-http]
+parallel_allowed: true
+parallel_rationale: bounded-slice
+files_to_modify:
+  - file: src/core/signal-sources/passive.ts
+    change: new — generic last-response observation function, provider-agnostic
+
+description: |
+  Implement the generic passive-observation mechanism: a pure function that
+  takes a real response/error object from any lane and extracts an inferred
+  state (up/down/degraded-leaning) plus a quota-reset time if the response
+  exposes one. This is deliberately provider-agnostic — it does NOT know
+  anything about Claude or Codex specifically; provider-specific extraction
+  rules are the job of lhs-03b/lhs-03c's adapters, not this story. This is
+  the smallest independently-unit-testable piece of the original lhs-03
+  scope, split out per operator request (2026-07-25) to reduce per-story
+  failure surface.
+
+acceptance_criteria:
+  - "Given a lane just handled a real agent request, when the response or
+     error object is passed to this function, then it returns the lane's
+     inferred state and, if the object exposes it, the quota-reset time
+     (REQ-01)."
+  - "Given no response/error object is available (nothing recent to observe),
+     when this function is called, then it returns a clear 'no signal'
+     result rather than fabricating a state — callers (lhs-03d) decide what
+     to do with 'no signal', this function does not guess."
+
+steps:
+  - id: implement
+    description: |
+      Implement src/core/signal-sources/passive.ts as a pure function:
+      (responseOrError) => { state, resetAt | null } | NoSignal.
+    agent: developer
+  - id: test
+    description: |
+      Unit tests covering: a response with a clear quota-reset field, a
+      response with no such field, an error object, and the 'no signal' case.
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review for provider-agnosticism — flag any Claude/Codex-specific logic that leaked in here.
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Code/heimdall
+  tech_stack:
+    languages: [typescript]
+  key_files:
+    - path: .pHive/planning/architecture.md
+      purpose: "signal-sources/passive.ts component definition — generic mechanism, not per-provider"
+
+design_decisions:
+  - decision: "Split lhs-03 into the smallest independently-unit-testable pieces, integrated in a final story (lhs-03f)"
+    rationale: "Operator request (2026-07-25): reduce per-story failure surface by decomposing functionally rather than shipping one high-complexity story bundling three signal layers + resolution logic."
+
+risks:
+  - severity: low
+    description: "Low risk — pure function, no I/O, no external dependencies."
+    mitigation: "n/a"
+
+references:
+  - path: .pHive/planning/prd.md
+    relevant_excerpt: |
+      REQ-01: Passive last-response observation ... Given a lane just handled
+      a real agent request, when the response or error returns, then Heimdall
+      records the lane's inferred state.

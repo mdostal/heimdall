@@ -1,0 +1,104 @@
+id: lhs-03f-claude-integration
+epic: lane-health-status
+title: "Claude end-to-end integration — wire 03a-03e together, full REQ-01/02/03/04 integration test"
+status: pending
+complexity: medium
+methodology: classic
+depends_on:
+  - lhs-02-credential-loading-state-storage
+  - lhs-03a-passive-observation-core
+  - lhs-03b-claude-public-status-adapter
+  - lhs-03c-claude-active-probe-adapter
+  - lhs-03d-staleness-escalation-logic
+  - lhs-03e-status-resolution-model
+files_to_modify:
+  - file: src/core/lane-registry.ts
+    change: "wire the Claude lane to passive.ts + public-status/claude.ts + active-probe/claude.ts + escalation.ts + status-model.ts, writing resolved status to state-store"
+
+description: |
+  Integrate the five independently-built, independently-unit-tested pieces
+  (lhs-03a passive core, lhs-03b Claude public-status adapter, lhs-03c Claude
+  active-probe adapter, lhs-03d escalation logic, lhs-03e resolution model)
+  into one real, working pipeline for the Claude lane, backed by lhs-02's
+  real credential loading and state storage. This is where the original
+  lhs-03 monolithic story's integration-level acceptance criteria actually
+  get verified end-to-end — the individual pieces already proved their unit
+  behavior in isolation. This is Vertical Slice 3 from vertical-plan.md,
+  now realized as an integration story on top of 5 smaller building-block
+  stories (per operator's finer-decomposition request, 2026-07-25).
+
+acceptance_criteria:
+  - "Given a lane just handled a real agent request, when the response or
+     error returns, then Heimdall records the lane's inferred state and, if
+     the response exposes it, the quota-reset time (REQ-01, end-to-end)."
+  - "Given no real traffic has hit the Claude lane recently, when its status
+     is queried, then Heimdall falls back to public-status/active-probe
+     rather than reporting stale passive data as current (REQ-01)."
+  - "Given Claude publishes a public status endpoint, when Heimdall checks
+     it, then the check consumes no per-lane API tokens and updates the
+     degraded/down signal if Claude reports an incident (REQ-02,
+     end-to-end)."
+  - "Given passive and public-status signals are both stale or insufficient,
+     when the staleness threshold is exceeded, then Heimdall performs one
+     minimal-cost active check against the Claude lane (REQ-03, end-to-end)."
+  - "Given a lane has recent passive or public-status signal, when a status
+     query arrives, then Heimdall does NOT perform a redundant active check
+     (REQ-03, end-to-end)."
+  - "Given the combined signal, when status is computed and persisted, then
+     GET /lanes reflects exactly one of up | down | out_of_credit (with
+     reset_at if known) | degraded for the Claude lane (REQ-04, end-to-end)."
+
+steps:
+  - id: implement
+    description: |
+      Wire lane-registry.ts to call escalation.ts (lhs-03d) to choose a
+      signal source among passive.ts (lhs-03a), public-status/claude.ts
+      (lhs-03b), and active-probe/claude.ts (lhs-03c), then resolve the raw
+      signal through status-model.ts (lhs-03e), and persist the result via
+      state-store.ts (lhs-02).
+    agent: developer
+  - id: test
+    description: |
+      Integration tests: mock Claude responses drive the full pipeline
+      correctly end-to-end; verify GET /lanes reflects the correct resolved
+      state for a sequence of simulated Claude lane conditions (healthy,
+      degraded, out of credit, recovered).
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: |
+      Review against the full REQ-01/02/03/04 acceptance criteria set,
+      confirming the integration doesn't silently reimplement logic that
+      already exists in 03a-03e.
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Code/heimdall
+  tech_stack:
+    languages: [typescript]
+  key_files:
+    - path: .pHive/planning/prd.md
+      purpose: "REQ-01 through REQ-04's full combined acceptance criteria, verified here end-to-end"
+    - path: .pHive/epics/lane-health-status/docs/signal-inventory.md
+      purpose: "spike findings this integration's real Claude behavior should match"
+
+design_decisions:
+  - decision: "Integration happens in its own story, after all five pieces are independently built and unit-tested"
+    rationale: "Operator request (2026-07-25): decompose into the smallest possible pieces to reduce per-story failure surface, then bundle integration into one final wiring + full-integration-test story."
+
+risks:
+  - severity: medium
+    description: "This is still the story where real Claude behavior gets exercised for the first time — even with all pieces unit-tested individually, integration can surface interface mismatches between them."
+    mitigation: "Each of 03a-03e was built against the same architecture.md interface shapes, minimizing surprise; any mismatch found here should be fixed in the smallest affected piece, not patched over in this story."
+
+references:
+  - path: .pHive/epics/lane-health-status/docs/vertical-plan.md
+    relevant_excerpt: |
+      Slice 3: Passive Observation + Public-Status + Active-Probe for Claude
+      ... The Claude lane's status is now REAL — derived from the layered
+      signal model, resolved through the full 4-state model.

@@ -1,0 +1,98 @@
+id: hdl-01-scheduler-interface-argus-client
+epic: hdl-scheduler
+title: "Scheduler interface + Argus OTEL telemetry client"
+status: pending
+complexity: low
+methodology: classic
+depends_on: []
+parallel_allowed: true
+parallel_rationale: bounded-slice
+files_to_modify:
+  - file: src/core/scheduler/scheduler.ts
+    change: new — Scheduler interface (start/stop), backend-agnostic
+  - file: src/core/telemetry/argus-client.ts
+    change: new — thin OTEL wrapper emitting ticks + status-flips to Argus, fire-and-forget
+  - file: package.json
+    change: add @opentelemetry/api, @opentelemetry/sdk-node, and an OTLP exporter package
+
+description: |
+  Foundation for the whole scheduler epic: the Scheduler interface every
+  backend implements (start/stop, no backend-specific logic), and the first
+  Node/TypeScript Argus OTEL client in Pantheon — emitting one span/metric
+  per tick and per status-flip to Argus (host OTLP 4327 gRPC / 4328 HTTP),
+  using the standard @opentelemetry/* SDK. Fire-and-forget: emission
+  failures are logged, never thrown — Argus being unreachable must not
+  break Heimdall's core health-check function. No concrete Scheduler
+  implementation lands in this story.
+
+acceptance_criteria:
+  - "Given the Scheduler interface, when a concrete backend implements it,
+     then it exposes exactly start(): void and stop(): void, with no
+     backend-specific method leaking into the shared contract."
+  - "Given a tick or status-flip event, when emitTick()/emitStatusFlip() is
+     called, then it sends the event to the configured OTLP exporter
+     (mockable in tests, real gRPC/HTTP to Argus in production)."
+  - "Given the OTLP exporter fails or Argus is unreachable, when emission is
+     attempted, then the failure is caught and logged — it never throws or
+     blocks the caller."
+
+steps:
+  - id: research
+    description: Confirm the @opentelemetry/* package versions and OTLP exporter shape (gRPC vs HTTP) to use.
+    agent: researcher
+  - id: implement
+    description: |
+      Implement scheduler.ts's interface and argus-client.ts's emitTick/
+      emitStatusFlip functions, wrapping @opentelemetry/sdk-node with a
+      configurable OTLP exporter (env-driven endpoint, defaulting to
+      4327 gRPC).
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: |
+      Unit tests: emitTick/emitStatusFlip call a mocked exporter with the
+      right shape; exporter failure is caught and logged, never thrown.
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review for fire-and-forget correctness — confirm no path can let an Argus failure propagate to the caller.
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Code/heimdall
+  tech_stack:
+    languages: [typescript]
+  key_files:
+    - path: docs/scheduler-constraints.md
+      purpose: "argus-otel-emit requirement — every tick + status-flip must emit OTLP to Argus"
+    - path: .pHive/epics/hdl-scheduler/docs/research-brief.md
+      purpose: "confirmed Argus host/ports (4327/4328) and that no existing Node/TS OTLP client exists to reuse"
+
+design_decisions:
+  - decision: "Use the standard @opentelemetry/* SDK rather than hand-rolling OTLP protocol handling"
+    rationale: "This is the first Node/TS OTEL client in Pantheon — reduces risk to configuration, not protocol-level work."
+  - decision: "Fire-and-forget emission, never throws"
+    rationale: "Matches the existing codebase's established 'never crash the whole service' philosophy (REQ-07 precedent) — Argus unreachability must not affect Heimdall's core function."
+
+cross_cutting:
+  - concern: documentation
+    action: "README gains a section on Argus OTEL configuration (endpoint env vars)."
+  - concern: argus-otel-emit
+    action: "This story IS the argus-otel-emit concern's foundational implementation — emitTick/emitStatusFlip are what every later story calls."
+
+risks:
+  - severity: low
+    description: "First-of-kind integration risk (no prior Node/TS Argus client to copy)."
+    mitigation: "Standard OTEL SDK reduces this to configuration; mockable exporter keeps tests independent of a live Argus connection."
+
+references:
+  - path: .pHive/epics/hdl-scheduler/docs/design-discussion.md
+    relevant_excerpt: |
+      Argus OTEL client ... thin wrapper over @opentelemetry/sdk-node +
+      OTLP exporters (gRPC to 4327, or HTTP to 4328) ... isolated behind a
+      small interface so it's mockable in tests.
