@@ -1,0 +1,98 @@
+id: lhs-05-cli-mcp-surfaces
+epic: lane-health-status
+title: "CLI + MCP query surfaces — LaneRouterContract complete across all three transports"
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [lhs-03f-claude-integration]
+parallel_allowed: true
+parallel_rationale: bounded-slice
+files_to_modify:
+  - file: src/api/cli.ts
+    change: new — CLI query command (JSON output + --format table)
+  - file: src/api/mcp-server.ts
+    change: new — MCP tool heimdall.lanes.list
+  - file: README.md
+    change: "add CLI usage section and MCP tool registration instructions"
+
+description: |
+  Expose the same LaneRouterContract (REQ-05) via CLI and MCP, on top of the
+  existing GET /lanes HTTP endpoint. All three surfaces must call the same
+  shared getLaneStatuses() core function — no duplicated logic, no drift
+  between transports. This is Vertical Slice 5. The contract is binding:
+  synchronous request/response on every surface, never fire-and-forget — a
+  caller's query must return the answer directly in the same call.
+
+acceptance_criteria:
+  - "Given at least one lane is configured, when the CLI query command or the
+     MCP tool heimdall.lanes.list is invoked, then it returns every known
+     lane's current 4-state status plus reason/reset-time metadata, in direct
+     response to that call (REQ-05 / LaneRouterContract)."
+  - "Given no lanes are configured, when either surface is queried, then it
+     returns an empty result, not an error (REQ-05)."
+  - "Given the same underlying lane state, when HTTP, CLI, and MCP are each
+     queried, then all three return identical status data — no
+     transport-specific drift."
+  - "Given a caller asks 'is there any free/up lane right now' via any
+     surface, when the query executes, then the answer is derivable
+     synchronously from that same response — never 'subscribe and wait.'"
+
+steps:
+  - id: research
+    description: Confirm the shared getLaneStatuses() core function signature from the HTTP implementation (lhs-01/lhs-02).
+    agent: researcher
+  - id: implement
+    description: |
+      Implement cli.ts (JSON + --format table output) and mcp-server.ts
+      (heimdall.lanes.list tool), both calling the existing shared core
+      function rather than reimplementing query logic. Add README CLI/MCP
+      usage documentation.
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: |
+      Unit/integration test asserting HTTP, CLI, and MCP return identical
+      shapes for the same underlying state; empty-lanes case returns empty,
+      not an error, on both new surfaces.
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review for contract fidelity (LaneRouterContract) and no duplicated query logic across surfaces.
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Code/heimdall
+  tech_stack:
+    languages: [typescript]
+  key_files:
+    - path: .pHive/planning/architecture.md
+      purpose: "LaneRouterContract binding shape — synchronous request/response on every surface"
+    - path: .pHive/planning/prd.md
+      purpose: "REQ-05 acceptance criteria, including the request/response contract note"
+
+design_decisions:
+  - decision: "One shared getLaneStatuses() core function backs HTTP, CLI, and MCP"
+    rationale: "Prevents logic duplication/drift across the three transports — matches architecture.md's explicit design."
+  - decision: "LaneRouterContract is synchronous request/response, never fire-and-forget, on every transport"
+    rationale: "Explicit operator note (2026-07-25): a fire-and-forget specialist shape can't answer 'any free lane?' — a caller needs the answer in the same call, not a later event."
+
+cross_cutting:
+  - concern: documentation
+    action: "README gains CLI usage and MCP tool registration sections — new user-facing surfaces introduced by this story."
+
+risks:
+  - severity: low
+    description: "No new business logic, just two more transports over an already-proven core function."
+    mitigation: "Test explicitly asserts identical shapes across all three surfaces to catch any accidental drift."
+
+references:
+  - path: .pHive/planning/architecture.md
+    relevant_excerpt: |
+      Binding shape: synchronous request/response on all three surfaces
+      (HTTP, CLI, MCP) — never fire-and-forget. A caller's query returns the
+      answer directly; there is no "subscribe and wait for a later event" path.

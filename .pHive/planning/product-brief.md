@@ -29,8 +29,8 @@ Mathew (and any operator running a multi-agent AI fleet) hand-manages which prov
 - Routing/splitting heuristic (task-type + headroom + cost-based lane selection), consuming Heimdall's status output as input. Must be easily A/B-testable/reconfigurable — no hard-coded "never use cheap tiers" rule.
 - A/B testing of routing heuristics using Heimdall's reported data.
 
-### P2 (later)
-- Standalone-only settings UI: sign up new agents/runtimes, see + verify them (v1 configured via file/API instead).
+### P2 (later — fast-follow epic after v1/P0 ships)
+- **Standalone settings UI** (scope confirmed 2026-07-25): a local web page served by the same Node service, gated by a config flag (e.g. `ui.enabled`) so it only mounts in standalone mode — no new tech stack, no separate frontend framework. Scope is **status view + runtime management**, not just read-only: shows current lane status (reusing REQ-05/LaneRouterContract as its data source) AND lets the operator sign up/add/verify new agents and runtimes from the UI. Deliberately its own epic, not folded into lane-health-status — v1/P0 stays lean and ships first.
 - Cross-account long-lived token minting/storage via Portunus (v1 uses a local `.env`/vault stopgap).
 
 ## Success Metrics

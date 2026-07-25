@@ -1,0 +1,95 @@
+id: lhs-04-codex-signal-adapters
+epic: lane-health-status
+title: "Codex signal adapters — prove the ProviderSignalAdapter pattern generalizes"
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [lhs-03f-claude-integration, lhs-00-signal-inventory-spike]
+parallel_allowed: true
+parallel_rationale: bounded-slice
+files_to_modify:
+  - file: src/core/signal-sources/public-status/codex.ts
+    change: new — Codex public status-page adapter (REQ-02), content informed by lhs-00's spike findings
+  - file: src/core/signal-sources/active-probe/codex.ts
+    change: new — Codex sparse active-probe adapter (REQ-03), content informed by lhs-00's spike findings
+
+description: |
+  Apply the same ProviderSignalAdapter pattern proven in lhs-03 to a second
+  provider, Codex, using lhs-00's spike findings for Codex. This is Vertical
+  Slice 4 — its explicit purpose is to prove the interface generalizes rather
+  than being accidentally Claude-shaped. No changes to status-model.ts or
+  lane-registry.ts are expected; if this story needs one, that's a signal the
+  interface needs revisiting, not a one-off special case for Codex.
+
+acceptance_criteria:
+  - "Given a Codex lane just handled a real agent request, when the response
+     or error returns, then Heimdall records the lane's inferred state and,
+     if exposed, the quota-reset time (REQ-01, reusing the generic passive.ts
+     from lhs-03 — no Codex-specific passive logic expected)."
+  - "Given Codex publishes a public status endpoint, when Heimdall checks it,
+     then the check consumes no per-lane API tokens and updates the
+     degraded/down signal if Codex reports an incident (REQ-02)."
+  - "Given passive and public-status signals for the Codex lane are stale or
+     insufficient, when the staleness threshold is exceeded, then Heimdall
+     performs one minimal-cost active check (REQ-03)."
+  - "Given the combined signal, when status is computed for the Codex lane,
+     then it resolves to exactly one of up | down | out_of_credit (with
+     reset_at if known) | degraded (REQ-04, reusing lhs-03's resolution logic
+     unchanged)."
+
+steps:
+  - id: research
+    description: Read lhs-00's signal-inventory.md findings for Codex specifically.
+    agent: researcher
+  - id: implement
+    description: |
+      Implement signal-sources/public-status/codex.ts and active-probe/
+      codex.ts following the exact pattern established in lhs-03's Claude
+      adapters. Do not modify status-model.ts or lane-registry.ts unless the
+      Codex signal shape genuinely cannot fit the existing interface.
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: |
+      Same test shape as lhs-03, applied to Codex: mock responses drive
+      passive observation, mock public-status incidents flag degraded/down,
+      staleness threshold triggers/skips active-probe correctly.
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: |
+      Review specifically for interface reuse — flag if this story required
+      changes to status-model.ts/lane-registry.ts, since that indicates the
+      Claude-only interface assumption from lhs-03 didn't hold.
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Code/heimdall
+  tech_stack:
+    languages: [typescript]
+  key_files:
+    - path: src/core/signal-sources/public-status/claude.ts
+      purpose: "reference implementation — the pattern this story should mirror for Codex"
+    - path: .pHive/epics/lane-health-status/docs/signal-inventory.md
+      purpose: "spike findings for Codex specifically"
+
+design_decisions:
+  - decision: "Build a second provider before adding transports (lhs-05) or the SLA harness (lhs-06)"
+    rationale: "Proves the adapter pattern generalizes before committing further investment on top of a possibly Claude-shaped interface."
+
+risks:
+  - severity: medium
+    description: "A rough or friction-heavy Codex adapter is itself a signal the interface needs revisiting, not just a harder provider."
+    mitigation: "Review step explicitly checks whether core files needed changes — that's the real risk signal for this story, not implementation difficulty per se."
+
+references:
+  - path: .pHive/epics/lane-health-status/docs/vertical-plan.md
+    relevant_excerpt: |
+      Slice 4: Second Provider (Codex) — Proves the Pattern Generalizes ...
+      Any interface friction found here gets fixed in status-model.ts/
+      lane-registry.ts rather than special-cased per provider.

@@ -1,0 +1,129 @@
+id: hdl-03-multica-autopilot-scheduler
+epic: hdl-scheduler
+title: "MulticaAutopilotScheduler — coarse cron backend via real Multica CLI"
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [hdl-01-scheduler-interface-argus-client]
+parallel_allowed: true
+parallel_rationale: bounded-slice
+files_to_modify:
+  - file: src/core/scheduler/multica-autopilot-scheduler.ts
+    change: new — implements Scheduler, registers a cron-driven Multica autopilot per lane via an injectable CommandRunner
+  - file: src/core/scheduler/command-runner.ts
+    change: "new — injectable CommandRunner interface + NodeCommandRunner (real execFile), split out during implementation"
+  - file: .env.example
+    change: "add MULTICA_AUTOPILOT_AGENT (required) and Argus OTLP endpoint overrides"
+
+implementation_note: |
+  CORRECTED DURING IMPLEMENTATION (2026-07-25) via direct live-CLI inspection
+  against the real, running Multica instance (`multica auth status` confirmed
+  authenticated; `multica autopilot --help`/`get`/`list --output json`):
+  registering a schedule is a TWO-STEP model, not the one-shot `trigger-add`
+  this story's original description assumed. `trigger-add <autopilot-id>`
+  requires a real server-assigned autopilot ID (a UUID) — it does not create
+  an autopilot, only adds a trigger to one that must already exist via
+  `multica autopilot create --title --mode --agent --description`. The
+  implementation checks for an existing autopilot by title (Multica's CLI has
+  no upsert-by-title verb itself) and an existing schedule trigger via `get`
+  before calling create/trigger-add, making start() idempotent across restarts.
+  Also added a `description` field to MulticaAutopilotSchedulerOptions —
+  supplied by the wiring layer (hdl-05), which knows the real refresh-trigger
+  command the dispatched agent should run.
+
+description: |
+  Implement the default, coarse scheduling backend: on start(), registers
+  (or confirms, since Multica's own reconciler upserts by title) a
+  cron-driven autopilot via the real `multica autopilot trigger-add
+  <autopilot-id> --kind schedule --cron "<cron>" --output json` CLI verb,
+  pointing at a configured agent (env var MULTICA_AUTOPILOT_AGENT — the
+  actual Multica-side agent that gets dispatched is provisioned separately,
+  cross-repo, out of scope here). Cron floor is exactly 1 minute — this
+  story must validate/reject cron expressions that violate it before
+  shelling out. Command execution goes through an injectable CommandRunner
+  so tests never touch a real multica daemon.
+
+acceptance_criteria:
+  - "Given a lane and a valid ≥1-minute cron expression, when start() is
+     called, then it invokes `multica autopilot trigger-add <autopilot-id>
+     --kind schedule --cron \"<cron>\" --output json` via the injected
+     CommandRunner with the correct arguments."
+  - "Given a cron expression that violates the 1-minute floor (e.g. contains
+     a seconds field or sub-minute interval), when start() is called, then
+     it rejects with a clear error BEFORE invoking the CommandRunner — never
+     silently shells out an invalid cron."
+  - "Given MULTICA_AUTOPILOT_AGENT is not configured, when start() is
+     called, then it fails clearly (not a silent no-op, not a crash of the
+     whole service) — REQ-07's 'never crash the whole service, but never
+     silently succeed either' pattern."
+  - "Given start() succeeds, when it completes, then it emits to Argus via
+     argus-client.ts's emitTick (registration itself counts as a scheduling
+     event worth recording)."
+
+steps:
+  - id: research
+    description: |
+      Re-confirm the exact `multica autopilot trigger-add` argument shape
+      against .pHive/epics/hdl-scheduler/docs/research-brief.md's findings
+      before implementing.
+    agent: researcher
+  - id: implement
+    description: |
+      Implement CommandRunner interface (injectable, mirrors the existing
+      fetchImpl injection pattern used throughout the codebase) and
+      MulticaAutopilotScheduler using it to shell out to the real multica
+      CLI shape. Validate cron expressions against the 1-minute floor
+      before invoking the runner.
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: |
+      Unit tests: correct command construction (mocked CommandRunner,
+      asserting exact args), sub-minute cron rejected before shelling out,
+      missing MULTICA_AUTOPILOT_AGENT fails clearly, Argus emission on
+      successful registration.
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review the exact CLI argument shape against the research brief's confirmed real-world usage.
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Code/heimdall
+  tech_stack:
+    languages: [typescript]
+  key_files:
+    - path: .pHive/epics/hdl-scheduler/docs/research-brief.md
+      purpose: "confirmed real multica CLI verb shape (trigger-add, hyphenated) and 1-minute cron floor enforcement details"
+
+design_decisions:
+  - decision: "Injectable CommandRunner, never shell out directly in a way that's untestable"
+    rationale: "Mirrors the existing fetchImpl injection pattern already established throughout the codebase (passive.ts, active-probe adapters) — consistent testing approach."
+  - decision: "Heimdall's repo scope stops at registering the autopilot pointing at a configured agent identifier — does not provision the Multica-side agent itself"
+    rationale: "Resolved design discussion open question #1 — agent provisioning is cross-repo, Multica's own concern."
+
+cross_cutting:
+  - concern: no-box-daemon
+    action: "This IS the sanctioned Multica-autopilot coarse ticker (not a standalone box cron) — implementation checklist requires the cron floor validation as an explicit enforcement point, not just documentation."
+  - concern: argus-otel-emit
+    action: "Successful autopilot registration emits to Argus."
+  - concern: documentation
+    action: ".env.example documents the required MULTICA_AUTOPILOT_AGENT variable and cron expression format."
+
+risks:
+  - severity: medium
+    description: "First real external-CLI shelling-out in this codebase; the research brief's confirmed command shape could still drift from Multica's actual current CLI if Multica itself changes."
+    mitigation: "Full command-construction testing without touching a live daemon; the review step explicitly re-checks against the research brief's citations."
+
+references:
+  - path: .pHive/epics/hdl-scheduler/docs/research-brief.md
+    relevant_excerpt: |
+      Real CLI verb: multica autopilot trigger-add <autopilot-id> --kind
+      schedule --cron "<5-field-cron>" --timezone <tz> ... Cron floor is
+      exactly 1 minute, standard 5-field cron (no seconds), enforced by
+      ComputeNextRun.

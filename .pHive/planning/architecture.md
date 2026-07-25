@@ -13,7 +13,7 @@ Source: `.pHive/planning/prd.md`. Covers REQ-00 through REQ-07.
 | Pantheon-mode interface | **MCP server** exposing the availability-query tool (REQ-05) | Lets any Claude-Code-based orchestrator (Auriga, or Mathew directly) call Heimdall as a tool with zero custom integration glue — this is the most natural "plug into Pantheon" surface given the ecosystem. |
 | State storage | **SQLite (local file, e.g. `~/.heimdall/state.sqlite`)** | Local-first, zero external dependency, matches the `~/.claude/hive/kg.sqlite` precedent already used elsewhere in this ecosystem. Holds per-lane status history, not just current state — needed for REQ-06 SLA verification and future uptime visibility (secondary success metric). |
 | Credential loading | **Local `.env` / simple vault file (REQ-07)**, one entry per lane | Deferred-Portunus stopgap per PRD; a thin `CredentialSource` interface so swapping in Portunus later (P2) doesn't touch calling code. |
-| Scheduler (for REQ-03 sparse active checks) | In-process interval timer + staleness check, not a separate cron/daemon | v1 scale (30+ agents, single coordinating instance — GAP-03 punts multi-instance to later) doesn't need distributed scheduling yet. |
+| Scheduler (for REQ-03 sparse active checks) | **SUPERSEDED post-P0 → pluggable, per-lane `Scheduler` interface** (see "Scheduler (post-P0)" section below and `docs/scheduler-constraints.md`). P0 shipped with `refresh()` invocable but no ticker; the post-P0 epic adds a Multica-autopilot cron backend (default, coarse ≥1min) + an in-process backend (fine ~5s, suspect-lane only). | The original "single in-process interval timer" plan is **superseded** by `DEC-hdl-scheduler-backend`: the `multica-native-no-box-runners` HARD LAW bars a standalone box cron/daemon, and per-lane cadences differ (status-page poll vs port ping vs suspect-lane 5s corroboration). Each lane owns its own check impl AND its own scheduler impl. |
 
 **Alternatives considered:**
 - *Python* — rejected: no natural MCP-server story as clean as Node's, and would fragment the toolchain from the rest of Hive/Pantheon tooling which is Node-centric.
@@ -89,6 +89,42 @@ CREATE INDEX idx_lane_status_latest ON lane_status_history(lane_id, observed_at 
 ```
 
 Current status = latest row per `lane_id` in `lane_status_history`. History is retained for SLA verification (REQ-06 test harness) and future uptime-visibility reporting (secondary success metric) — not just overwritten in place.
+
+## Scheduler (post-P0) — pluggable, per-lane
+
+**Decision of record:** `DEC-hdl-scheduler-backend` (Pantheon decision-log). Full hard
+constraints in [`docs/scheduler-constraints.md`](../../docs/scheduler-constraints.md).
+P0 shipped `LanePipeline.refresh()` invocable-but-unticked on purpose; this section is
+the binding input for the "pluggable per-lane Scheduler" epic.
+
+**Core principle — PER-LANE.** Each lane owns **two** impls, not one shared timer:
+1. **Health-check impl** — *how* the lane is checked (reuses the layered
+   `passive → public-status → active-probe` sources, composed per-lane: status-page
+   poll for Claude/Codex, port/`/health` ping for local Ollama, passive+sparse-probe
+   where there's no public page).
+2. **Scheduler impl / cadence** — *when/how often* `refresh(lane)` is called.
+
+`refresh()` stays UNTOUCHED — the scheduler only decides *when*. **Heimdall stays the checker.**
+
+**Backends each lane selects from:**
+- **`MulticaAutopilotScheduler` (DEFAULT, coarse ≥1min):** a Multica autopilot
+  `--kind schedule --cron` fires Heimdall's refresh (CLI/HTTP). Native, zero new box
+  daemon, HARD-LAW-compliant. Cron floor = 1 minute.
+- **`InProcessScheduler` (fine ~5s, suspect-lane only):** Heimdall's own service event
+  loop — engaged ONLY when a lane goes suspect/degraded (SLA harness needs 2 signals
+  inside a 10s window; cron can't go sub-minute), and **backs off when the lane is
+  healthy.** Legit because it is the service's own loop, NOT a standalone cron/launchd/
+  shell daemon. ⚠ Scope this tight — a fleet of lanes each hammering a constant 5s tick
+  is exactly the self-racing load the HARD LAW exists to prevent.
+
+**Emit to Argus over OTEL** — every tick + status-flip → OTLP (`4327/4328`) → Langfuse
+(traces/cost) + SigNoz (infra). Satisfies the decisions+metrics mandate and gives
+lane-health a dashboard with no UI built here. SQLite history stays; Argus gets the stream.
+
+**Build-vs-buy (scanned 2026-07-25):** Argus is observability (telemetry/cost), NOT
+lane-probing — no duplication; Multica autopilots are the sanctioned cron primitive
+(reused); provider-lane liveness is genuinely Heimdall's. **Banned:** any standalone box
+cron/launchd/shell-daemon ticker.
 
 ## Open Items Deferred to Post-Spike Design Pass
 

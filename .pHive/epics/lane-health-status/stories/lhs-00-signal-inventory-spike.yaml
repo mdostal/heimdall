@@ -1,0 +1,96 @@
+id: lhs-00-signal-inventory-spike
+epic: lane-health-status
+title: "Spike: per-provider signal inventory for Claude + Codex (REQ-00 gating spike)"
+status: pending
+complexity: medium
+methodology: classic
+depends_on: []
+parallel_allowed: true
+parallel_rationale: read-only
+files_to_modify:
+  - file: .pHive/epics/lane-health-status/docs/signal-inventory.md
+    change: write the signal inventory spike deliverable (new file, docs only)
+
+description: |
+  Produce a written inventory of what Claude (Claude Code) and Codex actually
+  expose that Heimdall's health-signal model can use: error codes on real
+  responses, quota-reset signal format (if any), payment-failure signal format
+  (if any), and public status-page machine-readability (structured API/RSS vs.
+  HTML-scrape-only). This is the load-bearing unknown flagged during discovery
+  (PRD REQ-00) — it gates the CONTENT of the public-status and active-probe
+  adapters for these two providers (stories lhs-03, lhs-04), but does not gate
+  the generic ProviderSignalAdapter interface or any other layer.
+
+  This is research output, not implementation — no adapter code gets written
+  in this story.
+
+acceptance_criteria:
+  - "Given the Claude (Claude Code) and Codex lanes, when their real API/CLI
+     responses and public status pages are inspected, then produce a written
+     inventory of: error codes seen, quota-reset signal format (if any),
+     payment-failure signal format (if any), and public status-page
+     machine-readability (structured API/RSS vs. HTML-scrape-only)."
+  - "Given the inventory is complete for both providers, when lhs-03/lhs-04
+     begin, then the health-signal design must cite this inventory as its
+     evidentiary basis, not assumption."
+
+steps:
+  - id: research
+    description: |
+      Inspect real Claude Code and Codex CLI/API responses (error cases,
+      rate-limit responses, auth failures) and their public status pages
+      (status.anthropic.com-style endpoints). Determine what's structured
+      (JSON/RSS) vs. HTML-only.
+    agent: researcher
+  - id: implement
+    description: |
+      Write the findings to .pHive/epics/lane-health-status/docs/signal-inventory.md
+      covering both providers: error codes, quota-reset signal format,
+      payment-failure signal format, status-page machine-readability.
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: |
+      No automated tests apply (docs-only spike). Verify the document answers
+      every question REQ-02/REQ-03 need before marking this story done.
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review the inventory for completeness against REQ-00's acceptance criteria.
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Code/heimdall
+  tech_stack: {}
+  key_files:
+    - path: .pHive/planning/prd.md
+      purpose: "REQ-00's full acceptance criteria and its explicit gating note"
+    - path: .pHive/planning/architecture.md
+      purpose: "the ProviderSignalAdapter interface this spike's findings feed into"
+
+design_decisions:
+  - decision: "Scope the spike to exactly 2 providers (Claude, Codex) — not all 6"
+    rationale: "Per the operator's standing PoC-first rule: nail 2-3 providers before designing further, rather than a full inventory across every provider up front."
+
+risks:
+  - severity: high
+    description: "Findings could force a change to the ProviderSignalAdapter interface shape in architecture.md."
+    mitigation: "This spike runs and gets reviewed before lhs-03/lhs-04 start, so any interface change happens before two providers' worth of adapter code exists, not after."
+
+references:
+  - path: .pHive/planning/prd.md
+    relevant_excerpt: |
+      REQ-00: Per-provider signal inventory PoC ... This spike blocks
+      Architecture sign-off — do not proceed to the Architecture document
+      until it is complete.
+  - path: .pHive/planning/product-discovery-brief.md
+    relevant_excerpt: |
+      Open Question #1 [GATING SPIKE — required before architecture locks] ...
+      PoC on 2-3 providers first (start with Claude and Codex, the two in
+      active daily use), then design the architecture around what's actually
+      observable.

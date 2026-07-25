@@ -1,0 +1,80 @@
+id: lhs-03d-staleness-escalation-logic
+epic: lane-health-status
+title: "Staleness/escalation logic — decides passive -> public-status -> active-probe order (REQ-01/02/03 orchestration)"
+status: pending
+complexity: low
+methodology: classic
+depends_on: [lhs-01-service-skeleton-fixture-http]
+parallel_allowed: true
+parallel_rationale: bounded-slice
+files_to_modify:
+  - file: src/core/signal-sources/escalation.ts
+    change: new — pure decision logic for which signal layer to consult and when to escalate to an active probe
+
+description: |
+  Implement the orchestration logic that decides, for a given lane query:
+  is the passive signal fresh enough to use? If not, is the public-status
+  signal fresh/sufficient? If neither, escalate to an active probe. This is
+  pure decision logic against the ProviderSignalAdapter interface shapes
+  (from architecture.md) — it does NOT implement any adapter itself and can
+  be built and unit-tested against mock adapter interfaces without waiting
+  for lhs-03a/03b/03c to be complete. Split out per operator request
+  (2026-07-25) as one of the smallest independently-testable pieces.
+
+acceptance_criteria:
+  - "Given passive and public-status signals are both stale or insufficient
+     for a lane, when the staleness threshold is exceeded, then this logic
+     signals that one active-probe check should run (REQ-03)."
+  - "Given a lane has recent passive or public-status signal, when queried,
+     then this logic does NOT signal a redundant active-probe check (REQ-03)."
+  - "Given no real traffic has hit a lane recently (passive signal absent),
+     when queried, then this logic falls back to public-status rather than
+     treating 'no passive signal' as 'lane is down' (REQ-01)."
+
+steps:
+  - id: implement
+    description: |
+      Implement src/core/signal-sources/escalation.ts as a pure function
+      taking (passiveSignal, publicStatusSignal, staleness thresholds) and
+      returning a decision: use-passive | use-public-status | escalate-to-probe.
+    agent: developer
+  - id: test
+    description: |
+      Unit tests covering: fresh passive (no escalation), stale passive +
+      fresh public-status (no escalation), both stale (escalate), no passive
+      signal at all (falls back, doesn't assume down).
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that this file contains zero provider-specific logic and zero direct I/O.
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Code/heimdall
+  tech_stack:
+    languages: [typescript]
+  key_files:
+    - path: .pHive/planning/architecture.md
+      purpose: "ProviderSignalAdapter interface shapes this decision logic operates against"
+
+design_decisions:
+  - decision: "Escalation/staleness decision logic lives in its own file, separate from any adapter or the resolution model"
+    rationale: "Can be built and unit-tested against mock interfaces in parallel with lhs-03a/03b/03c, per operator's finer-decomposition request — reduces per-story failure surface and lets pieces integrate cleanly at lhs-03f."
+
+risks:
+  - severity: medium
+    description: "Exact staleness threshold value is unspecified (PRD GAP-01) — this story implements the decision mechanism, not the tuned default."
+    mitigation: "Ship with a conservative placeholder threshold as a named constant/config value; tuning happens once lhs-06's SLA harness can measure real behavior."
+
+references:
+  - path: .pHive/planning/prd.md
+    relevant_excerpt: |
+      GAP-01: Exact per-provider staleness threshold for REQ-03 (how stale is
+      'stale enough to warrant a sparse active check') is undefined —
+      recommend resolving during Architecture, informed by REQ-00's spike
+      findings.

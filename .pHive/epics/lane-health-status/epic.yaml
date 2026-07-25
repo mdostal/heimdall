@@ -1,0 +1,86 @@
+name: lane-health-status
+title: "Heimdall v1 (P0) — Lane Health & Status"
+description: >
+  Health-aware status detection per lane (up/down/out_of_credit/degraded) via
+  a layered, token-conscious signal model (passive observation, public
+  status-page piggybacking, sparse active checks), exposed through a single
+  LaneRouterContract (synchronous request/response) across HTTP, CLI, and MCP
+  surfaces, meeting a 10-second status-correctness SLA. No routing/selection
+  logic ships in this epic — that's explicitly P1+. Gated by a per-provider
+  (Claude + Codex) signal-inventory spike before adapter content is built.
+target_codebase: /Users/mdostal/Code/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: committed
+
+git_flow:
+  base_branch: main       # no origin/develop remote exists; resolved manually (no git_flow.mjs vendored in this consumer repo)
+  branch_strategy: per-epic
+
+planning_team:
+  note: >
+    This epic was planned in a condensed single-pass synthesis (one agent
+    authoring design-discussion/H-plan/V-plan/stories directly from the
+    approved PRD+architecture) rather than via live multi-persona dispatch
+    through the planning-classification/planning-routing skills — those
+    require infrastructure (hive/lib helpers, teammate spawn) not vendored
+    into this consumer repo. Recorded here for transparency, not as
+    classifier output.
+  roles_represented: [analyst, architect, tpm, technical-writer]
+  matched_tags: [backend-service, api-contract-design, greenfield, gating-spike]
+
+stories:
+  - id: lhs-00-signal-inventory-spike
+    title: "Spike: per-provider signal inventory for Claude + Codex (REQ-00 gating spike)"
+    complexity: medium
+    depends_on: []
+  - id: lhs-01-service-skeleton-fixture-http
+    title: "Service skeleton + fixture-backed GET /lanes (LaneRouterContract shape proof)"
+    complexity: low
+    depends_on: []
+  - id: lhs-02-credential-loading-state-storage
+    title: "Real credential loading (REQ-07) + SQLite state storage"
+    complexity: medium
+    depends_on: [lhs-01-service-skeleton-fixture-http]
+  - id: lhs-03a-passive-observation-core
+    title: "Passive observation core — pure function, no provider-specific logic (REQ-01 mechanism)"
+    complexity: low
+    depends_on: [lhs-01-service-skeleton-fixture-http]
+  - id: lhs-03b-claude-public-status-adapter
+    title: "Claude public-status adapter (REQ-02) — single provider adapter, no other logic"
+    complexity: low
+    depends_on: [lhs-01-service-skeleton-fixture-http, lhs-00-signal-inventory-spike]
+  - id: lhs-03c-claude-active-probe-adapter
+    title: "Claude active-probe adapter (REQ-03) — single provider adapter, no scheduling logic"
+    complexity: low
+    depends_on: [lhs-02-credential-loading-state-storage, lhs-00-signal-inventory-spike]
+  - id: lhs-03d-staleness-escalation-logic
+    title: "Staleness/escalation logic — decides passive -> public-status -> active-probe order"
+    complexity: low
+    depends_on: [lhs-01-service-skeleton-fixture-http]
+  - id: lhs-03e-status-resolution-model
+    title: "4-state status resolution model (REQ-04) — pure function, no adapters, no I/O"
+    complexity: low
+    depends_on: [lhs-01-service-skeleton-fixture-http]
+  - id: lhs-03f-claude-integration
+    title: "Claude end-to-end integration — wire 03a-03e together, full REQ-01/02/03/04 integration test"
+    complexity: medium
+    depends_on:
+      - lhs-02-credential-loading-state-storage
+      - lhs-03a-passive-observation-core
+      - lhs-03b-claude-public-status-adapter
+      - lhs-03c-claude-active-probe-adapter
+      - lhs-03d-staleness-escalation-logic
+      - lhs-03e-status-resolution-model
+  - id: lhs-04-codex-signal-adapters
+    title: "Codex signal adapters — prove the ProviderSignalAdapter pattern generalizes"
+    complexity: medium
+    depends_on: [lhs-03f-claude-integration, lhs-00-signal-inventory-spike]
+  - id: lhs-05-cli-mcp-surfaces
+    title: "CLI + MCP query surfaces — LaneRouterContract complete across all three transports"
+    complexity: medium
+    depends_on: [lhs-03f-claude-integration]
+  - id: lhs-06-sla-verification-harness
+    title: "SLA verification harness — measure the 10-second status-correctness guarantee (REQ-06)"
+    complexity: medium
+    depends_on: [lhs-03f-claude-integration, lhs-04-codex-signal-adapters]

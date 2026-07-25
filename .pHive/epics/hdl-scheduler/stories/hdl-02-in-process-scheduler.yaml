@@ -1,0 +1,110 @@
+id: hdl-02-in-process-scheduler
+epic: hdl-scheduler
+title: "InProcessScheduler — fine ~5s ticker, suspect-lane only, engage/disengage"
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [hdl-01-scheduler-interface-argus-client]
+parallel_allowed: true
+parallel_rationale: bounded-slice
+files_to_modify:
+  - file: src/core/scheduler/in-process-scheduler.ts
+    change: new — implements Scheduler, per-lane ~5s timer engaged only for suspect/degraded/down/out_of_credit lanes
+
+description: |
+  Implement the fine in-process ticker: engages ONLY when
+  StateStore.getCurrentStatus(lane).status is degraded/down/out_of_credit
+  (poll-based, per the resolved design decision), calling
+  LanePipeline.refresh(lane) roughly every 5 seconds — fast enough for the
+  SLA harness's 2-consecutive-signal corroboration to complete inside the
+  10s window. Disengages immediately once the lane recovers to up (no
+  gradual backoff for v1). This is the service's OWN event loop — legitimate
+  under the multica-native-no-box-runners HARD LAW specifically because it
+  is narrowly scoped to suspect lanes and stops when healthy, NOT a
+  standalone always-on daemon.
+
+acceptance_criteria:
+  - "Given a lane's status is up, when InProcessScheduler evaluates it, then
+     the fine ticker is NOT engaged for that lane."
+  - "Given a lane's status becomes degraded, down, or out_of_credit, when
+     InProcessScheduler evaluates it, then the fine ~5s ticker engages and
+     calls LanePipeline.refresh(lane) on that cadence."
+  - "Given a suspect lane recovers to up, when the next evaluation occurs,
+     then the fine ticker disengages immediately (no gradual step-down)."
+  - "Given a tick's refresh() call is still in-flight when the next tick
+     would fire, when the timer elapses, then that tick is skipped rather
+     than overlapping (overlap guard)."
+  - "Given a tick's refresh() call throws, when the error occurs, then it is
+     caught and logged, and the next scheduled tick still fires (one bad
+     tick does not wedge the loop)."
+  - "Given any tick fires, when it completes, then it emits to Argus via
+     argus-client.ts's emitTick (and emitStatusFlip on a status change)."
+
+steps:
+  - id: research
+    description: Confirm StateStore.getCurrentStatus's return shape and LanePipeline.refresh's signature.
+    agent: researcher
+  - id: implement
+    description: |
+      Implement InProcessScheduler: a poll loop (setTimeout-recursion, not
+      setInterval) checking lane status each cycle, engaging/disengaging the
+      fine ~5s ticker accordingly, with overlap guard and error isolation.
+      Wire Argus emission via argus-client.ts.
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: |
+      Unit tests: engage on degraded/down/out_of_credit, disengage on up,
+      overlap guard skips an in-flight tick, a throwing refresh() doesn't
+      wedge the loop, Argus emission fires per tick and per status flip.
+      Use injectable timer functions (setTimeout/clearTimeout) for
+      deterministic, fast tests — no real 5-second waits.
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: |
+      Review specifically for HARD LAW compliance — confirm this cannot
+      degrade into "ticks every lane all the time" under any code path.
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Code/heimdall
+  tech_stack:
+    languages: [typescript]
+  key_files:
+    - path: src/core/lane-pipeline.ts
+      purpose: "LanePipeline.refresh(lane) — the untouched function this scheduler invokes"
+    - path: src/core/state-store.ts
+      purpose: "getCurrentStatus(laneId) — how this scheduler decides engage/disengage"
+    - path: docs/scheduler-constraints.md
+      purpose: "HARD LAW constraint this story must satisfy: in-process ticking scoped to suspect lanes only, backs off when healthy"
+
+design_decisions:
+  - decision: "Poll-based engagement (checks StateStore status) rather than event-driven"
+    rationale: "Resolved design discussion open question — simpler, fits existing codebase patterns better than adding new LanePipeline-to-scheduler coupling."
+  - decision: "Immediate stop on recovery, no gradual backoff curve"
+    rationale: "Resolved design discussion open question — simplest interpretation of 'backs off when healthy' for v1."
+
+cross_cutting:
+  - concern: no-box-daemon
+    action: "This IS the sanctioned in-process service loop (not a standalone box cron/daemon) — implementation checklist requires proving suspect-lane-only scoping and healthy-lane disengagement explicitly in tests."
+  - concern: argus-otel-emit
+    action: "Every tick and status-flip emits to Argus via argus-client.ts (hdl-01)."
+
+risks:
+  - severity: medium
+    description: "The engage/disengage + overlap/error invariants are the most behaviorally subtle piece of this epic — a bug here is exactly the self-racing load the HARD LAW exists to prevent."
+    mitigation: "Explicit tests for disengagement-on-recovery, not just engagement-on-degradation; explicit overlap-guard and error-isolation tests."
+
+references:
+  - path: .pHive/planning/architecture.md
+    relevant_excerpt: |
+      InProcessScheduler (fine ~5s, suspect-lane only) ... engaged ONLY when
+      a lane goes suspect/degraded ... backs off when the lane is healthy.
+      Legit because it is the service's own loop, NOT a standalone cron/
+      launchd/shell daemon.
