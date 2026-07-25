@@ -22,3 +22,5 @@ npm-debug.log*
 # explicitly as it's created (adds `!.pHive/epics/<id>/` + `!.pHive/epics/<id>/**`
 # below this line).
 .pHive/epics/*
+!.pHive/epics/lane-health-status/
+!.pHive/epics/lane-health-status/**

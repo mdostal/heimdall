@@ -1,0 +1,76 @@
+id: lhs-03b-claude-public-status-adapter
+epic: lane-health-status
+title: "Claude public-status adapter (REQ-02) — single provider adapter, no other logic"
+status: pending
+complexity: low
+methodology: classic
+depends_on: [lhs-01-service-skeleton-fixture-http, lhs-00-signal-inventory-spike]
+parallel_allowed: true
+parallel_rationale: bounded-slice
+files_to_modify:
+  - file: src/core/signal-sources/public-status/claude.ts
+    change: new — fetches + parses Claude's public status endpoint, returns an incident/ok signal
+
+description: |
+  Implement exactly one thing: fetch Claude's public status page/endpoint
+  (per lhs-00's spike findings for machine-readability) and parse it into an
+  incident/ok signal, with no per-lane token cost. Does not decide when to
+  call this (that's lhs-03d's job) and does not combine this signal with
+  anything else (that's lhs-03e's job). Split out per operator request
+  (2026-07-25) as one of the smallest independently-testable pieces of the
+  original lhs-03 scope.
+
+acceptance_criteria:
+  - "Given Claude publishes a public status endpoint, when this adapter
+     checks it, then the check consumes no per-lane API tokens and returns
+     whether Claude currently reports an incident (REQ-02)."
+  - "Given Claude's status page is HTML-only per lhs-00's findings, when this
+     adapter is implemented, then the scrape/parse approach used is
+     documented inline as more brittle than a structured source would be."
+
+steps:
+  - id: research
+    description: Read lhs-00's signal-inventory.md findings for Claude's public status endpoint specifically.
+    agent: researcher
+  - id: implement
+    description: Implement src/core/signal-sources/public-status/claude.ts per the spike findings.
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: |
+      Unit tests with mocked HTTP responses: a clean status page, a page
+      reporting an incident, and a fetch failure (network error) case.
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review for token-cost neutrality (no API tokens spent) and correct incident parsing.
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Code/heimdall
+  tech_stack:
+    languages: [typescript]
+  key_files:
+    - path: .pHive/epics/lane-health-status/docs/signal-inventory.md
+      purpose: "spike findings for Claude's public status endpoint machine-readability"
+
+design_decisions:
+  - decision: "One adapter, one provider, no orchestration logic in this file"
+    rationale: "Smallest independently-testable unit per operator's finer-decomposition request."
+
+risks:
+  - severity: low
+    description: "If Claude's status page is HTML-scrape-only, layout changes could silently break parsing."
+    mitigation: "Flagged explicitly in the acceptance criteria and inline docs — not silently trusted the same as a structured source."
+
+references:
+  - path: .pHive/planning/prd.md
+    relevant_excerpt: |
+      REQ-02: Public status-page piggybacking ... the check consumes no
+      per-lane API tokens and updates the lane's degraded/down signal if the
+      provider reports an incident.

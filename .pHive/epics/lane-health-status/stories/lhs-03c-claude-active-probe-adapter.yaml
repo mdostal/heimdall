@@ -1,0 +1,78 @@
+id: lhs-03c-claude-active-probe-adapter
+epic: lane-health-status
+title: "Claude active-probe adapter (REQ-03) — single provider adapter, no scheduling logic"
+status: pending
+complexity: low
+methodology: classic
+depends_on: [lhs-02-credential-loading-state-storage, lhs-00-signal-inventory-spike]
+parallel_allowed: true
+parallel_rationale: bounded-slice
+files_to_modify:
+  - file: src/core/signal-sources/active-probe/claude.ts
+    change: new — performs one minimal-cost real call against a Claude lane, returns a signal
+
+description: |
+  Implement exactly one thing: given a Claude lane's credentials (from
+  lhs-02's CredentialSource), perform one minimal-cost real call and return
+  the resulting signal (up/down/degraded-leaning, informed by lhs-00's spike
+  findings for what a real error/response looks like). Does NOT decide WHEN
+  to call this (that's lhs-03d's staleness/escalation logic) — this story is
+  purely "given permission to probe, what does probing Claude look like."
+  Split out per operator request (2026-07-25).
+
+acceptance_criteria:
+  - "Given a Claude lane's credential is available, when this adapter is
+     invoked, then it performs one minimal-cost real call (never just
+     `--version`) and returns the resulting signal (REQ-03)."
+  - "Given the call fails (auth error, network error, rate limit), when this
+     adapter handles the response, then it returns a corresponding signal
+     rather than throwing an unhandled exception."
+
+steps:
+  - id: research
+    description: Read lhs-00's signal-inventory.md findings for what a minimal-cost real Claude call and its failure modes look like.
+    agent: researcher
+  - id: implement
+    description: Implement src/core/signal-sources/active-probe/claude.ts using lhs-02's CredentialSource.
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: |
+      Unit tests with a mocked Claude client: success case, auth-failure case,
+      rate-limit case, network-error case — each mapped to the correct signal.
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that the probe is genuinely minimal-cost and that every failure mode returns a signal, not an exception.
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Code/heimdall
+  tech_stack:
+    languages: [typescript]
+  key_files:
+    - path: .pHive/epics/lane-health-status/docs/signal-inventory.md
+      purpose: "spike findings for Claude's minimal-cost probe shape and failure signatures"
+    - path: src/core/credential-source.ts
+      purpose: "CredentialSource this adapter reads Claude lane credentials from (built in lhs-02)"
+
+design_decisions:
+  - decision: "One adapter, one provider, no scheduling/staleness logic in this file"
+    rationale: "Smallest independently-testable unit per operator's finer-decomposition request; scheduling is lhs-03d's concern."
+
+risks:
+  - severity: low-medium
+    description: "A poorly chosen 'minimal-cost' call could still be more expensive than intended if lhs-00's findings are incomplete."
+    mitigation: "Review step explicitly checks cost-minimality, not just functional correctness."
+
+references:
+  - path: .pHive/planning/prd.md
+    relevant_excerpt: |
+      REQ-03: Sparse active light checks ... run an occasional minimal-cost
+      active check (not `--version` — must reflect a real call) to confirm
+      reachability.

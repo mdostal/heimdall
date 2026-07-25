@@ -1,0 +1,99 @@
+id: lhs-01-service-skeleton-fixture-http
+epic: lane-health-status
+title: "Service skeleton + fixture-backed GET /lanes (LaneRouterContract shape proof)"
+status: pending
+complexity: low
+methodology: classic
+depends_on: []
+parallel_allowed: true
+parallel_rationale: bounded-slice
+files_to_modify:
+  - file: package.json
+    change: new Node.js/TypeScript project manifest
+  - file: tsconfig.json
+    change: new TypeScript config
+  - file: src/core/status-model.ts
+    change: new — LaneStatus type/shape only (up/down/out_of_credit/degraded), no resolution logic yet
+  - file: src/api/http-server.ts
+    change: new — GET /lanes serving a hardcoded fixture array matching the LaneRouterContract shape
+  - file: README.md
+    change: new — project setup + how to run the dev server
+
+description: |
+  Scaffold the Node.js/TypeScript project and stand up a GET /lanes HTTP
+  endpoint that returns a hardcoded fixture array matching the exact
+  LaneRouterContract response shape from architecture.md (lane_id, provider,
+  status, reset_at, reason, last_updated, signal_source). No real credential
+  loading, signal detection, or state storage yet — this proves the contract
+  shape end-to-end before any real logic exists. This is Vertical Slice 1 from
+  vertical-plan.md.
+
+acceptance_criteria:
+  - "Given the service is running, when GET /lanes is called, then it returns
+     a 200 response whose JSON shape exactly matches the LaneRouterContract
+     schema in architecture.md (lane_id, provider, status, reset_at, reason,
+     last_updated, signal_source)."
+  - "Given the response, when inspected, then `status` is one of exactly
+     up | down | out_of_credit | degraded (REQ-04's 4-state model, type-level
+     only at this stage — no real resolution logic required yet)."
+
+steps:
+  - id: research
+    description: Confirm the exact LaneRouterContract JSON shape from architecture.md before scaffolding.
+    agent: researcher
+  - id: implement
+    description: |
+      Scaffold package.json/tsconfig.json, implement src/core/status-model.ts
+      (type definitions only) and src/api/http-server.ts serving GET /lanes
+      from a hardcoded fixture array. Write README.md covering install + run.
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: |
+      Unit test asserting GET /lanes returns the correct shape and that
+      `status` values are constrained to the 4-state enum.
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review for shape fidelity against architecture.md's API Contract section.
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Code/heimdall
+  tech_stack:
+    languages: [typescript, javascript]
+    frameworks: []
+  key_files:
+    - path: .pHive/planning/architecture.md
+      purpose: "canonical LaneRouterContract API shape and component tree this scaffold must match"
+
+design_decisions:
+  - decision: "Node.js + TypeScript"
+    rationale: "Matches the Pantheon/Hive ecosystem (plugin-hive's own hive/lib is Node/TS) and gives a clean path to an MCP server later (lhs-05) with no cross-language bridge."
+
+cross_cutting:
+  - concern: documentation
+    action: "README.md documents project setup and how to run the dev server — first doc introducing this project's structure."
+
+risks:
+  - severity: low
+    description: "None significant — pure scaffold with no real integration points."
+    mitigation: "n/a"
+
+references:
+  - path: .pHive/planning/architecture.md
+    relevant_excerpt: |
+      GET /lanes → 200 OK [{ "lane_id": ..., "provider": ..., "status": "up" |
+      "down" | "out_of_credit" | "degraded", "reset_at": ..., "reason": ...,
+      "last_updated": ..., "signal_source": "passive" | "public_status" |
+      "active_probe" }]
+  - path: .pHive/epics/lane-health-status/docs/vertical-plan.md
+    relevant_excerpt: |
+      Slice 1: Service Skeleton + Fixture-Backed HTTP — GET /lanes on a local
+      Node/TS service returns a correctly-shaped (but hardcoded/fixture) list
+      of lane statuses matching the LaneRouterContract.

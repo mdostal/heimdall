@@ -1,0 +1,95 @@
+id: lhs-06-sla-verification-harness
+epic: lane-health-status
+title: "SLA verification harness — measure the 10-second status-correctness guarantee (REQ-06)"
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [lhs-03f-claude-integration, lhs-04-codex-signal-adapters]
+files_to_modify:
+  - file: test/sla-harness/index.ts
+    change: new — synthetic harness that flips a mock lane's simulated health state and measures time-to-correct-query-response
+  - file: test/sla-harness/report.md
+    change: new — recorded measurement results against the 10s SLA target
+
+description: |
+  Build a synthetic test harness that flips a mock lane's simulated health
+  state (up -> down, down -> up, up -> degraded, etc.) and measures the time
+  until a subsequent query (via any of the three surfaces) reflects the
+  correct new state. This verifies REQ-06's 10-second SLA is actually MET by
+  the layered signal model built in lhs-03/lhs-04 — measured, not asserted.
+  This is the final slice (Vertical Slice 6) — v1 (P0) is complete once this
+  passes.
+
+acceptance_criteria:
+  - "Given a lane's actual health state changes (degrades, goes down,
+     recovers), when up to 10 seconds elapse, then a subsequent query via the
+     availability tool/API reflects the new correct state (REQ-06)."
+  - "Given the SLA is met via the layered model (passive/public-status/active-
+     probe), when validated, then the test does not rely on literal
+     fixed-interval active polling as the mechanism (REQ-06) — i.e. the
+     harness must assert the SLA holds without asserting a specific
+     active-probe cadence as the cause."
+  - "Given the harness runs against both Claude and Codex mock lanes, when
+     results are recorded, then test/sla-harness/report.md documents the
+     measured latency for each state transition tested."
+
+steps:
+  - id: research
+    description: |
+      Review lhs-03/lhs-04's signal-source implementations to determine what
+      hooks the harness needs (e.g. how to inject a simulated state change
+      without hitting real provider APIs).
+    agent: researcher
+  - id: implement
+    description: |
+      Implement test/sla-harness/index.ts: mock lane state injection, timing
+      instrumentation around query calls, and a report generator writing
+      results to test/sla-harness/report.md.
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: |
+      Run the harness against representative state transitions (up->down,
+      down->up, up->degraded, up->out_of_credit) for both mock Claude and
+      Codex lanes; confirm all measured latencies are <=10s.
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: |
+      Review the harness design itself for whether it's actually testing
+      detection latency (not just asserting a hardcoded pass) and whether the
+      report is legible.
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Code/heimdall
+  tech_stack:
+    languages: [typescript]
+  key_files:
+    - path: .pHive/planning/prd.md
+      purpose: "REQ-06 acceptance criteria — the exact SLA contract this harness verifies"
+
+design_decisions:
+  - decision: "Build a custom harness rather than reuse an existing test framework"
+    rationale: "Nothing off-the-shelf fits 'flip mock lane state, measure time-to-correct-response' — flagged explicitly in design-discussion.md's verification strategy."
+
+risks:
+  - severity: low-medium
+    description: "Designing a good synthetic harness for 'time to correct status' is its own small design problem."
+    mitigation: "Isolated to test-only code — does not touch production signal-detection logic, so risk is contained."
+
+references:
+  - path: .pHive/planning/prd.md
+    relevant_excerpt: |
+      REQ-06: 10-second status-correctness SLA ... no test relies on literal
+      fixed-interval active polling as the mechanism.
+  - path: .pHive/epics/lane-health-status/docs/design-discussion.md
+    relevant_excerpt: |
+      Tools: ... a custom synthetic harness for the SLA measurement (REQ-06)
+      — no existing framework fits "flip mock lane state, measure
+      time-to-correct-response."
