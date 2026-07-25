@@ -1,0 +1,90 @@
+project_name: "heimdall"
+type: greenfield
+discovered: "2026-07-25"
+source: "docs/north-star.md + kickoff discovery conversation"
+
+ship_target:
+  kind: github-release
+
+project_type: service
+has_ui: false
+
+notes: |
+  Hybrid classification, captured verbatim from kickoff discovery (2026-07-25):
+  - Primary classification is `service`: a health-aware router/dispatcher that
+    other components call (the Auriga orchestrator, per-dispatch). Secondary
+    framework/plugin-interface surface lets it plug into Pantheon or be
+    consumed by any harness capable of multi-agent spin-up.
+  - has_ui=false describes the core headless service only. A light
+    standalone-only settings UI is planned for signing up/verifying new
+    agents & runtimes when NOT running inside Pantheon; inside Pantheon that
+    config surface lives in Vesta/Multica instead, not in Heimdall.
+  - Distribution property (applies to every Pantheon "god", not just
+    Heimdall — see docs/north-star.md "Finalized kickoff classification"):
+    every plugin ships OSS + standalone-capable (works with any multi-agent
+    harness) AND as a Pantheon plugin (fuller vision via Auriga/Vesta/Multica).
+    This is a distribution property, not a project_type change.
+
+tech_stack:
+  languages: []
+  frameworks: []
+  build_tools: []
+  package_managers: []
+  versions: {}
+  # Greenfield: no code yet. Populated during the Architecture step of the
+  # greenfield product-kickoff pipeline (.pHive/planning/architecture.md).
+
+integrations:
+  cli_tools:
+    linearis: missing
+    frame0: missing
+    codex: detected
+    maestro: missing
+  mcp_servers:
+    firecrawl: missing
+    context7: missing
+    posthog: missing
+    firebase: missing
+    mobile-mcp: missing
+  vaults:
+    obsidian: detected  # desktop app + obsidian-cli socket present; no project-specific vault path configured
+
+north_star:
+  goal: >
+    Be the Pantheon's health-aware LLM/lane router: automate spreading agent
+    work across providers and accounts by available headroom, replacing
+    Mathew's manual account/runtime juggling. Router interface consumed by
+    the Auriga orchestrator per-dispatch; ships as both a standalone service
+    (any multi-agent-capable harness) and a Pantheon plugin.
+  audience: >
+    Internal/operator-facing: Mathew today, generalizing to any operator
+    running a multi-agent fleet across multiple provider accounts (Claude,
+    Codex, Gemini, OpenRouter, Kimi, Ollama, etc.), whether standalone or via
+    the Pantheon (Auriga orchestrator).
+  expected_scale: >
+    Bursty, scales with attached compute/workstations. v1 target: consistent
+    30+ concurrent agents, designed to grow toward ~300 as hardware/instances
+    are added. Multiple accounts per provider (e.g. 2-5 Claude Code
+    subscriptions, or per-workstation configs) across Claude, Codex, Gemini,
+    OpenRouter, Kimi K3, and others. Heimdall is the gating layer
+    distinguishing active / out-of-credit-will-reactivate / provider-down /
+    overloaded lane states.
+  pain_points: >
+    Manual long-lived runtime/token juggling across accounts and workstations
+    today (stopgap: local .env/vault per workstation before Portunus
+    integration); OAuth and other silent runtime hangs that produce false
+    failures, corrupt metrics, drop work, and halt operations.
+  success: >
+    No manual routing required; full visibility into spreading with
+    OTel-style metrics reported out (Heimdall reports the data, doesn't have
+    to own the metrics stack) — realistic downtime/health-check visibility;
+    ability to toggle routes on/off for A/B testing of routing heuristics.
+  avoid: >
+    Don't rebuild a full gateway/full stack from scratch — research and
+    leverage what exists (Vercel AI Gateway/AI SDK, OpenRouter, etc.) and
+    link them up where subscriptions allow; local health-checked routing is
+    still needed since subscriptions often don't federate through those
+    gateways. Don't hard-code cheap-tier avoidance as an absolute rule —
+    routing heuristics (including whether cheap tiers are acceptable) must
+    be easily A/B-testable/reconfigurable, potentially driven by the request
+    itself; PoC this.

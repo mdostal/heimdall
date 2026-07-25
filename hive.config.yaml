@@ -1,0 +1,28 @@
+# Heimdall — Hive consumer override config
+# This is the repository-local override layer. Missing keys fall through to
+# the shipped baseline in the plugin-hive plugin (`hive/hive.config.yaml`).
+# See hive/references/configuration.md for the two-file contract.
+
+schema_version: "1.2"
+
+# Opt-in at kickoff (2026-07-25). Enables metric-driven meta-optimization;
+# see hive/references/kickoff-protocol.md Step 1a.
+metrics:
+  enabled: true
+
+# Developer preferences (Phase 1b greenfield elicitation, 2026-07-25 — static
+# defaults, no codebase yet to infer test-first/PR-history signals from).
+developer:
+  pr_style: single-commit
+  commit_granularity: feature-scoped
+  review_depth: standard
+  notes: "Prefers collaborative review gates when they meaningfully improve output quality — keep planning.collaborative_review on."
+
+planning:
+  collaborative_review: true
+
+meta_team:
+  github_forwarding: false
+
+execution:
+  default_methodology: classic

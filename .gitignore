@@ -1,0 +1,24 @@
+# Node
+node_modules/
+dist/
+build/
+*.log
+npm-debug.log*
+
+# Secrets — REQ-07 credential loading reads from this; never commit it
+.env
+.env.*
+!.env.example
+
+# Hive: session-local runtime/telemetry state — not project history
+.pHive/agent-complete/
+.pHive/interrupts/
+.pHive/metrics/
+.pHive/session-effort.txt
+.pHive/test-artifacts/
+.pHive/test-baseline/
+
+# Hive: epics are blanket-ignored by default; /plan allowlists each epic dir
+# explicitly as it's created (adds `!.pHive/epics/<id>/` + `!.pHive/epics/<id>/**`
+# below this line).
+.pHive/epics/*
