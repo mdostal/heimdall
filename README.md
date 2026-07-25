@@ -44,11 +44,35 @@ npm run dev
 ```
 
 Starts the HTTP server on `http://localhost:4870` (override with `PORT=<n>`).
-`GET /lanes` now reads real lane declarations + a SQLite state store (override
-the DB path with `HEIMDALL_DB_PATH`, default in-memory) — see
-[`.pHive/epics/lane-health-status/docs/vertical-plan.md`](.pHive/epics/lane-health-status/docs/vertical-plan.md)
-Slice 2. Status values are still placeholders (`down`/`unconfigured` for every
-lane) until real signal detection lands (lhs-03f).
+`GET /lanes` reads real lane declarations + a SQLite state store (override the
+DB path with `HEIMDALL_DB_PATH`, default in-memory), reflecting whatever the
+Claude/Codex signal pipeline (`src/core/lane-pipeline.ts`) last persisted —
+see [`.pHive/epics/lane-health-status/docs/vertical-plan.md`](.pHive/epics/lane-health-status/docs/vertical-plan.md).
+
+## Query lane status — CLI
+
+```bash
+npm run cli                    # JSON output (default)
+npm run cli -- --format table  # human-readable table
+```
+
+Reads the same lane declarations + state store as the HTTP server and calls
+the identical `getLaneStatuses()` core function — no separate query logic.
+
+## Query lane status — MCP
+
+```bash
+npm run mcp
+```
+
+Runs an MCP server over stdio exposing one tool, `heimdall.lanes.list`, that
+returns the same data as `GET /lanes` and the CLI. Register it with any
+MCP-capable client (e.g. Claude Code) by pointing at `npm run mcp` (or the
+compiled `dist/api/mcp-server.js` after `npm run build`) as the server
+command. All three surfaces — HTTP, CLI, MCP — are synchronous
+request/response per the `LaneRouterContract` (see
+`.pHive/planning/architecture.md`): a query always returns the answer
+directly, never "subscribe and wait."
 
 ## Test
 
