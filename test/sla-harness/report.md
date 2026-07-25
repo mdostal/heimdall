@@ -7,7 +7,7 @@ Target SLA: status-correctness within 10000ms of an actual state change (REQ-06)
 | up_stays_up | 1 | 0.05 | up | up | ✅ |
 | up_to_degraded_single_tick | 1 | 0.04 | degraded | degraded | ✅ |
 | up_to_down_requires_two_ticks | 2 | 0.08 | down | down | ✅ |
-| down_to_recovered_single_tick | 3 | 0.14 | up | up | ✅ |
+| down_to_recovered_single_tick | 3 | 0.12 | up | up | ✅ |
 
 ## Scenario notes
 
