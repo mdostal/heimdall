@@ -1,0 +1,15 @@
+epic_id: lane-health-status
+created: "2026-07-25T00:00:00Z"
+methodology: classic
+notes: >
+  Execution running via the /plugin-hive:execute entry point without the
+  full hive/lib runtime vendored into this consumer repo (no dag_executor,
+  no task-tracking-dispatch, no episode-marker infra on disk here). The
+  orchestrator (this session) is dispatching each story to an Agent
+  teammate in topological-dependency order, batched by readiness, and
+  tracking completion via TaskCreate/TaskUpdate + git commits on
+  feat/lane-health-status instead of episode YAML markers. This is a
+  deliberate, transparent degradation — not a claim that the full
+  episode/telemetry substrate ran.
+escalations: []
+handoff_log: []
