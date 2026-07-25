@@ -1,0 +1,90 @@
+id: hdl-04-actuation-stub
+epic: hdl-scheduler
+title: "Actuation stub — third interaction mode (status-change event, future runtime on/off)"
+status: pending
+complexity: low
+methodology: classic
+depends_on: [hdl-01-scheduler-interface-argus-client]
+parallel_allowed: true
+parallel_rationale: bounded-slice
+files_to_modify:
+  - file: src/core/scheduler/actuation-stub.ts
+    change: new — onStatusChange(lane, from, to) fired on genuine status transitions, stub action only
+
+description: |
+  Scaffold Heimdall's third interaction mode (alongside the already-built
+  agent-call/MCP and API-call/HTTP+CLI surfaces): an action/event interface
+  that fires when a lane's status genuinely changes, intended to eventually
+  toggle that lane's agent runtime on/off in Multica. This story builds ONLY
+  the stub — it records/logs the intended action (e.g. "would disable
+  runtime for lane X: up -> down") without calling any real Multica
+  runtime-toggle API, since that API/contract doesn't exist yet and is
+  explicitly future scope per the operator's own framing ("one stub for an
+  action/event like system").
+
+acceptance_criteria:
+  - "Given a lane's status changes from one value to a genuinely different
+     value, when the transition is observed, then onStatusChange(lane, from,
+     to) fires exactly once for that transition."
+  - "Given a lane's status is queried repeatedly without changing, when
+     observed, then onStatusChange does NOT fire again for the same status."
+  - "Given onStatusChange fires, when it executes, then it records the
+     intended action (e.g. via a log line or an in-memory record) without
+     making any real network/CLI call to Multica — this is a stub, not live
+     actuation."
+
+steps:
+  - id: implement
+    description: |
+      Implement actuation-stub.ts: a function/small class comparing a lane's
+      previous and current status, firing onStatusChange exactly once per
+      genuine transition, and recording (log line, minimal) the stubbed
+      intended action.
+    agent: developer
+  - id: test
+    description: |
+      Unit tests: fires once per genuine transition, does not fire on
+      repeated identical status, makes no real external call (verified by
+      absence of any network/CommandRunner dependency in this file).
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: |
+      Review to confirm this stays a stub — flag if any real Multica
+      runtime-toggle API call snuck in, since that's explicitly out of
+      scope for this story.
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Code/heimdall
+  tech_stack:
+    languages: [typescript]
+  key_files:
+    - path: .pHive/epics/hdl-scheduler/docs/design-discussion.md
+      purpose: "operator's resolved framing of the 3 interaction modes and the explicit 'stub only' scope for this third one"
+
+design_decisions:
+  - decision: "Stub only — no real Multica runtime-toggle API call in this story"
+    rationale: "Explicit operator instruction: 'one stub for an action/event like system.' The real actuation contract doesn't exist yet and is future scope."
+
+cross_cutting:
+  - concern: documentation
+    action: "Document this as an explicit future-extension stub in the README/architecture, not a completed feature."
+
+risks:
+  - severity: low
+    description: "Minimal — deliberately scoped to a stub with no external dependencies."
+    mitigation: "n/a"
+
+references:
+  - path: .pHive/epics/hdl-scheduler/docs/design-discussion.md
+    relevant_excerpt: |
+      NEW: action/event stub — fires on a lane status change, intended to
+      eventually toggle that lane's runtime on/off in Multica. Build as a
+      stub this epic (interface + a logged/no-op action, not full
+      Multica-runtime-toggle wiring).

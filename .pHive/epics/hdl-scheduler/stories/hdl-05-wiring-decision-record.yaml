@@ -1,0 +1,111 @@
+id: hdl-05-wiring-decision-record
+epic: hdl-scheduler
+title: "Entrypoint wiring (src/main.ts) + DEC-hdl-scheduler-backend decision record"
+status: pending
+complexity: medium
+methodology: classic
+depends_on:
+  - hdl-02-in-process-scheduler
+  - hdl-03-multica-autopilot-scheduler
+  - hdl-04-actuation-stub
+files_to_modify:
+  - file: src/main.ts
+    change: new — real service entrypoint composing registry+store+Argus client+both schedulers+actuation stub+HTTP server
+  - file: docs/decisions/DEC-hdl-scheduler-backend.md
+    change: new — formal decision record superseding the original single-timer architecture note
+  - file: package.json
+    change: "update dev script to run src/main.ts instead of src/api/http-server.ts directly"
+  - file: README.md
+    change: "document the real service startup path and the two scheduler backends"
+
+description: |
+  Compose everything built in hdl-01 through hdl-04 into the actual running
+  service: src/main.ts builds the lane registry, state store, and Argus
+  client, constructs one MulticaAutopilotScheduler per lane (always-on
+  default) plus the shared InProcessScheduler poll loop (which engages
+  per-lane based on status), wires the actuation stub to fire on status
+  changes, and starts the HTTP server. Also formalizes
+  docs/decisions/DEC-hdl-scheduler-backend.md — the decision record already
+  referenced by three other files in this repo but never actually written —
+  reflecting what was actually built, not just the original plan.
+
+acceptance_criteria:
+  - "Given src/main.ts's composition function is called with a configured
+     lane registry, when it runs, then every lane gets a
+     MulticaAutopilotScheduler started AND the shared InProcessScheduler
+     poll loop is running."
+  - "Given a lane is seeded as degraded in the state store, when the
+     composition runs, then InProcessScheduler's fine ticker engages for
+     that specific lane (verified via the poll loop's engagement logic from
+     hdl-02, exercised end-to-end here)."
+  - "Given docs/decisions/DEC-hdl-scheduler-backend.md, when read, then it
+     documents: the two-backend shape, the multica-native-no-box-runners
+     HARD LAW constraint, the Argus emit requirement, and supersedes the
+     original 'single in-process interval timer' plan with a clear
+     before/after."
+
+steps:
+  - id: research
+    description: Confirm all four prior stories' exported functions/classes to compose correctly in src/main.ts.
+    agent: researcher
+  - id: implement
+    description: |
+      Implement src/main.ts's composition function and entrypoint block.
+      Write docs/decisions/DEC-hdl-scheduler-backend.md. Update package.json's
+      dev script and README.
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: |
+      Integration test: the composition function wires all lanes with a
+      MulticaAutopilotScheduler (mocked CommandRunner) and correctly engages
+      InProcessScheduler for a seeded-degraded lane.
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: |
+      Review the decision record for completeness against the three files
+      that already reference DEC-hdl-scheduler-backend, confirming no
+      contradictions remain.
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Code/heimdall
+  tech_stack:
+    languages: [typescript]
+  key_files:
+    - path: docs/scheduler-constraints.md
+      purpose: "the binding constraints doc this decision record formalizes"
+    - path: .pHive/planning/architecture.md
+      purpose: "the Scheduler (post-P0) section referencing DEC-hdl-scheduler-backend"
+    - path: .pHive/cross-cutting-concerns.yaml
+      purpose: "the no-box-daemon and argus-otel-emit concerns this decision record should cross-reference"
+
+design_decisions:
+  - decision: "Decision record lives at docs/decisions/DEC-hdl-scheduler-backend.md in this repo"
+    rationale: "No Pantheon-wide decisions-directory convention exists (plugin-hive's hive/decisions/ uses numbered filenames, is plugin-hive's own log) — this is Heimdall's own decision, recorded in Heimdall's own repo."
+
+cross_cutting:
+  - concern: documentation
+    action: "This story's entire second deliverable IS a documentation artifact (the decision record); README also updated for the new startup path."
+  - concern: no-box-daemon
+    action: "Composition function must not introduce any standalone timer/cron outside the two sanctioned backends — reviewed explicitly."
+  - concern: argus-otel-emit
+    action: "Verify end-to-end that ticks flowing through the composed service reach the Argus client."
+
+risks:
+  - severity: low-medium
+    description: "Integration/wiring risk — did every piece actually compose correctly — but no new business logic."
+    mitigation: "Integration test exercises the real composition function, not just each piece in isolation."
+
+references:
+  - path: .pHive/epics/hdl-scheduler/docs/vertical-plan.md
+    relevant_excerpt: |
+      Slice 5: Entrypoint Wiring + Decision Record ... src/main.ts starts the
+      real service ... The decision record ... formalizes what was actually
+      built.

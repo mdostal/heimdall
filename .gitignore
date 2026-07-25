@@ -24,3 +24,5 @@ npm-debug.log*
 .pHive/epics/*
 !.pHive/epics/lane-health-status/
 !.pHive/epics/lane-health-status/**
+!.pHive/epics/hdl-scheduler/
+!.pHive/epics/hdl-scheduler/**

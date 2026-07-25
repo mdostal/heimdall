@@ -1,0 +1,55 @@
+name: hdl-scheduler
+title: "Pluggable Per-Lane Scheduler (post-P0)"
+description: >
+  Adds the when/how-often layer on top of the fully-built, untouched
+  LanePipeline.refresh(). Per-lane pluggable Scheduler interface with two
+  backends: MulticaAutopilotScheduler (default, coarse cron >=1min floor,
+  real multica CLI) and InProcessScheduler (fine ~5s, suspect-lane only,
+  the service's own event loop — never a standalone box daemon, per the
+  multica-native-no-box-runners HARD LAW). Every tick + status-flip emits
+  OTEL to Argus. Also scaffolds a third interaction mode (an actuation
+  stub for future Multica runtime on/off toggling) and formalizes
+  DEC-hdl-scheduler-backend.
+target_codebase: /Users/mdostal/Code/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: committed
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+planning_team:
+  note: >
+    Condensed single-pass synthesis (same approach as lane-health-status) —
+    one agent authoring design-discussion/H-plan/V-plan/stories directly,
+    informed by a dedicated Explore-agent research pass on Multica/Argus/
+    monitoring repos, rather than live multi-persona dispatch. Recorded for
+    transparency, not as classifier output.
+  roles_represented: [analyst, architect, tpm, technical-writer]
+  matched_tags: [scheduler, external-integration, observability, hard-law-compliance]
+
+stories:
+  - id: hdl-01-scheduler-interface-argus-client
+    title: "Scheduler interface + Argus OTEL telemetry client"
+    complexity: low
+    depends_on: []
+  - id: hdl-02-in-process-scheduler
+    title: "InProcessScheduler — fine ~5s ticker, suspect-lane only, engage/disengage"
+    complexity: medium
+    depends_on: [hdl-01-scheduler-interface-argus-client]
+  - id: hdl-03-multica-autopilot-scheduler
+    title: "MulticaAutopilotScheduler — coarse cron backend via real Multica CLI"
+    complexity: medium
+    depends_on: [hdl-01-scheduler-interface-argus-client]
+  - id: hdl-04-actuation-stub
+    title: "Actuation stub — third interaction mode (status-change event, future runtime on/off)"
+    complexity: low
+    depends_on: [hdl-01-scheduler-interface-argus-client]
+  - id: hdl-05-wiring-decision-record
+    title: "Entrypoint wiring (src/main.ts) + DEC-hdl-scheduler-backend decision record"
+    complexity: medium
+    depends_on:
+      - hdl-02-in-process-scheduler
+      - hdl-03-multica-autopilot-scheduler
+      - hdl-04-actuation-stub
