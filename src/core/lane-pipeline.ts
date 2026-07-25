@@ -1,24 +1,29 @@
-// Claude end-to-end integration (lhs-03f) — wires the independently-built
-// pieces (lhs-03a passive core, lhs-03b Claude public-status adapter, lhs-03c
-// Claude active-probe adapter, lhs-03d escalation logic, lhs-03e resolution
-// model) into one real pipeline for a Claude lane, persisting through
-// lhs-02's state-store.
+// End-to-end signal pipeline (lhs-03f Claude integration, generalized in
+// lhs-04 to prove the ProviderSignalAdapter pattern actually holds across
+// providers). Wires the independently-built pieces (lhs-03a passive core,
+// per-provider public-status/active-probe adapters, lhs-03d escalation
+// logic, lhs-03e resolution model) into one real pipeline, persisting
+// through lhs-02's state-store.
 //
-// Named lane-pipeline.ts rather than folding this into lane-registry.ts (the
-// story's original file guess) — lane-registry.ts stays focused on
-// declaration + credential resolution; this file owns the per-refresh signal
-// pipeline. Behavior/acceptance criteria are what lhs-03f's story YAML
-// specifies; file layout is an implementation-time call.
+// Originally written as a Claude-only `ClaudeLanePipeline` in lhs-03f; when
+// lhs-04 needed the same pipeline for Codex, hardcoding Claude's adapter
+// functions directly would have meant either duplicating this whole class
+// or leaving lhs-04 unable to reuse it — exactly the interface friction
+// lhs-04's design intent calls out ("gets fixed in status-model.ts/
+// lane-registry.ts rather than special-cased per provider"). Generalized to
+// `LanePipeline`, parameterized by a `ProviderAdapters` pair, so the same
+// class serves every provider with zero per-provider branching inside it.
 //
-// refreshClaudeLaneStatus() is meant to be invoked periodically by a
-// scheduler (or on-demand) — NOT on every GET /lanes request, per the
-// discovery brief's token-conscious design principle. GET /lanes
-// (http-server.ts) just reads whatever this pipeline last persisted to the
-// state-store.
+// LanePipeline.refresh() is meant to be invoked periodically by a scheduler
+// (or on-demand) — NOT on every GET /lanes request, per the discovery
+// brief's token-conscious design principle. GET /lanes (http-server.ts)
+// just reads whatever this pipeline last persisted to the state-store.
 
 import { observePassiveSignal, type ResponseLike } from "./signal-sources/passive.js";
 import { checkClaudePublicStatus } from "./signal-sources/public-status/claude.js";
 import { probeClaudeLane } from "./signal-sources/active-probe/claude.js";
+import { checkCodexPublicStatus } from "./signal-sources/public-status/codex.js";
+import { probeCodexLane } from "./signal-sources/active-probe/codex.js";
 import {
   decideSignalSource,
   resolveWithCorroboration,
@@ -41,6 +46,24 @@ export interface RefreshDeps {
   fetchImpl?: typeof fetch;
 }
 
+/** The two provider-specific functions every ProviderSignalAdapter pair must
+ * supply — everything else in LanePipeline is provider-agnostic. */
+export interface ProviderAdapters {
+  checkPublicStatus(fetchImpl?: typeof fetch): Promise<{ status: string; reason: string | null }>;
+  probe(
+    credential: string,
+    fetchImpl?: typeof fetch,
+  ): Promise<{ status: LaneStatusValue; reset_at: string | null; reason: string | null }>;
+}
+
+export function claudeAdapters(): ProviderAdapters {
+  return { checkPublicStatus: checkClaudePublicStatus, probe: probeClaudeLane };
+}
+
+export function codexAdapters(): ProviderAdapters {
+  return { checkPublicStatus: checkCodexPublicStatus, probe: probeCodexLane };
+}
+
 /**
  * Owns per-lane corroboration state (the last RAW, pre-corroboration verdict
  * seen for each lane) across repeated refresh calls. Deliberately
@@ -56,12 +79,13 @@ export interface RefreshDeps {
  * genuinely stuck receiving real "down" signals would never resolve past
  * "degraded", since each comparison would be against its own downgraded output.
  */
-export class ClaudeLanePipeline {
+export class LanePipeline {
   private readonly lastRawVerdictByLane = new Map<string, LaneStatusValue>();
 
   constructor(
     private readonly store: StateStore,
     private readonly deps: RefreshDeps,
+    private readonly adapters: ProviderAdapters,
   ) {}
 
   async refresh(lane: Lane): Promise<void> {
@@ -87,7 +111,7 @@ export class ClaudeLanePipeline {
     }
 
     if (decision.action === "use-public-status") {
-      const signal = await checkClaudePublicStatus(this.deps.fetchImpl);
+      const signal = await this.adapters.checkPublicStatus(this.deps.fetchImpl);
       this.persistResolved(lane.lane_id, resolveStatus(signal), "public_status", now);
       return;
     }
@@ -109,7 +133,7 @@ export class ClaudeLanePipeline {
       return;
     }
 
-    const probe = await probeClaudeLane(lane.credential, this.deps.fetchImpl);
+    const probe = await this.adapters.probe(lane.credential, this.deps.fetchImpl);
     this.persistResolved(lane.lane_id, resolveStatus(probe), "active_probe", now);
   }
 

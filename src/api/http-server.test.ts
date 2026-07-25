@@ -6,7 +6,7 @@ import { LaneRegistry } from "../core/lane-registry.js";
 import { StateStore } from "../core/state-store.js";
 import { EnvCredentialSource } from "../core/credential-source.js";
 import { LANE_STATUS_VALUES, SIGNAL_SOURCES } from "../core/status-model.js";
-import { ClaudeLanePipeline } from "../core/lane-pipeline.js";
+import { LanePipeline, claudeAdapters } from "../core/lane-pipeline.js";
 
 function registryWithOneConfiguredLane(): LaneRegistry {
   const env = { CLAUDE_TOKEN: "secret" };
@@ -63,16 +63,20 @@ test("GET /lanes reflects a status persisted by the Claude signal pipeline (lhs-
   const lane = registry.get("claude@mathew.dostal");
   assert.ok(lane);
 
-  const pipeline = new ClaudeLanePipeline(store, {
-    now: () => "2026-07-25T12:00:00.000Z",
-    lastPassiveResponse: () => null,
-    fetchImpl: (async (url: unknown) => {
-      if (typeof url === "string" && url.includes("status.claude.com")) {
-        return { ok: true, status: 200, json: async () => ({ components: [] }) } as Response;
-      }
-      return { ok: true, status: 200, headers: { get: () => null } } as unknown as Response;
-    }) as typeof fetch,
-  });
+  const pipeline = new LanePipeline(
+    store,
+    {
+      now: () => "2026-07-25T12:00:00.000Z",
+      lastPassiveResponse: () => null,
+      fetchImpl: (async (url: unknown) => {
+        if (typeof url === "string" && url.includes("status.claude.com")) {
+          return { ok: true, status: 200, json: async () => ({ components: [] }) } as Response;
+        }
+        return { ok: true, status: 200, headers: { get: () => null } } as unknown as Response;
+      }) as typeof fetch,
+    },
+    claudeAdapters(),
+  );
   await pipeline.refresh(lane!);
 
   const server = createHttpServer(registry, store);
