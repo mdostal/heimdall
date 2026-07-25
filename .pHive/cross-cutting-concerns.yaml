@@ -14,3 +14,42 @@ concerns:
       - "All docs referencing changed behavior identified"
       - "Affected sections updated to reflect new behavior"
       - "No stale references to old behavior remain"
+
+  - id: no-box-daemon
+    name: No standalone box cron/daemon (multica-native HARD LAW)
+    description: >
+      Any story that adds scheduling, ticking, polling, or background execution must
+      use a Multica autopilot (coarse, cron, >=1min) OR the service's own in-process
+      event loop (fine, suspect-lane only, with back-off). NEVER a standalone box
+      cron / launchd / shell-daemon — that races the swarm and is barred by the
+      multica-native-no-box-runners HARD LAW. Decision of record: DEC-hdl-scheduler-backend.
+    applies_when: >
+      Story introduces or modifies a Scheduler, ticker, interval/cron trigger,
+      background poller, or any recurring/unattended invocation of refresh().
+    planning_prompt: >
+      What drives this recurrence — a Multica autopilot cron (coarse >=1min) or the
+      service's own in-process loop (fine ~5s, suspect-lane only, backs off when healthy)?
+      Confirm no standalone box cron/launchd/shell-daemon is introduced.
+    implementation_checklist:
+      - "Recurrence driven by Multica autopilot cron OR in-process service loop — not a box daemon"
+      - "In-process fine (~5s) ticking is scoped to suspect/degraded lanes and backs off when healthy"
+      - "refresh() logic untouched — scheduler only decides when/how-often"
+
+  - id: argus-otel-emit
+    name: Emit decisions + metrics to Argus over OTEL
+    description: >
+      Any story that produces a health signal, status flip, scheduler tick, or a
+      decision must emit it to Argus (the Pantheon observability god) over OTLP
+      (host 4327 gRPC / 4328 HTTP → Langfuse traces/cost + SigNoz infra). Satisfies
+      the every-tool-logs-decisions-and-metrics mandate so KPIs are real, and gives
+      lane-health a dashboard without Heimdall building its own UI.
+    applies_when: >
+      Story adds/changes a status resolution, scheduler tick, lane-state transition,
+      or any operator-visible decision.
+    planning_prompt: >
+      Which events here are decisions/metrics/status-flips, and what OTEL span/metric
+      does each emit to Argus? Confirm Argus receives the stream (SQLite history stays local).
+    implementation_checklist:
+      - "Ticks and status-flips emit OTLP to Argus (4327/4328)"
+      - "Decisions emitted in the shared decision-record shape (decision_id, source, classifier, decision, ts)"
+      - "No new bespoke UI — Argus/Langfuse/SigNoz is the dashboard"
