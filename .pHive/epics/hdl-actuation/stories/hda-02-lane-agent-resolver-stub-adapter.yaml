@@ -1,0 +1,88 @@
+id: hda-02-lane-agent-resolver-stub-adapter
+epic: hdl-actuation
+title: "LaneAgentResolver + ControlAdapter interface + StubControlAdapter"
+status: pending
+complexity: low
+methodology: classic
+depends_on: []
+parallel_allowed: true
+parallel_rationale: bounded-slice
+files_to_modify:
+  - file: src/core/actuation/lane-agent-resolver.ts
+    change: new — LaneAgentResolver interface + StaticLaneAgentResolver (env-driven)
+  - file: src/core/actuation/control-adapter.ts
+    change: new — ControlAdapter interface + StubControlAdapter (wraps hdl-04's ActuationStub)
+
+description: |
+  Two small, independent pieces: (1) resolving a lane_id to its Multica
+  agent ID(s) via explicit env config (HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS,
+  comma-separated) behind a LaneAgentResolver interface, so a v2 auto-
+  discovery resolver can drop in later without touching any control-adapter
+  code; (2) the ControlAdapter interface (reconcile(lane, status), called
+  every sense-loop tick for every lane) plus StubControlAdapter, which wraps
+  the existing ActuationStub (hdl-04) unchanged — loud logging on genuine
+  transitions only, for any lane with no Multica agent mapping.
+
+acceptance_criteria:
+  - "Given HEIMDALL_LANE_1_MULTICA_AGENT_IDS=agent-a,agent-b, when
+     StaticLaneAgentResolver.resolve('lane-1-id') is called (mapped via the
+     lane's declared index), then it returns ['agent-a', 'agent-b']."
+  - "Given a lane with no HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS declared, when
+     resolved, then it returns an empty array — not an error, not undefined."
+  - "Given StubControlAdapter.reconcile(lane, status) is called across a
+     genuine status transition, when observed, then it logs loudly exactly
+     once for that transition (reusing hdl-04's ActuationStub transition
+     logic) and never for repeated identical status."
+
+steps:
+  - id: implement
+    description: |
+      Implement lane-agent-resolver.ts (interface + StaticLaneAgentResolver
+      parsing comma-separated env values) and control-adapter.ts (ControlAdapter
+      interface + StubControlAdapter wrapping ActuationStub from hdl-04).
+    agent: developer
+  - id: test
+    description: |
+      Unit tests: comma-separated parsing, empty-for-unmapped-lane,
+      StubControlAdapter transition-only loud logging (mirroring hdl-04's
+      existing test shapes).
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that StubControlAdapter genuinely reuses ActuationStub rather than duplicating its transition-detection logic.
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Code/heimdall
+  tech_stack:
+    languages: [typescript]
+  key_files:
+    - path: src/core/scheduler/actuation-stub.ts
+      purpose: "existing hdl-04 ActuationStub — StubControlAdapter wraps this, doesn't reimplement it"
+
+design_decisions:
+  - decision: "LaneAgentResolver is its own interface, separate from ControlAdapter"
+    rationale: "Resolved design discussion Open Question #1 — keeps 'which agents does this lane map to' decoupled from 'what do I do about it', so a v2 discovery-based resolver drops in without touching the control adapter."
+  - decision: "Unmapped lanes get StubControlAdapter, never silent no-op"
+    rationale: "Resolved Open Question #2 — visible/debuggable behavior over silent inaction."
+
+cross_cutting:
+  - concern: documentation
+    action: ".env.example gains HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS documentation."
+
+risks:
+  - severity: low
+    description: "Low — straightforward env parsing and reuse of already-proven transition-detection logic."
+    mitigation: "n/a"
+
+references:
+  - path: .pHive/epics/hdl-actuation/docs/design-discussion.md
+    relevant_excerpt: |
+      RESOLVED: explicit env-var config. HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS
+      ... Behind a LaneAgentResolver interface so a v2 auto-discovery
+      resolver can drop in later ... Static now, discovery-ready.
