@@ -56,8 +56,8 @@ export interface ComposedService {
 }
 
 export function composeService(options: ComposeServiceOptions = {}): ComposedService {
-  const port = options.port ?? Number(process.env.PORT ?? 4870);
   const env = options.env ?? process.env;
+  const port = options.port ?? Number(env.PORT ?? 4870);
   const argus = options.argus ?? new ArgusClient();
   const actuationStub = new ActuationStub();
 
@@ -96,6 +96,7 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
       description:
         `Trigger a Heimdall lane refresh by sending: ` +
         `POST http://localhost:${port}/lanes/${encodeURIComponent(lane.lane_id)}/refresh`,
+      agent: env.MULTICA_AUTOPILOT_AGENT,
       commandRunner: options.commandRunner,
       argus,
     });

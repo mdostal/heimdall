@@ -19,9 +19,11 @@ function testEnv(): NodeJS.ProcessEnv {
   };
 }
 
-function mockCommandRunner(): CommandRunner {
-  return {
+function mockCommandRunner(): { runner: CommandRunner; calls: string[][] } {
+  const calls: string[][] = [];
+  const runner: CommandRunner = {
     run: async (_command: string, args: string[]) => {
+      calls.push(args);
       const verb = args[1];
       if (verb === "list") return { stdout: JSON.stringify({ autopilots: [] }), stderr: "" };
       if (verb === "create")
@@ -37,6 +39,7 @@ function mockCommandRunner(): CommandRunner {
       return { stdout: "{}", stderr: "" };
     },
   };
+  return { runner, calls };
 }
 
 function mockFetch(): typeof fetch {
@@ -48,10 +51,25 @@ function mockFetch(): typeof fetch {
   }) as typeof fetch;
 }
 
-test("composeService wires one MulticaAutopilotScheduler + one InProcessScheduler per configured lane", () => {
+async function eventually(assertion: () => void): Promise<void> {
+  let lastError: unknown;
+  for (let i = 0; i < 20; i++) {
+    try {
+      assertion();
+      return;
+    } catch (err) {
+      lastError = err;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+  throw lastError;
+}
+
+test("composeService wires and starts one MulticaAutopilotScheduler + one InProcessScheduler per configured lane", async () => {
+  const { runner, calls } = mockCommandRunner();
   const service = composeService({
     env: testEnv(),
-    commandRunner: mockCommandRunner(),
+    commandRunner: runner,
     fetchImpl: mockFetch(),
     skipHttpListen: true,
     port: 0,
@@ -61,13 +79,20 @@ test("composeService wires one MulticaAutopilotScheduler + one InProcessSchedule
   assert.equal(service.inProcessSchedulers.length, 2);
   assert.equal(service.pipelines.size, 2);
 
+  await eventually(() => {
+    const createCalls = calls.filter((args) => args[0] === "autopilot" && args[1] === "create");
+    assert.equal(createCalls.length, 2);
+    assert.ok(createCalls.every((args) => args.includes("dostal-dev")));
+  });
+
   service.stopAll();
 });
 
 test("a lane seeded as degraded gets engaged by its InProcessScheduler end-to-end", async () => {
+  const { runner } = mockCommandRunner();
   const service = composeService({
     env: testEnv(),
-    commandRunner: mockCommandRunner(),
+    commandRunner: runner,
     fetchImpl: mockFetch(),
     skipHttpListen: true,
     port: 0,
@@ -93,6 +118,7 @@ test("a lane seeded as degraded gets engaged by its InProcessScheduler end-to-en
 });
 
 test("unknown provider is skipped gracefully — no pipeline/scheduler crash for the whole service", () => {
+  const { runner } = mockCommandRunner();
   const env = testEnv();
   env.HEIMDALL_LANE_3_ID = "some-new-provider-lane";
   env.HEIMDALL_LANE_3_PROVIDER = "gemini"; // not registered in PROVIDER_ADAPTERS yet
@@ -101,7 +127,7 @@ test("unknown provider is skipped gracefully — no pipeline/scheduler crash for
 
   const service = composeService({
     env,
-    commandRunner: mockCommandRunner(),
+    commandRunner: runner,
     fetchImpl: mockFetch(),
     skipHttpListen: true,
     port: 0,
@@ -115,9 +141,10 @@ test("unknown provider is skipped gracefully — no pipeline/scheduler crash for
 });
 
 test("POST /lanes/:laneId/refresh works end-to-end against the composed service", async () => {
+  const { runner } = mockCommandRunner();
   const service = composeService({
     env: testEnv(),
-    commandRunner: mockCommandRunner(),
+    commandRunner: runner,
     fetchImpl: mockFetch(),
     skipHttpListen: true,
     port: 0,

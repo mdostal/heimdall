@@ -89,6 +89,12 @@ export class LanePipeline {
   ) {}
 
   async refresh(lane: Lane): Promise<void> {
+    this.store.upsertLane({
+      lane_id: lane.lane_id,
+      provider: lane.provider,
+      credential_ref: lane.credential_ref,
+    });
+
     const now = this.deps.now();
     const decision = decideSignalSource({
       now,
