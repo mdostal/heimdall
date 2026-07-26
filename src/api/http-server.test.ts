@@ -62,6 +62,7 @@ test("GET /lanes reflects a status persisted by the Claude signal pipeline (lhs-
   const store = new StateStore(":memory:");
   const lane = registry.get("claude@mathew.dostal");
   assert.ok(lane);
+  store.upsertLane({ lane_id: lane.lane_id, provider: lane.provider, credential_ref: lane.credential_ref });
 
   const pipeline = new LanePipeline(
     store,
