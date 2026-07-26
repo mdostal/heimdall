@@ -19,6 +19,45 @@ test("an undeclared lane returns null, not a fabricated status", () => {
   store.close();
 });
 
+test("recordStatus() never violates the lanes FK, even without a prior upsertLane() call", () => {
+  const store = new StateStore(":memory:");
+
+  assert.doesNotThrow(() =>
+    store.recordStatus({
+      lane_id: "never-upserted",
+      status: "up",
+      reset_at: null,
+      reason: null,
+      signal_source: "active_probe",
+      observed_at: "2026-07-25T12:00:00.000Z",
+    }),
+  );
+
+  const status = store.getCurrentStatus("never-upserted");
+  assert.equal(status?.status, "up");
+  store.close();
+});
+
+test("recordStatus()'s FK guard does not clobber a lane's real provider/credential_ref already on file", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+
+  store.recordStatus({
+    lane_id: "claude@mathew.dostal",
+    status: "up",
+    reset_at: null,
+    reason: null,
+    signal_source: "active_probe",
+    observed_at: "2026-07-25T12:00:00.000Z",
+  });
+
+  const lanes = store.listLanes().map((lane) => ({ ...lane }));
+  assert.deepEqual(lanes, [
+    { lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" },
+  ]);
+  store.close();
+});
+
 test("current status = latest row per lane_id", () => {
   const store = new StateStore(":memory:");
   store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
