@@ -21,6 +21,22 @@ test("loadLaneDeclarations reads contiguous HEIMDALL_LANE_N_* triples", () => {
   });
 });
 
+test("loadLaneDeclarations carries optional credential scope metadata for brokered refs", () => {
+  const declarations = loadLaneDeclarations({
+    HEIMDALL_LANE_1_ID: "claude@shared",
+    HEIMDALL_LANE_1_PROVIDER: "claude",
+    HEIMDALL_LANE_1_CREDENTIAL_REF: "portunus:shared-anthropic",
+    HEIMDALL_LANE_1_CREDENTIAL_SCOPE: "shared",
+  });
+
+  assert.deepEqual(declarations[0], {
+    lane_id: "claude@shared",
+    provider: "claude",
+    credential_ref: "portunus:shared-anthropic",
+    credential_scope: "shared",
+  });
+});
+
 test("stops at the first gap in numbering", () => {
   const env = {
     HEIMDALL_LANE_1_ID: "claude@mathew.dostal",

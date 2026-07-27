@@ -17,7 +17,7 @@
 // pause/active toggle; archive/restore cancels in-flight tasks, it is not a
 // safe pause. The real actuation lever is max_concurrent_tasks.
 
-import { EnvCredentialSource, type CredentialSource } from "../credential-source.js";
+import { buildCredentialSource, type CredentialSource } from "../credential-source.js";
 
 export type MulticaCallResult<T> =
   | { status: "ok"; data: T }
@@ -91,8 +91,8 @@ export class MulticaRestClient {
       );
     }
 
-    const credentialSource = options.credentialSource ?? new EnvCredentialSource(env);
-    const tokenRef = options.tokenRef ?? DEFAULT_TOKEN_REF;
+    const credentialSource = options.credentialSource ?? buildCredentialSource(env);
+    const tokenRef = options.tokenRef ?? env.MULTICA_PAT_TOKEN_REF ?? DEFAULT_TOKEN_REF;
     const token = credentialSource.resolve(tokenRef);
     if (!token) {
       throw new Error(

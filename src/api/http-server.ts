@@ -5,13 +5,13 @@
 // See .pHive/epics/lane-health-status/stories/lhs-02-credential-loading-state-storage.yaml
 
 import { createServer, type Server } from "node:http";
-import { EnvCredentialSource } from "../core/credential-source.js";
+import { buildCredentialSource } from "../core/credential-source.js";
 import { loadLaneDeclarations, LaneRegistry } from "../core/lane-registry.js";
 import { StateStore } from "../core/state-store.js";
 import type { LaneStatus } from "../core/status-model.js";
 
 export function buildLaneRegistry(env: NodeJS.ProcessEnv = process.env): LaneRegistry {
-  return new LaneRegistry(loadLaneDeclarations(env), new EnvCredentialSource(env));
+  return new LaneRegistry(loadLaneDeclarations(env), buildCredentialSource(env));
 }
 
 export function getLaneStatuses(registry: LaneRegistry, store: StateStore): LaneStatus[] {
