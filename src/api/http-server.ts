@@ -9,6 +9,7 @@ import { EnvCredentialSource } from "../core/credential-source.js";
 import { loadLaneDeclarations, LaneRegistry } from "../core/lane-registry.js";
 import { StateStore } from "../core/state-store.js";
 import type { LaneStatus } from "../core/status-model.js";
+import type { Route } from "../core/route-table.js";
 
 export function buildLaneRegistry(env: NodeJS.ProcessEnv = process.env): LaneRegistry {
   return new LaneRegistry(loadLaneDeclarations(env), new EnvCredentialSource(env));
@@ -37,13 +38,33 @@ export function getLaneStatuses(registry: LaneRegistry, store: StateStore): Lane
  * here" from "no such route").
  */
 export type RefreshLaneFn = (laneId: string) => Promise<void>;
+export type GetConfirmedRoutesFn = () => Promise<Route[]>;
 
 export function createHttpServer(
   registry: LaneRegistry,
   store: StateStore,
   refreshLane?: RefreshLaneFn,
+  getConfirmedRoutes?: GetConfirmedRoutesFn,
 ): Server {
   return createServer((req, res) => {
+    if (req.method === "GET" && req.url === "/routes") {
+      if (!getConfirmedRoutes) {
+        res.writeHead(501, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "routes_not_configured" }));
+        return;
+      }
+      getConfirmedRoutes()
+        .then((routes) => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify(routes));
+        })
+        .catch((err) => {
+          res.writeHead(500, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "routes_failed", message: String(err) }));
+        });
+      return;
+    }
+
     if (req.method === "GET" && req.url === "/lanes") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(getLaneStatuses(registry, store)));

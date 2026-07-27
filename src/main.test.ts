@@ -95,9 +95,9 @@ test("a lane seeded as degraded gets engaged by its InProcessScheduler end-to-en
 test("unknown provider is skipped gracefully — no pipeline/scheduler crash for the whole service", () => {
   const env = testEnv();
   env.HEIMDALL_LANE_3_ID = "some-new-provider-lane";
-  env.HEIMDALL_LANE_3_PROVIDER = "gemini"; // not registered in PROVIDER_ADAPTERS yet
-  env.HEIMDALL_LANE_3_CREDENTIAL_REF = "GEMINI_TOKEN";
-  env.GEMINI_TOKEN = "fake";
+  env.HEIMDALL_LANE_3_PROVIDER = "unknown-provider"; // not registered in PROVIDER_ADAPTERS yet
+  env.HEIMDALL_LANE_3_CREDENTIAL_REF = "UNKNOWN_TOKEN";
+  env.UNKNOWN_TOKEN = "fake";
 
   const service = composeService({
     env,

@@ -21,14 +21,15 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { buildLaneRegistry, getLaneStatuses } from "./http-server.js";
+import { buildLaneRegistry, getLaneStatuses, type GetConfirmedRoutesFn } from "./http-server.js";
 import { StateStore } from "../core/state-store.js";
 import type { LaneRegistry } from "../core/lane-registry.js";
 
 export const LANES_LIST_TOOL_NAME = "heimdall.lanes.list";
+export const ROUTES_GET_TOOL_NAME = "heimdall.routes.get";
 
-export function listLaneToolsDescriptor() {
-  return [
+export function listLaneToolsDescriptor(hasRoutesTool: boolean = false) {
+  const tools = [
     {
       name: LANES_LIST_TOOL_NAME,
       description:
@@ -36,6 +37,15 @@ export function listLaneToolsDescriptor() {
       inputSchema: { type: "object" as const, properties: {} },
     },
   ];
+  if (hasRoutesTool) {
+    tools.push({
+      name: ROUTES_GET_TOOL_NAME,
+      description:
+        "Get all confirmed-live routes (mappings from lane to token source reference). Forces a concurrent refresh of all lanes.",
+      inputSchema: { type: "object" as const, properties: {} },
+    });
+  }
+  return tools;
 }
 
 export function callLanesListTool(registry: LaneRegistry, store: StateStore) {
@@ -45,21 +55,35 @@ export function callLanesListTool(registry: LaneRegistry, store: StateStore) {
   };
 }
 
-export function createMcpServer(registry: LaneRegistry, store: StateStore): Server {
+export async function callRoutesGetTool(getConfirmedRoutes: GetConfirmedRoutesFn) {
+  const routes = await getConfirmedRoutes();
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(routes) }],
+  };
+}
+
+export function createMcpServer(
+  registry: LaneRegistry,
+  store: StateStore,
+  getConfirmedRoutes?: GetConfirmedRoutesFn,
+): Server {
   const server = new Server(
     { name: "heimdall", version: "0.1.0" },
     { capabilities: { tools: {} } },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: listLaneToolsDescriptor(),
+    tools: listLaneToolsDescriptor(!!getConfirmedRoutes),
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    if (request.params.name !== LANES_LIST_TOOL_NAME) {
-      throw new Error(`Unknown tool: ${request.params.name}`);
+    if (request.params.name === LANES_LIST_TOOL_NAME) {
+      return callLanesListTool(registry, store);
     }
-    return callLanesListTool(registry, store);
+    if (request.params.name === ROUTES_GET_TOOL_NAME && getConfirmedRoutes) {
+      return await callRoutesGetTool(getConfirmedRoutes);
+    }
+    throw new Error(`Unknown tool: ${request.params.name}`);
   });
 
   return server;

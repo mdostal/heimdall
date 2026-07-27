@@ -15,15 +15,17 @@
 // touching a real Multica daemon, a real Argus connection, or binding a
 // real port.
 
-import { buildLaneRegistry, createHttpServer, type RefreshLaneFn } from "./api/http-server.js";
+import { buildLaneRegistry, createHttpServer, type RefreshLaneFn, type GetConfirmedRoutesFn } from "./api/http-server.js";
 import type { Server } from "node:http";
 import { StateStore } from "./core/state-store.js";
 import {
   LanePipeline,
   claudeAdapters,
   codexAdapters,
+  geminiAdapters,
   type ProviderAdapters,
 } from "./core/lane-pipeline.js";
+import { RouteTable } from "./core/route-table.js";
 import { ArgusClient, startArgusSdk, type ArgusEmitter } from "./core/telemetry/argus-client.js";
 import { MulticaAutopilotScheduler } from "./core/scheduler/multica-autopilot-scheduler.js";
 import { InProcessScheduler } from "./core/scheduler/in-process-scheduler.js";
@@ -37,6 +39,7 @@ import { MulticaControlAdapter } from "./core/actuation/multica-control-adapter.
 const PROVIDER_ADAPTERS: Record<string, () => ProviderAdapters> = {
   claude: claudeAdapters,
   codex: codexAdapters,
+  gemini: geminiAdapters,
 };
 
 const DEFAULT_AUTOPILOT_CRON = "*/1 * * * *";
@@ -189,7 +192,12 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     await pipeline.refresh(lane);
   };
 
-  const httpServer = createHttpServer(registry, store, refreshLane);
+  const routeTable = new RouteTable(registry, store, pipelines);
+  const getConfirmedRoutes: GetConfirmedRoutesFn = async () => {
+    return routeTable.getConfirmedRoutes();
+  };
+
+  const httpServer = createHttpServer(registry, store, refreshLane, getConfirmedRoutes);
   if (!options.skipHttpListen) {
     httpServer.listen(port, () => {
       console.log(`heimdall service listening on http://localhost:${port}`);
