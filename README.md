@@ -53,6 +53,12 @@ satisfies. Requires `MULTICA_AUTOPILOT_AGENT` to be set (see `.env.example`)
 for the Multica backend to register cron triggers; missing it fails that
 lane's coarse scheduling clearly without crashing the rest of the service.
 
+Argus is Heimdall's observability runner. Lane ticks emit through the generic
+`pantheon.metric.emit` contract, and status flips / actuation outcomes emit
+through `pantheon.decision_record.emit` before the legacy Heimdall-specific
+spans are also recorded. Set `ARGUS_OTLP_DISABLED=true` for local runs where
+Argus is absent; every metric and decision-record call becomes a safe no-op.
+
 `GET /lanes` reads the SQLite state store (override the DB path with
 `HEIMDALL_DB_PATH`, default in-memory), reflecting whatever the Claude/Codex
 signal pipeline (`src/core/lane-pipeline.ts`) last persisted. `POST

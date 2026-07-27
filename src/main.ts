@@ -24,7 +24,13 @@ import {
   codexAdapters,
   type ProviderAdapters,
 } from "./core/lane-pipeline.js";
-import { ArgusClient, startArgusSdk, type ArgusEmitter } from "./core/telemetry/argus-client.js";
+import {
+  createArgusEmitter,
+  isArgusDisabled,
+  NOOP_ARGUS_EMITTER,
+  startArgusSdk,
+  type ArgusEmitter,
+} from "./core/telemetry/argus-client.js";
 import { MulticaAutopilotScheduler } from "./core/scheduler/multica-autopilot-scheduler.js";
 import { InProcessScheduler } from "./core/scheduler/in-process-scheduler.js";
 import type { CommandRunner } from "./core/scheduler/command-runner.js";
@@ -47,7 +53,7 @@ export interface ComposeServiceOptions {
   env?: NodeJS.ProcessEnv;
   commandRunner?: CommandRunner;
   fetchImpl?: typeof fetch;
-  argus?: ArgusEmitter;
+  argus?: ArgusEmitter | null;
   /** Test-only: skip actually binding the HTTP server to a port. */
   skipHttpListen?: boolean;
   /** Test-only: override the shared status-watcher's tick interval (default 5000ms). */
@@ -90,7 +96,7 @@ function buildMulticaActuationStack(
 export function composeService(options: ComposeServiceOptions = {}): ComposedService {
   const port = options.port ?? Number(process.env.PORT ?? 4870);
   const env = options.env ?? process.env;
-  const argus = options.argus ?? new ArgusClient();
+  const argus = options.argus === null ? NOOP_ARGUS_EMITTER : options.argus ?? createArgusEmitter(env);
 
   const registry = buildLaneRegistry(env);
   const store = new StateStore(env.HEIMDALL_DB_PATH ?? ":memory:");
@@ -217,6 +223,8 @@ const isMainModule =
   process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`;
 
 if (isMainModule) {
-  startArgusSdk();
+  if (!isArgusDisabled()) {
+    startArgusSdk();
+  }
   composeService();
 }

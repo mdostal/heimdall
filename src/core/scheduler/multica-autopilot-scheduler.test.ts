@@ -20,6 +20,8 @@ function fakeArgus(): ArgusEmitter & { ticks: unknown[] } {
   const ticks: unknown[] = [];
   return {
     ticks,
+    emitMetric: () => {},
+    emitDecisionRecord: () => {},
     emitTick: (p) => ticks.push(p),
     emitStatusFlip: () => {},
     emitActuationResult: () => {},
