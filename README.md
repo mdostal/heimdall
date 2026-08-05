@@ -112,6 +112,7 @@ Query lane status three interchangeable ways — all call the identical
 # HTTP
 curl http://localhost:4870/lanes
 curl -X POST http://localhost:4870/lanes/<laneId>/refresh   # force a refresh
+curl http://localhost:4870/healthz                          # liveness only, no lane data
 
 # CLI
 npm run cli                     # JSON (default)

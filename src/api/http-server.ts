@@ -44,6 +44,15 @@ export function createHttpServer(
   refreshLane?: RefreshLaneFn,
 ): Server {
   return createServer((req, res) => {
+    // Liveness alias — distinct from /lanes on purpose: a monitor (e.g.
+    // Salus) should be able to confirm the process is up and serving HTTP
+    // without that check depending on lane declarations or StateStore reads.
+    if (req.method === "GET" && req.url === "/healthz") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: "ok" }));
+      return;
+    }
+
     if (req.method === "GET" && req.url === "/lanes") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(getLaneStatuses(registry, store)));
