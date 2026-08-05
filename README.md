@@ -29,10 +29,11 @@ cp .env.example .env
 ```
 
 Lanes are declared as contiguous `HEIMDALL_LANE_<N>_{ID,PROVIDER,CREDENTIAL_REF}`
-triples starting at `1`; `CREDENTIAL_REF` names another env var holding the
-actual secret. A lane with a missing or empty credential is still reported by
-`GET /lanes` — as `down` with an `unconfigured` reason — rather than crashing
-the service or silently disappearing.
+triples starting at `1`, with optional `HEIMDALL_LANE_<N>_MODEL` for advisory
+routing; `CREDENTIAL_REF` names another env var holding the actual secret. A lane
+with a missing or empty credential is still reported by `GET /lanes` — as `down`
+with an `unconfigured` reason — rather than crashing the service or silently
+disappearing.
 
 **Never commit `.env`** — it's gitignored; only `.env.example` (with empty
 secret values) is tracked.
@@ -61,6 +62,11 @@ endpoint Multica's dispatched agent calls when a lane's autopilot fires. To
 run just the HTTP server without any scheduling (e.g. for isolated debugging),
 use `npm run dev:http-only` instead — see
 [`.pHive/epics/lane-health-status/docs/vertical-plan.md`](.pHive/epics/lane-health-status/docs/vertical-plan.md).
+
+`GET /available-route?task-type=planning|build|review` returns one usable
+advisory route backed by the same lane state. It only chooses lanes with an `up`
+status and a resolved credential, and returns the credential reference handle
+(`token-ref`) rather than the secret.
 
 ## Query lane status — CLI
 
