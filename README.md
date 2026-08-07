@@ -95,18 +95,47 @@ cp .env.example .env        # declare lanes + fill in tokens (never commit .env)
 ```
 
 Lanes are declared as contiguous `HEIMDALL_LANE_<N>_{ID,PROVIDER,CREDENTIAL_REF}`
-triples starting at `1`; `CREDENTIAL_REF` names another env var holding the actual
-secret. A lane with a missing credential is still reported by `GET /lanes` — as
-`down` / `unconfigured` — rather than crashing the service.
+triples starting at `1`, with optional `HEIMDALL_LANE_<N>_MODEL` for advisory
+routing; `CREDENTIAL_REF` names another env var holding the actual secret. A lane
+with a missing or empty credential is still reported by `GET /lanes` — as `down`
+with an `unconfigured` reason — rather than crashing the service or silently
+disappearing.
+
+**Never commit `.env`** — it's gitignored; only `.env.example` (with empty
+secret values) is tracked.
+
+## Run the real service
 
 ```bash
 npm run dev            # full composed service on http://localhost:4870
 npm run dev:http-only  # HTTP server only, no scheduling (isolated debugging)
 ```
 
-Query lane status three interchangeable ways — all call the identical
-`getLaneStatuses()` core, all synchronous request/response per the
-`LaneRouterContract`:
+Runs `src/main.ts` — the full composed service: lane registry + SQLite state
+store + Argus OTEL telemetry + a per-lane `MulticaAutopilotScheduler` (coarse
+cron, default) and `InProcessScheduler` (fine ~5s, suspect-lane only) + the
+HTTP server on `http://localhost:4870` (override with `PORT=<n>`). See
+[`docs/decisions/DEC-hdl-scheduler-backend.md`](docs/decisions/DEC-hdl-scheduler-backend.md)
+for the scheduler design and the `multica-native-no-box-runners` HARD LAW it
+satisfies. Requires `MULTICA_AUTOPILOT_AGENT` to be set (see `.env.example`)
+for the Multica backend to register cron triggers; missing it fails that
+lane's coarse scheduling clearly without crashing the rest of the service.
+
+`GET /lanes` reads the SQLite state store (override the DB path with
+`HEIMDALL_DB_PATH`, default in-memory), reflecting whatever the Claude/Codex
+signal pipeline (`src/core/lane-pipeline.ts`) last persisted. `POST
+/lanes/:laneId/refresh` triggers a real refresh on demand — this is the
+endpoint Multica's dispatched agent calls when a lane's autopilot fires. To
+run just the HTTP server without any scheduling (e.g. for isolated debugging),
+use `npm run dev:http-only` instead — see
+[`.pHive/epics/lane-health-status/docs/vertical-plan.md`](.pHive/epics/lane-health-status/docs/vertical-plan.md).
+
+`GET /available-route?task-type=planning|build|review` returns one usable
+advisory route backed by the same lane state. It only chooses lanes with an `up`
+status and a resolved credential, and returns the credential reference handle
+(`token-ref`) rather than the secret.
+
+## Query lane status — CLI
 
 ```bash
 # HTTP
