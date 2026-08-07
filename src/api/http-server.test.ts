@@ -403,3 +403,22 @@ test("unknown routes return 404", async () => {
     store.close();
   }
 });
+
+test("GET /healthz returns 200 without touching the registry or store", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/healthz`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("content-type"), "application/json");
+    const body = await res.json();
+    assert.equal(body.status, "ok");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
