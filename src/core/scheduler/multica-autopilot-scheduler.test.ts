@@ -18,7 +18,12 @@ const LANE: Lane = {
 
 function fakeArgus(): ArgusEmitter & { ticks: unknown[] } {
   const ticks: unknown[] = [];
-  return { ticks, emitTick: (p) => ticks.push(p), emitStatusFlip: () => {} };
+  return {
+    ticks,
+    emitTick: (p) => ticks.push(p),
+    emitStatusFlip: () => {},
+    emitActuationResult: () => {},
+  };
 }
 
 function recordingRunner(

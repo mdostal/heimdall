@@ -1,0 +1,97 @@
+id: hda-04-wiring
+epic: hdl-actuation
+title: "Wire ControlAdapter selection + reconcile into src/main.ts's status watcher"
+status: pending
+complexity: medium
+methodology: classic
+depends_on:
+  - hda-01-multica-rest-client-circuit-breaker
+  - hda-02-lane-agent-resolver-stub-adapter
+  - hda-03-multica-control-adapter
+files_to_modify:
+  - file: src/main.ts
+    change: "extend composeService(): build MulticaRestClient+CircuitBreaker+LaneAgentResolver, select ControlAdapter per lane, call reconcile() from the shared status watcher every tick"
+  - file: .env.example
+    change: "add MULTICA_BASE_URL, MULTICA_WORKSPACE_ID, Multica PAT credential_ref documentation"
+
+description: |
+  Extend src/main.ts's composeService() (built in hdl-05) to wire real
+  actuation: construct one MulticaRestClient (wrapped in a CircuitBreaker)
+  and one LaneAgentResolver for the whole service, then for each lane select
+  MulticaControlAdapter (if the resolver returns agent IDs) or
+  StubControlAdapter (otherwise) and call adapter.reconcile(lane, status)
+  from the existing shared status-watcher loop every tick — replacing the
+  direct ActuationStub.onStatusChange call with the new ControlAdapter
+  abstraction (StubControlAdapter internally still uses ActuationStub, so
+  behavior for unmapped lanes is unchanged).
+
+acceptance_criteria:
+  - "Given a lane with HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS configured, when
+     composeService() wires it, then it gets a MulticaControlAdapter."
+  - "Given a lane without that config, when composeService() wires it, then
+     it gets a StubControlAdapter."
+  - "Given the shared status-watcher loop ticks, when it runs, then it calls
+     the selected ControlAdapter's reconcile(lane, status) for every lane —
+     not just on a detected transition."
+  - "Given MULTICA_BASE_URL/MULTICA_WORKSPACE_ID are not configured at all,
+     when composeService() runs, then every lane falls back to
+     StubControlAdapter cleanly (no crash) — actuation is optional
+     infrastructure, not a hard requirement to run Heimdall at all."
+
+steps:
+  - id: research
+    description: Confirm composeService()'s existing status-watcher loop structure (hdl-05) before extending it.
+    agent: researcher
+  - id: implement
+    description: |
+      Extend composeService() to build the Multica actuation stack and
+      select/invoke the right ControlAdapter per lane from the status
+      watcher. Update .env.example.
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: |
+      Integration tests (extending main.test.ts's existing patterns):
+      mapped lane gets MulticaControlAdapter and its reconcile is invoked;
+      unmapped lane gets StubControlAdapter; missing Multica config overall
+      doesn't crash composeService().
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review for no regression to hdl-05's existing wiring behavior (HTTP server, scheduler wiring untouched).
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Code/heimdall
+  tech_stack:
+    languages: [typescript]
+  key_files:
+    - path: src/main.ts
+      purpose: "existing composeService() from hdl-05 — this story extends it, doesn't replace it"
+
+design_decisions:
+  - decision: "Missing Multica config degrades to all-StubControlAdapter, doesn't block startup"
+    rationale: "Actuation is additive infrastructure — Heimdall's core sense loop and query surfaces must keep working even with zero Multica integration configured."
+
+cross_cutting:
+  - concern: documentation
+    action: ".env.example documents the new Multica actuation config block."
+  - concern: no-box-daemon
+    action: "Confirm the status-watcher loop this reuses is still the same single shared timer from hdl-05 — no new per-lane background loop introduced."
+
+risks:
+  - severity: low-medium
+    description: "Integration/wiring risk — no new business logic, but must not regress hdl-05's existing scheduler wiring."
+    mitigation: "Existing main.test.ts integration tests must continue passing unchanged; new tests are additive."
+
+references:
+  - path: .pHive/epics/hdl-scheduler/stories/hdl-05-wiring-decision-record.yaml
+    relevant_excerpt: |
+      composeService()'s shared status-watcher loop — one timer for the
+      whole service, cheap local StateStore reads only — this story extends
+      it to also drive ControlAdapter.reconcile() calls.

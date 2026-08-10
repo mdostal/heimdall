@@ -45,7 +45,10 @@ export class StateStore {
   private readonly db: DatabaseSync;
 
   constructor(path: string = ":memory:") {
-    this.db = new DatabaseSync(path);
+    // node:sqlite's default for foreign-key enforcement varies by Node
+    // version (observed OFF on Node 22.9, ON on the hive's Node build) —
+    // pinned explicitly so behavior is deterministic across environments.
+    this.db = new DatabaseSync(path, { enableForeignKeyConstraints: true });
     this.db.exec(SCHEMA);
   }
 
@@ -68,6 +71,16 @@ export class StateStore {
     signal_source: SignalSource;
     observed_at: string;
   }): void {
+    // Guard the FK to lanes(lane_id) regardless of call order — a no-op via
+    // ON CONFLICT DO NOTHING when the caller already upserted the lane (the
+    // normal path), but never a foreign-key violation if it didn't.
+    this.db
+      .prepare(
+        `INSERT INTO lanes (lane_id, provider, credential_ref) VALUES (?, '', '')
+         ON CONFLICT(lane_id) DO NOTHING`,
+      )
+      .run(entry.lane_id);
+
     this.db
       .prepare(
         `INSERT INTO lane_status_history
