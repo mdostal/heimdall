@@ -225,6 +225,10 @@ const isMainModule =
   process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`;
 
 if (isMainModule) {
+  // The running process otherwise shows up as a bare "node" in `ps`/`pgrep`,
+  // indistinguishable from any other Node process on the host — set the
+  // title so operators/monitors can find it by name (e.g. `pgrep heimdall`).
+  process.title = "heimdall";
   startArgusSdk();
   composeService();
 }
