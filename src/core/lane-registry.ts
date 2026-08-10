@@ -14,9 +14,11 @@ export interface LaneDeclaration {
   lane_id: string;
   provider: string;
   credential_ref: string;
+  model?: string;
 }
 
 export interface Lane extends LaneDeclaration {
+  model: string;
   /** Resolved secret, or null when the credential_ref didn't resolve (REQ-07: down/unconfigured). */
   credential: string | null;
 }
@@ -31,12 +33,18 @@ export function loadLaneDeclarations(
 
     const provider = env[`HEIMDALL_LANE_${i}_PROVIDER`];
     const credentialRef = env[`HEIMDALL_LANE_${i}_CREDENTIAL_REF`];
+    const model = env[`HEIMDALL_LANE_${i}_MODEL`];
     if (!provider || !credentialRef) {
       // Malformed declaration (missing a required field) — skip this lane
       // rather than crashing the whole service.
       continue;
     }
-    declarations.push({ lane_id: laneId, provider, credential_ref: credentialRef });
+    declarations.push({
+      lane_id: laneId,
+      provider,
+      credential_ref: credentialRef,
+      ...(model ? { model } : {}),
+    });
   }
   return declarations;
 }
@@ -47,6 +55,7 @@ export class LaneRegistry {
   constructor(declarations: LaneDeclaration[], credentialSource: CredentialSource) {
     this.lanes = declarations.map((decl) => ({
       ...decl,
+      model: decl.model ?? decl.provider,
       credential: credentialSource.resolve(decl.credential_ref),
     }));
   }
