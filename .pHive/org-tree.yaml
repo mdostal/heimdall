@@ -1,0 +1,34 @@
+# Example Heimdall org-tree context.
+#
+# Resolution starts at the assigned node, walks parent links to the root, then
+# merges root-to-child. Child scalar values override parent scalar values,
+# arrays concatenate as parent + child, and objects deep-merge recursively.
+
+org_tree:
+  - id: /company
+    context:
+      brand: "Modern, minimal, accessible"
+      prompts:
+        tone: "direct"
+        guardrails:
+          - "Preserve accepted decision records"
+      tools:
+        - "lane-health-status"
+
+  - id: /company/heimdall
+    parent: /company
+    context:
+      mission: "Health-aware lane gateway for Pantheon"
+      prompts:
+        guardrails:
+          - "Keep LaneRouterContract synchronous request/response"
+      tools:
+        - "scheduler"
+        - "actuation"
+
+  - id: /company/heimdall/codex
+    parent: /company/heimdall
+    context:
+      brand: "Heimdall implementation lane"
+      prompts:
+        tone: "pragmatic"
