@@ -422,3 +422,77 @@ test("GET /healthz returns 200 without touching the registry or store", async ()
     store.close();
   }
 });
+
+test("POST /route returns a RouteResult for valid request", async () => {
+  const { RouteSelector } = await import("../core/route-selector.js");
+  const { PolicyLoader } = await import("../core/routing/policy-loader.js");
+  const { RouteLedger } = await import("../core/routing/route-ledger.js");
+
+  const registry = registryWithRouteLanes();
+  const store = new StateStore(":memory:");
+  store.upsertLane({
+    lane_id: "claude@mathew.dostal",
+    provider: "claude",
+    credential_ref: "CLAUDE_TOKEN",
+  });
+  store.recordStatus({
+    lane_id: "claude@mathew.dostal",
+    status: "up",
+    reset_at: null,
+    reason: null,
+    signal_source: "passive",
+    observed_at: new Date().toISOString(),
+  });
+
+  const policy = PolicyLoader.load();
+  const ledger = new RouteLedger(":memory:");
+  const selector = new RouteSelector(policy, ledger);
+  const server = createHttpServer(registry, store, undefined, selector);
+  server.listen(0);
+
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/route`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task_id: "task-123", task_type: "build", estimated_cost: 42 })
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.ok(body.decision_id);
+    assert.ok(body.chosen_lane);
+    assert.ok(body.ranked_candidates);
+    assert.ok(body.rationale);
+  } finally {
+    server.close();
+  }
+});
+
+test("POST /route returns 400 for missing task_id or task_type", async () => {
+  const { RouteSelector } = await import("../core/route-selector.js");
+  const { PolicyLoader } = await import("../core/routing/policy-loader.js");
+  const { RouteLedger } = await import("../core/routing/route-ledger.js");
+  const registry = registryWithRouteLanes();
+  const store = new StateStore(":memory:");
+  const policy = PolicyLoader.load();
+  const ledger = new RouteLedger(":memory:");
+  const selector = new RouteSelector(policy, ledger);
+  const server = createHttpServer(registry, store, undefined, selector);
+  server.listen(0);
+
+  const { port } = server.address() as AddressInfo;
+  try {
+    const res = await fetch(`http://localhost:${port}/route`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task_type: "build" })
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.error, "missing_task_id_or_task_type");
+  } finally {
+    server.close();
+  }
+});
+

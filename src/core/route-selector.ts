@@ -41,6 +41,23 @@ function runtimeRank(taskType: TaskType, runtime: string): number {
   return rank === -1 ? RUNTIME_PRIORITY[taskType].length : rank;
 }
 
+export function getLaneHealths(
+  registry: LaneRegistry,
+  store: StateStore,
+): LaneHealth[] {
+  const statuses = new Map(store.getAllCurrentStatuses().map((status) => [status.lane_id, status]));
+  return registry
+    .list()
+    .filter((lane) => lane.credential !== null)
+    .filter((lane) => statuses.get(lane.lane_id)?.status === "up")
+    .map((lane) => ({
+      lane_id: lane.lane_id,
+      provider: lane.provider,
+      headroom: 10000, // Stub for now, real headroom tracking lands later
+      cost_tier: "medium", // Stub for now
+    }));
+}
+
 export function getAvailableRoute(
   taskType: TaskType,
   registry: LaneRegistry,
@@ -90,6 +107,7 @@ export function getAvailableRoute(
 export interface RouteRequest {
   task_id: string;
   task_type: TaskType;
+  estimated_cost?: number;
 }
 
 export interface RouteResult {
@@ -166,7 +184,7 @@ export class RouteSelector {
     try {
       this.ledger.recordDecision({
         decisionId,
-        requestSummary: { task_type: request.task_type },
+        requestSummary: { task_type: request.task_type, estimated_cost: request.estimated_cost },
         candidateScores: ranked,
         result: chosen ? "lane" : "no_route",
         chosenLane: chosen?.lane_id ?? null,

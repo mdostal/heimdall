@@ -67,3 +67,15 @@ test("no lanes configured -> empty result, not an error", () => {
   assert.deepEqual(JSON.parse(result.content[0].text), []);
   store.close();
 });
+
+test("callRouteSelectionTool returns RouteResult JSON text", async () => {
+  const { callRouteSelectionTool } = await import("../mcp/route-tool.js");
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const result = callRouteSelectionTool({ task_id: "t1", task_type: "build" }, registry, store);
+  assert.equal(result.content.length, 1);
+  assert.equal(result.content[0].type, "text");
+  const parsed = JSON.parse(result.content[0].text);
+  assert.ok(parsed.decision_id);
+  assert.ok("chosen_lane" in parsed);
+});

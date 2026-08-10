@@ -18,6 +18,9 @@
 import { buildLaneRegistry, createHttpServer, type RefreshLaneFn } from "./api/http-server.js";
 import type { Server } from "node:http";
 import { StateStore } from "./core/state-store.js";
+import { PolicyLoader } from "./core/routing/policy-loader.js";
+import { RouteLedger } from "./core/routing/route-ledger.js";
+import { RouteSelector } from "./core/route-selector.js";
 import {
   LanePipeline,
   claudeAdapters,
@@ -189,7 +192,11 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     await pipeline.refresh(lane);
   };
 
-  const httpServer = createHttpServer(registry, store, refreshLane);
+  const policy = PolicyLoader.load();
+  const ledger = new RouteLedger(env.HEIMDALL_DB_PATH ?? ":memory:");
+  const routeSelector = new RouteSelector(policy, ledger);
+
+  const httpServer = createHttpServer(registry, store, refreshLane, routeSelector);
   if (!options.skipHttpListen) {
     httpServer.listen(port, () => {
       console.log(`heimdall service listening on http://localhost:${port}`);

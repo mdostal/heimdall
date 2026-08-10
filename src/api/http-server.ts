@@ -7,9 +7,11 @@
 import { createServer, type Server } from "node:http";
 import { EnvCredentialSource } from "../core/credential-source.js";
 import { loadLaneDeclarations, LaneRegistry } from "../core/lane-registry.js";
-import { getAvailableRoute, parseTaskType } from "../core/route-selector.js";
+import { getAvailableRoute, parseTaskType, RouteSelector, getLaneHealths, type RouteRequest } from "../core/route-selector.js";
 import { StateStore } from "../core/state-store.js";
 import type { LaneStatus } from "../core/status-model.js";
+import { PolicyLoader } from "../core/routing/policy-loader.js";
+import { RouteLedger } from "../core/routing/route-ledger.js";
 
 export function buildLaneRegistry(env: NodeJS.ProcessEnv = process.env): LaneRegistry {
   return new LaneRegistry(loadLaneDeclarations(env), new EnvCredentialSource(env));
@@ -43,6 +45,7 @@ export function createHttpServer(
   registry: LaneRegistry,
   store: StateStore,
   refreshLane?: RefreshLaneFn,
+  routeSelector?: RouteSelector,
 ): Server {
   return createServer((req, res) => {
     // Liveness alias — distinct from /lanes on purpose: a monitor (e.g.
@@ -92,6 +95,50 @@ export function createHttpServer(
       return;
     }
 
+    if (req.method === "POST" && req.url === "/route") {
+      if (!routeSelector) {
+        res.writeHead(501, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "route_selector_not_configured" }));
+        return;
+      }
+      let body = "";
+      req.on("data", (chunk) => { body += chunk.toString(); });
+      req.on("end", () => {
+        try {
+          const payload = JSON.parse(body);
+          if (!payload.task_id || !payload.task_type) {
+            res.writeHead(400, { "content-type": "application/json" });
+            res.end(JSON.stringify({ error: "missing_task_id_or_task_type" }));
+            return;
+          }
+          const taskType = parseTaskType(payload.task_type);
+          if (!taskType) {
+            res.writeHead(400, { "content-type": "application/json" });
+            res.end(
+              JSON.stringify({
+                error: "invalid_task_type",
+                allowed_task_types: ["planning", "build", "review"],
+              }),
+            );
+            return;
+          }
+          const request: RouteRequest = {
+            task_id: payload.task_id,
+            task_type: taskType,
+            estimated_cost: payload.estimated_cost,
+          };
+          const laneHealth = getLaneHealths(registry, store);
+          const result = routeSelector.select(request, laneHealth);
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json_body" }));
+        }
+      });
+      return;
+    }
+
     const refreshMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/refresh$/);
     if (refreshMatch) {
       const laneId = decodeURIComponent(refreshMatch[1]);
@@ -129,7 +176,12 @@ if (isMainModule) {
   const registry = buildLaneRegistry();
   const store = new StateStore(process.env.HEIMDALL_DB_PATH ?? ":memory:");
   const port = Number(process.env.PORT ?? 4870);
-  createHttpServer(registry, store).listen(port, () => {
+  
+  const policy = PolicyLoader.load();
+  const ledger = new RouteLedger(process.env.HEIMDALL_DB_PATH ?? ":memory:");
+  const routeSelector = new RouteSelector(policy, ledger);
+
+  createHttpServer(registry, store, undefined, routeSelector).listen(port, () => {
     console.log(`heimdall dev server listening on http://localhost:${port}`);
   });
 }
