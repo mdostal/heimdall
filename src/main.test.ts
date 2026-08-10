@@ -140,6 +140,80 @@ test("unknown provider is skipped gracefully — no pipeline/scheduler crash for
   service.stopAll();
 });
 
+test("Multica actuation not configured — every lane falls back to StubControlAdapter (no crash)", () => {
+  const service = composeService({
+    env: testEnv(), // no MULTICA_BASE_URL/MULTICA_WORKSPACE_ID/MULTICA_PAT_TOKEN
+    commandRunner: mockCommandRunner(),
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port: 0,
+  });
+
+  assert.equal(service.controlAdapters.size, 2);
+  for (const adapter of service.controlAdapters.values()) {
+    assert.equal(adapter.constructor.name, "StubControlAdapter");
+  }
+
+  service.stopAll();
+});
+
+test("a lane with a HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS mapping gets MulticaControlAdapter when Multica IS configured", () => {
+  const env = testEnv();
+  env.MULTICA_BASE_URL = "http://localhost:8090";
+  env.MULTICA_WORKSPACE_ID = "workspace-test";
+  env.MULTICA_PAT_TOKEN = "fake-pat";
+  env.HEIMDALL_LANE_1_MULTICA_AGENT_IDS = "agent-a";
+
+  const service = composeService({
+    env,
+    commandRunner: mockCommandRunner(),
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port: 0,
+  });
+
+  assert.equal(service.controlAdapters.get("claude@mathew.dostal")?.constructor.name, "MulticaControlAdapter");
+  assert.equal(service.controlAdapters.get("codex")?.constructor.name, "StubControlAdapter");
+
+  service.stopAll();
+});
+
+test("the shared status watcher calls reconcile() for every lane on each tick, not just on transitions", async () => {
+  const service = composeService({
+    env: testEnv(),
+    commandRunner: mockCommandRunner(),
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port: 0,
+    statusWatcherIntervalMs: 10,
+  });
+
+  service.store.recordStatus({
+    lane_id: "claude@mathew.dostal",
+    status: "down",
+    reset_at: null,
+    reason: "seeded for test",
+    signal_source: "active_probe",
+    observed_at: "2026-07-25T12:00:00.000Z",
+  });
+
+  const adapter = service.controlAdapters.get("claude@mathew.dostal")!;
+  const reconcileCalls: string[] = [];
+  const originalReconcile = adapter.reconcile.bind(adapter);
+  adapter.reconcile = async (lane, status) => {
+    reconcileCalls.push(status);
+    return originalReconcile(lane, status);
+  };
+
+  // Same "down" status held steady across multiple ticks — no transition —
+  // yet reconcile() must still fire every tick (retry-for-free semantics).
+  await new Promise<void>((resolve) => setTimeout(resolve, 55));
+
+  service.stopAll();
+  assert.ok(reconcileCalls.length >= 3, `expected several reconcile() calls, got ${reconcileCalls.length}`);
+  assert.ok(reconcileCalls.every((s) => s === "down"));
+});
+
 test("POST /lanes/:laneId/refresh works end-to-end against the composed service", async () => {
   const { runner } = mockCommandRunner();
   const service = composeService({

@@ -1,0 +1,116 @@
+id: hda-03-multica-control-adapter
+epic: hdl-actuation
+title: "MulticaControlAdapter — idempotent, partial-failure-tolerant real actuation"
+status: pending
+complexity: high
+methodology: classic
+depends_on:
+  - hda-01-multica-rest-client-circuit-breaker
+  - hda-02-lane-agent-resolver-stub-adapter
+files_to_modify:
+  - file: src/core/actuation/multica-control-adapter.ts
+    change: new — implements ControlAdapter, real Multica actuation via MulticaRestClient + CircuitBreaker
+  - file: src/core/telemetry/argus-client.ts
+    change: "add emitActuationResult to ArgusEmitter interface + ArgusClient implementation"
+
+description: |
+  The real actuation logic: MulticaControlAdapter.reconcile(lane, status) is
+  called every sense-loop tick (not just on transitions). For each agent ID
+  the LaneAgentResolver returns for this lane, it compares the desired state
+  (max_concurrent_tasks should be 0 if status is suspect, or the remembered
+  prior value if healthy) against the last-successfully-applied state it
+  tracked in memory. If they match, it does nothing (idempotent no-op). If
+  they differ — because status genuinely changed, OR because a previous
+  attempt failed and the mismatch never got resolved — it calls
+  MulticaRestClient.updateAgent(agentId, {max_concurrent_tasks}) via the
+  CircuitBreaker. This is what makes retry "for free": a failed attempt
+  simply leaves the mismatch in place for the next tick to retry, with no
+  bespoke retry bookkeeping. Handles 1:N lane->agent mappings: each agent is
+  reconciled independently: a failure on one agent is logged and does not
+  block or roll back the others. Every attempt (success or failure) emits
+  an Argus emitActuationResult call.
+
+acceptance_criteria:
+  - "Given a lane transitions from up to a suspect status (degraded/down/
+     out_of_credit), when reconcile() is called, then it fetches the current
+     max_concurrent_tasks for each mapped agent (before first disabling it),
+     remembers that value, and sets max_concurrent_tasks=0."
+  - "Given a suspect lane recovers to up, when reconcile() is called, then it
+     restores each mapped agent's max_concurrent_tasks to the exact
+     remembered prior value (not an arbitrary re-enable number)."
+  - "Given the last reconcile() attempt for an agent failed (e.g. timeout),
+     when reconcile() is called again on a LATER tick with the SAME lane
+     status (no new transition), then it retries the same action — proving
+     idempotent retry-for-free without new bookkeeping."
+  - "Given a lane maps to 3 agents and 2 succeed while 1 fails, when
+     reconcile() completes, then the 2 successes are not rolled back, the 1
+     failure is logged, and reconcile() does not throw."
+  - "Given any reconcile() attempt (success or failure) for any agent, when
+     it completes, then it calls argus.emitActuationResult with the lane,
+     agent, action, and success/failure outcome."
+  - "Given desired state already matches last-applied state, when
+     reconcile() is called, then it makes NO Multica API call (true
+     idempotent no-op, not a redundant call every tick)."
+
+steps:
+  - id: research
+    description: Confirm MulticaRestClient's exact method signatures (hda-01) and LaneAgentResolver's interface (hda-02) before implementing.
+    agent: researcher
+  - id: implement
+    description: |
+      Implement multica-control-adapter.ts's reconcile() logic: per-agent
+      last-applied-state tracking (in-process Map, same pattern as
+      lane-pipeline.ts's corroboration tracker), desired-vs-applied
+      comparison, MulticaRestClient calls via CircuitBreaker, Argus emission.
+      Add emitActuationResult to argus-client.ts.
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: |
+      Unit tests covering all 6 acceptance criteria above with mocked
+      MulticaRestClient/CircuitBreaker and a mocked ArgusEmitter.
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: |
+      Review specifically for the idempotency invariant — confirm no code
+      path could mark an agent as "handled" without a successful API call
+      actually completing.
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Code/heimdall
+  tech_stack:
+    languages: [typescript]
+  key_files:
+    - path: src/core/lane-pipeline.ts
+      purpose: "existing in-process state-tracking pattern (corroboration Map) this story's last-applied-state tracking mirrors"
+
+design_decisions:
+  - decision: "In-process Map for last-applied state per agent, not persisted to SQLite"
+    rationale: "Same accepted tradeoff as lane-pipeline.ts's corroboration state — restart loses memory of 'what was applied', which just means one extra reconcile cycle re-establishes it; not persisting keeps this simple and consistent with existing precedent."
+  - decision: "Idempotent reconcile every tick, not gated by external transition-detection"
+    rationale: "Resolved design discussion Open Question #4 — a failed attempt must retry 'for free' on the next tick regardless of whether THIS tick's status is a fresh transition."
+
+cross_cutting:
+  - concern: documentation
+    action: "Document the reconcile-every-tick + idempotent-retry design in code comments referencing this story."
+
+risks:
+  - severity: high
+    description: "Most behaviorally subtle piece of the epic — a bug could fail to disable an unhealthy lane's agents (defeats the whole point) or fail to restore a healthy one's (leaves agents permanently disabled)."
+    mitigation: "Explicit tests for the disable-then-restore round trip remembering the EXACT prior value, and for retry-without-new-transition."
+
+references:
+  - path: .pHive/epics/hdl-actuation/docs/design-discussion.md
+    relevant_excerpt: |
+      MulticaControlAdapter ... tracks last-successfully-applied
+      max_concurrent_tasks per agent; each tick, compares desired state ...
+      against last-applied, and only calls the API when they differ OR the
+      previous attempt failed (the mismatch simply persists until a call
+      succeeds — no extra "retry" bookkeeping needed).
