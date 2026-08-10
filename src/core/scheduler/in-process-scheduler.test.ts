@@ -21,6 +21,7 @@ function fakeArgus(): ArgusEmitter & { ticks: unknown[]; flips: unknown[] } {
     flips,
     emitTick: (params) => ticks.push(params),
     emitStatusFlip: (params) => flips.push(params),
+    emitActuationResult: () => {},
   };
 }
 

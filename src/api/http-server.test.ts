@@ -16,6 +16,36 @@ function registryWithOneConfiguredLane(): LaneRegistry {
   );
 }
 
+function registryWithRouteLanes(): LaneRegistry {
+  return new LaneRegistry(
+    [
+      {
+        lane_id: "claude@mathew.dostal",
+        provider: "claude",
+        model: "claude-sonnet",
+        credential_ref: "CLAUDE_TOKEN",
+      },
+      {
+        lane_id: "codex",
+        provider: "codex",
+        model: "gpt-codex",
+        credential_ref: "CODEX_TOKEN",
+      },
+      {
+        lane_id: "kimi",
+        provider: "kimi",
+        model: "kimi-k3",
+        credential_ref: "KIMI_TOKEN",
+      },
+    ],
+    new EnvCredentialSource({
+      CLAUDE_TOKEN: "secret-claude",
+      CODEX_TOKEN: "secret-codex",
+      KIMI_TOKEN: "secret-kimi",
+    }),
+  );
+}
+
 test("getLaneStatuses returns entries matching the LaneRouterContract shape", () => {
   const registry = registryWithOneConfiguredLane();
   const store = new StateStore(":memory:");
@@ -177,6 +207,188 @@ test("POST /lanes/:laneId/refresh returns 500 if the refresh function rejects", 
   }
 });
 
+test("GET /available-route returns an up lane with headroom and a token ref for the task type", async () => {
+  const registry = registryWithRouteLanes();
+  const store = new StateStore(":memory:");
+  store.upsertLane({
+    lane_id: "claude@mathew.dostal",
+    provider: "claude",
+    credential_ref: "CLAUDE_TOKEN",
+  });
+  store.upsertLane({ lane_id: "codex", provider: "codex", credential_ref: "CODEX_TOKEN" });
+  store.upsertLane({ lane_id: "kimi", provider: "kimi", credential_ref: "KIMI_TOKEN" });
+  store.recordStatus({
+    lane_id: "claude@mathew.dostal",
+    status: "up",
+    reset_at: null,
+    reason: null,
+    signal_source: "active_probe",
+    observed_at: "2026-08-05T16:00:00.000Z",
+  });
+  store.recordStatus({
+    lane_id: "codex",
+    status: "up",
+    reset_at: null,
+    reason: null,
+    signal_source: "active_probe",
+    observed_at: "2026-08-05T16:00:00.000Z",
+  });
+  store.recordStatus({
+    lane_id: "kimi",
+    status: "up",
+    reset_at: null,
+    reason: null,
+    signal_source: "active_probe",
+    observed_at: "2026-08-05T16:00:00.000Z",
+  });
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/available-route?task-type=build`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body, {
+      runtime: "codex",
+      model: "gpt-codex",
+      "token-ref": "CODEX_TOKEN",
+      lane_id: "codex",
+      task_type: "build",
+      headroom: true,
+    });
+    assert.equal(JSON.stringify(body).includes("secret-codex"), false);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("GET /available-route skips lanes without headroom or a resolved token", async () => {
+  const registry = new LaneRegistry(
+    [
+      {
+        lane_id: "codex",
+        provider: "codex",
+        model: "gpt-codex",
+        credential_ref: "CODEX_TOKEN",
+      },
+      {
+        lane_id: "claude@mathew.dostal",
+        provider: "claude",
+        model: "claude-sonnet",
+        credential_ref: "CLAUDE_TOKEN",
+      },
+      {
+        lane_id: "gemini",
+        provider: "gemini",
+        model: "gemini-pro",
+        credential_ref: "MISSING_TOKEN",
+      },
+    ],
+    new EnvCredentialSource({
+      CODEX_TOKEN: "secret-codex",
+      CLAUDE_TOKEN: "secret-claude",
+    }),
+  );
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "codex", provider: "codex", credential_ref: "CODEX_TOKEN" });
+  store.upsertLane({
+    lane_id: "claude@mathew.dostal",
+    provider: "claude",
+    credential_ref: "CLAUDE_TOKEN",
+  });
+  store.upsertLane({ lane_id: "gemini", provider: "gemini", credential_ref: "MISSING_TOKEN" });
+  store.recordStatus({
+    lane_id: "codex",
+    status: "out_of_credit",
+    reset_at: "2026-08-06T00:00:00.000Z",
+    reason: "weekly cap reached",
+    signal_source: "active_probe",
+    observed_at: "2026-08-05T16:00:00.000Z",
+  });
+  store.recordStatus({
+    lane_id: "claude@mathew.dostal",
+    status: "up",
+    reset_at: null,
+    reason: null,
+    signal_source: "active_probe",
+    observed_at: "2026-08-05T16:00:00.000Z",
+  });
+  store.recordStatus({
+    lane_id: "gemini",
+    status: "up",
+    reset_at: null,
+    reason: null,
+    signal_source: "active_probe",
+    observed_at: "2026-08-05T16:00:00.000Z",
+  });
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/available-route?task-type=build`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.runtime, "claude");
+    assert.equal(body["token-ref"], "CLAUDE_TOKEN");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("GET /available-route returns 400 for an invalid task type", async () => {
+  const registry = registryWithRouteLanes();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/available-route?task-type=ops`);
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.error, "invalid_task_type");
+    assert.deepEqual(body.allowed_task_types, ["planning", "build", "review"]);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("GET /available-route returns 404 when no usable lane has headroom and a valid token", async () => {
+  const registry = registryWithRouteLanes();
+  const store = new StateStore(":memory:");
+  store.upsertLane({
+    lane_id: "claude@mathew.dostal",
+    provider: "claude",
+    credential_ref: "CLAUDE_TOKEN",
+  });
+  store.recordStatus({
+    lane_id: "claude@mathew.dostal",
+    status: "down",
+    reset_at: null,
+    reason: "runtime unavailable",
+    signal_source: "active_probe",
+    observed_at: "2026-08-05T16:00:00.000Z",
+  });
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/available-route?task-type=planning`);
+    assert.equal(res.status, 404);
+    const body = await res.json();
+    assert.deepEqual(body, { error: "no_available_route", task_type: "planning" });
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
 test("unknown routes return 404", async () => {
   const registry = registryWithOneConfiguredLane();
   const store = new StateStore(":memory:");
@@ -187,6 +399,25 @@ test("unknown routes return 404", async () => {
   try {
     const res = await fetch(`http://localhost:${port}/nope`);
     assert.equal(res.status, 404);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("GET /healthz returns 200 without touching the registry or store", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/healthz`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("content-type"), "application/json");
+    const body = await res.json();
+    assert.equal(body.status, "ok");
   } finally {
     server.close();
     store.close();

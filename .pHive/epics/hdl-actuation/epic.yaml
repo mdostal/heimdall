@@ -1,0 +1,58 @@
+name: hdl-actuation
+title: "Actuation / CONTROL-Adapter Layer (v2)"
+description: >
+  Heimdall senses (v1, done) AND actuates (v2, this epic): on a lane status
+  flip, MulticaControlAdapter calls Multica's real REST API (the verified,
+  non-destructive max_concurrent_tasks lever, not the doc's originally
+  proposed status/archive) to disable/re-enable the agents mapped to that
+  lane, hardened against the hive's known-flaky WAN connection (timeout,
+  explicit unreachable state, circuit breaker). Unmapped lanes get a loud
+  StubControlAdapter. Idempotent, partial-failure-tolerant, Argus-metriced.
+  Built + tested locally against a mock HTTP server only; real end-to-end
+  verification against the live hive :8090 instance is an operator follow-up
+  after this epic ships.
+target_codebase: /Users/mdostal/Code/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: committed
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+planning_team:
+  note: >
+    Condensed single-pass synthesis (same approach as the prior two epics),
+    informed by a dedicated Explore-agent research pass independently
+    verifying the Multica REST API against real Go source (correcting two
+    factual errors in the source design doc), plus extensive operator-
+    supplied corrections (base URL/workspace scoping/flaky-connection
+    hardening/test strategy) folded directly into the design. Recorded for
+    transparency, not as classifier output.
+  roles_represented: [analyst, architect, tpm, technical-writer]
+  matched_tags: [external-integration, resilience, actuation, control-adapter]
+
+stories:
+  - id: hda-01-multica-rest-client-circuit-breaker
+    title: "MulticaRestClient + CircuitBreaker — flaky-connection-hardened HTTP layer"
+    complexity: high
+    depends_on: []
+  - id: hda-02-lane-agent-resolver-stub-adapter
+    title: "LaneAgentResolver + ControlAdapter interface + StubControlAdapter"
+    complexity: low
+    depends_on: []
+  - id: hda-03-multica-control-adapter
+    title: "MulticaControlAdapter — idempotent, partial-failure-tolerant real actuation"
+    complexity: high
+    depends_on: [hda-01-multica-rest-client-circuit-breaker, hda-02-lane-agent-resolver-stub-adapter]
+  - id: hda-04-wiring
+    title: "Wire ControlAdapter selection + reconcile into src/main.ts's status watcher"
+    complexity: medium
+    depends_on:
+      - hda-01-multica-rest-client-circuit-breaker
+      - hda-02-lane-agent-resolver-stub-adapter
+      - hda-03-multica-control-adapter
+  - id: hda-05-decision-record
+    title: "DEC-hdl-role-actuation decision record"
+    complexity: low
+    depends_on: [hda-04-wiring]

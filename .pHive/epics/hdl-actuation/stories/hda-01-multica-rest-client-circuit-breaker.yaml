@@ -1,0 +1,127 @@
+id: hda-01-multica-rest-client-circuit-breaker
+epic: hdl-actuation
+title: "MulticaRestClient + CircuitBreaker — flaky-connection-hardened HTTP layer"
+status: pending
+complexity: high
+methodology: classic
+depends_on: []
+parallel_allowed: true
+parallel_rationale: bounded-slice
+files_to_modify:
+  - file: src/core/actuation/multica-rest-client.ts
+    change: new — injectable HTTP client for Multica's real REST API, timeout + graceful-failure result type
+  - file: src/core/actuation/circuit-breaker.ts
+    change: new — generic consecutive-failure circuit breaker
+
+description: |
+  Build the hardened HTTP layer Heimdall's actuation calls go through.
+  Multica does NOT run on this laptop — the real target is a separate
+  instance on "the hive" at :8090 (co-located prod = localhost:8090;
+  remote/dev = http://100.75.161.82:8090 via Tailscale), reached only via
+  MULTICA_BASE_URL (required config, never hardcoded, no baked-in default).
+  Every /api/agents and runtime call MUST include workspace_id (or
+  workspace_slug) as a query param (MULTICA_WORKSPACE_ID, required) — a bare
+  call 400s with {"error":"workspace_id or workspace_slug is required"}.
+  Auth is a Bearer PAT resolved via the existing CredentialSource abstraction
+  (REQ-07's pattern, reused directly). Every call has a short timeout and
+  NEVER throws — it resolves to a discriminated MulticaCallResult
+  (ok | timeout | unreachable | http_error), because a hung or failed hive
+  call must not hang or crash Heimdall's sense loop (the hive connection is
+  known-flaky). CircuitBreaker wraps repeated failures: opens after N
+  consecutive failures (skips further calls immediately), half-opens after a
+  cooldown to test recovery, closes on success.
+
+  TEST STRATEGY: unit/integration-test against a local fake HTTP server /
+  mocked fetch only. Do NOT call the real hive :8090 instance — an Auriga
+  soak is currently live against it; real end-to-end verification happens
+  separately, after this epic is committed, run by the operator on the hive.
+
+acceptance_criteria:
+  - "Given MULTICA_BASE_URL and MULTICA_WORKSPACE_ID are configured, when any
+     MulticaRestClient method is called, then the request includes the
+     correct base URL, a workspace_id (or workspace_slug) query param, and a
+     Bearer Authorization header resolved via CredentialSource."
+  - "Given MULTICA_BASE_URL or MULTICA_WORKSPACE_ID is missing, when the
+     client is constructed, then it fails clearly (not a silent default, not
+     a crash of the whole service) — same REQ-07 pattern as
+     MULTICA_AUTOPILOT_AGENT in hdl-03."
+  - "Given a call times out or the network fails, when the result resolves,
+     then it is `timeout` or `unreachable` respectively — never a thrown
+     exception."
+  - "Given a call returns a non-2xx HTTP status, when the result resolves,
+     then it is `http_error` with the status code available — never thrown."
+  - "Given N consecutive failures through the CircuitBreaker, when a further
+     call is attempted, then it short-circuits immediately (`circuit_open`,
+     no network attempt) until the cooldown window elapses."
+  - "Given the cooldown window has elapsed, when the next call is attempted,
+     then exactly one trial call goes through (half-open); success closes
+     the circuit, failure re-opens it."
+
+steps:
+  - id: research
+    description: |
+      Confirm the exact request/response shapes for listAgents, updateAgent,
+      archiveAgent, restoreAgent, listRuntimes, patchRuntime from
+      .pHive/epics/hdl-actuation/docs/research-brief.md's verified endpoint
+      table. Confirm the existing CredentialSource interface shape
+      (src/core/credential-source.ts) for reuse.
+    agent: researcher
+  - id: implement
+    description: |
+      Implement multica-rest-client.ts (config resolution, timeout via
+      AbortController, workspace_id query injection, the 6 methods, the
+      MulticaCallResult discriminated union) and circuit-breaker.ts (generic
+      wrapper class).
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: |
+      Unit tests: request shape correctness (mocked fetch), missing-config
+      failure, timeout/network-error/http-error result mapping, circuit
+      breaker open/half-open/close state machine.
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: |
+      Review specifically for "never throws, never hangs" — confirm every
+      code path in every method resolves to a MulticaCallResult, none can
+      escape as an uncaught exception or unbounded await.
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Code/heimdall
+  tech_stack:
+    languages: [typescript]
+  key_files:
+    - path: src/core/credential-source.ts
+      purpose: "existing CredentialSource interface + EnvCredentialSource — reused directly for the Multica PAT, not reinvented"
+    - path: .pHive/epics/hdl-actuation/docs/research-brief.md
+      purpose: "verified Multica endpoint shapes, corrected from the source doc's original (partially wrong) claims"
+
+design_decisions:
+  - decision: "MULTICA_BASE_URL and MULTICA_WORKSPACE_ID have no code-baked default"
+    rationale: "The hive's base URL and workspace ID are deployment-specific facts, not universal defaults — silently defaulting to localhost would be actively wrong when not co-located on the hive."
+  - decision: "Every call resolves to a MulticaCallResult, never throws"
+    rationale: "Hard requirement: the hive connection is known-flaky; a hung/failed call must not hang or crash Heimdall's sense loop."
+
+cross_cutting:
+  - concern: documentation
+    action: ".env.example gains MULTICA_BASE_URL, MULTICA_WORKSPACE_ID, and the Multica PAT credential_ref documentation."
+
+risks:
+  - severity: high
+    description: "Highest-risk piece of the epic — a bug in timeout/circuit-breaker handling could hang Heimdall's entire sense loop on a bad hive connection, the exact failure mode this epic exists to prevent."
+    mitigation: "Explicit tests for every failure mode (timeout, network error, http error, circuit open) resolving gracefully, never throwing; review step specifically checks for escape paths."
+
+references:
+  - path: .pHive/epics/hdl-actuation/docs/design-discussion.md
+    relevant_excerpt: |
+      Flaky-connection requirements (HARD, non-negotiable): every Multica
+      call gets a short timeout; a hung or failed hive call must NOT hang or
+      crash Heimdall's sense loop... Circuit-break after repeated
+      consecutive failures.
