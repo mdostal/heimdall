@@ -135,19 +135,26 @@ advisory route backed by the same lane state. It only chooses lanes with an `up`
 status and a resolved credential, and returns the credential reference handle
 (`token-ref`) rather than the secret.
 
-## Query lane status — CLI
+`POST /route` invokes the policy-driven router, accepting a JSON body with `task_id`, `task_type`, and `estimated_cost`, and returning a complete routing decision including the chosen lane, candidate scores, and rationale.
+
+## Query lane status & route selection — CLI
 
 ```bash
 # HTTP
 curl http://localhost:4870/lanes
 curl -X POST http://localhost:4870/lanes/<laneId>/refresh   # force a refresh
 curl http://localhost:4870/healthz                          # liveness only, no lane data
+curl -X POST http://localhost:4870/route -H "Content-Type: application/json" -d '{"task_id":"abc", "task_type":"build"}'
 
-# CLI
+# CLI - Lane List
 npm run cli                     # JSON (default)
 npm run cli -- --format table   # human-readable table
 
-# MCP (stdio server exposing the heimdall.lanes.list tool)
+# CLI - Route Selection
+npm run cli -- route --task-type=build --task-id=abc            # rationale to stdout
+npm run cli -- route --task-type=build --task-id=abc --json     # JSON to stderr, lane to stdout
+
+# MCP (stdio server exposing the heimdall.lanes.list and route_selection tools)
 npm run mcp
 ```
 

@@ -7,6 +7,7 @@
 import { buildLaneRegistry, getLaneStatuses } from "./http-server.js";
 import { StateStore } from "../core/state-store.js";
 import type { LaneStatus } from "../core/status-model.js";
+import { runRouteCommand } from "../cli/route-command.js";
 
 export function formatAsTable(lanes: readonly LaneStatus[]): string {
   if (lanes.length === 0) return "No lanes configured.";
@@ -49,11 +50,19 @@ const isMainModule =
   process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`;
 
 if (isMainModule) {
+  const args = process.argv.slice(2);
+  const command = args[0] && !args[0].startsWith("--") ? args[0] : "lanes";
+
   const registry = buildLaneRegistry();
   const store = new StateStore(process.env.HEIMDALL_DB_PATH ?? ":memory:");
+  
   try {
-    const lanes = getLaneStatuses(registry, store);
-    console.log(renderLanes(lanes, parseFormatFlag(process.argv.slice(2))));
+    if (command === "route") {
+      runRouteCommand(args.slice(1), registry, store);
+    } else {
+      const lanes = getLaneStatuses(registry, store);
+      console.log(renderLanes(lanes, parseFormatFlag(args)));
+    }
   } finally {
     store.close();
   }
