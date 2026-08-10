@@ -52,6 +52,10 @@ export class StateStore {
     this.db.exec(SCHEMA);
   }
 
+  get database(): DatabaseSync {
+    return this.db;
+  }
+
   upsertLane(lane: LaneRow): void {
     this.db
       .prepare(
