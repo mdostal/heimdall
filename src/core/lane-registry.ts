@@ -17,9 +17,11 @@ export interface LaneDeclaration {
   credential_ref: string;
   /** Optional broker policy/audit metadata; Portunus' current CLI resolves by reference name. */
   credential_scope?: string;
+  model?: string;
 }
 
 export interface Lane extends LaneDeclaration {
+  model: string;
   /** Resolved secret, or null when the credential_ref didn't resolve (REQ-07: down/unconfigured). */
   credential: string | null;
 }
@@ -35,6 +37,7 @@ export function loadLaneDeclarations(
     const provider = env[`HEIMDALL_LANE_${i}_PROVIDER`];
     const credentialRef = env[`HEIMDALL_LANE_${i}_CREDENTIAL_REF`];
     const credentialScope = env[`HEIMDALL_LANE_${i}_CREDENTIAL_SCOPE`];
+    const model = env[`HEIMDALL_LANE_${i}_MODEL`];
     if (!provider || !credentialRef) {
       // Malformed declaration (missing a required field) — skip this lane
       // rather than crashing the whole service.
@@ -45,6 +48,7 @@ export function loadLaneDeclarations(
       provider,
       credential_ref: credentialRef,
       ...(credentialScope ? { credential_scope: credentialScope } : {}),
+      ...(model ? { model } : {}),
     });
   }
   return declarations;
@@ -56,6 +60,7 @@ export class LaneRegistry {
   constructor(declarations: LaneDeclaration[], credentialSource: CredentialSource) {
     this.lanes = declarations.map((decl) => ({
       ...decl,
+      model: decl.model ?? decl.provider,
       credential: credentialSource.resolve(decl.credential_ref, decl.credential_scope),
     }));
   }
