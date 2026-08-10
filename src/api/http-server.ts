@@ -7,6 +7,7 @@
 import { createServer, type Server } from "node:http";
 import { EnvCredentialSource } from "../core/credential-source.js";
 import { loadLaneDeclarations, LaneRegistry } from "../core/lane-registry.js";
+import { getAvailableRoute, parseTaskType } from "../core/route-selector.js";
 import { StateStore } from "../core/state-store.js";
 import type { LaneStatus } from "../core/status-model.js";
 
@@ -44,9 +45,50 @@ export function createHttpServer(
   refreshLane?: RefreshLaneFn,
 ): Server {
   return createServer((req, res) => {
+    // Liveness alias — distinct from /lanes on purpose: a monitor (e.g.
+    // Salus) should be able to confirm the process is up and serving HTTP
+    // without that check depending on lane declarations or StateStore reads.
+    if (req.method === "GET" && req.url === "/healthz") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: "ok" }));
+      return;
+    }
+
     if (req.method === "GET" && req.url === "/lanes") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(getLaneStatuses(registry, store)));
+      return;
+    }
+
+    if (req.method === "GET" && req.url?.startsWith("/available-route")) {
+      const url = new URL(req.url, "http://localhost");
+      if (url.pathname !== "/available-route") {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
+
+      const taskType = parseTaskType(url.searchParams.get("task-type"));
+      if (!taskType) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: "invalid_task_type",
+            allowed_task_types: ["planning", "build", "review"],
+          }),
+        );
+        return;
+      }
+
+      const route = getAvailableRoute(taskType, registry, store);
+      if (!route) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "no_available_route", task_type: taskType }));
+        return;
+      }
+
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(route));
       return;
     }
 

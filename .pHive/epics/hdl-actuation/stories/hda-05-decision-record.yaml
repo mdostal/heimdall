@@ -1,0 +1,83 @@
+id: hda-05-decision-record
+epic: hdl-actuation
+title: "DEC-hdl-role-actuation decision record"
+status: pending
+complexity: low
+methodology: classic
+depends_on:
+  - hda-04-wiring
+files_to_modify:
+  - file: docs/decisions/DEC-hdl-role-actuation.md
+    change: "new — the decision record docs/heimdall-role-and-actuation.md already cites but that doesn't exist yet"
+
+description: |
+  Formalize docs/decisions/DEC-hdl-role-actuation.md — the decision ID
+  docs/heimdall-role-and-actuation.md cites as its own decision of record,
+  which never actually existed as a file. Records: the corrected Multica API
+  facts (max_concurrent_tasks is the real lever, not status/archive; two
+  distinct Multica instances — local dev vs. the hive's :8090; workspace_id
+  is mandatory), all 4 resolved open questions from design discussion
+  (explicit env-var lane->agent mapping behind a resolver interface,
+  StubControlAdapter default for unmapped lanes, no advisory-surface
+  renaming, idempotent log-and-continue with Argus metrics on partial
+  failure), and the flaky-connection hardening requirements (timeout,
+  explicit unreachable state, circuit breaker) — reflecting what was
+  actually built across hda-01 through hda-04, not just the original plan.
+
+acceptance_criteria:
+  - "Given docs/decisions/DEC-hdl-role-actuation.md, when read, then it
+     documents the corrected max_concurrent_tasks-not-status/archive finding,
+     the mandatory workspace_id requirement, and the two-distinct-Multica-
+     instances distinction (local dev vs. the hive's :8090)."
+  - "Given the doc, when read, then all 4 resolved open questions from
+     design-discussion.md are recorded as decisions, not left as open
+     questions."
+  - "Given the doc, when read, then it explicitly states real end-to-end
+     verification against the live hive :8090 instance is a follow-up step
+     run by the operator after this epic ships, not part of this epic."
+
+steps:
+  - id: implement
+    description: |
+      Write docs/decisions/DEC-hdl-role-actuation.md synthesizing the
+      corrected facts and resolved decisions from research-brief.md and
+      design-discussion.md, reflecting what hda-01 through hda-04 actually built.
+    agent: developer
+  - id: review
+    description: |
+      Review against docs/heimdall-role-and-actuation.md and
+      docs/decisions/DEC-hdl-scheduler-backend.md for consistency — no
+      contradictions between the three documents.
+    agent: reviewer
+    depends_on: [implement]
+  - id: integrate
+    description: Commit and push to feature branch.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Code/heimdall
+  tech_stack: {}
+  key_files:
+    - path: docs/heimdall-role-and-actuation.md
+      purpose: "cites DEC-hdl-role-actuation as its own decision of record — this story writes that missing file"
+    - path: docs/decisions/DEC-hdl-scheduler-backend.md
+      purpose: "sibling decision record from hdl-scheduler — matching format/style precedent"
+
+design_decisions:
+  - decision: "Decision record lives at docs/decisions/DEC-hdl-role-actuation.md, matching hdl-05's DEC-hdl-scheduler-backend.md sibling"
+    rationale: "Consistent naming/location convention established by the prior epic."
+
+cross_cutting:
+  - concern: documentation
+    action: "This story's entire deliverable is a documentation artifact."
+
+risks:
+  - severity: low
+    description: "Documentation only."
+    mitigation: "n/a"
+
+references:
+  - path: docs/heimdall-role-and-actuation.md
+    relevant_excerpt: |
+      Decision of record: DEC-hdl-role-actuation.
