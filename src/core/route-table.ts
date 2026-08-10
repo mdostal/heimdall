@@ -12,7 +12,7 @@ export interface Route {
  * RouteTable is responsible for handing out valid routes.
  * It confirms routes are usable (live) before handing them out by forcing a
  * concurrent refresh of all lanes, returning all that are 'up'.
- * 
+ *
  * "Validate the full ladder (claude -> codex -> gemini) then run all lanes concurrently, not swap-only."
  */
 export class RouteTable {

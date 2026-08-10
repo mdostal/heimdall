@@ -37,7 +37,7 @@ test("RouteTable getConfirmedRoutes forces concurrent refresh and returns only u
   }
 
   const pipelines = new Map<string, LanePipeline>();
-  
+
   // Make claude and gemini 'up', codex 'down'
   pipelines.set("claude-1", new LanePipeline(store, { now: () => new Date().toISOString(), lastPassiveResponse: () => null }, mockAdapters("up")));
   pipelines.set("codex-1", new LanePipeline(store, { now: () => new Date().toISOString(), lastPassiveResponse: () => null }, mockAdapters("down")));
@@ -46,12 +46,12 @@ test("RouteTable getConfirmedRoutes forces concurrent refresh and returns only u
   const routeTable = new RouteTable(registry, store, pipelines);
 
   const routes = await routeTable.getConfirmedRoutes();
-  
-  // Down paths require two 'down' signals to corroborate by default (if no prior), but wait! 
-  // If the prior is null, a single 'down' probe sets it to 'degraded'. 
+
+  // Down paths require two 'down' signals to corroborate by default (if no prior), but wait!
+  // If the prior is null, a single 'down' probe sets it to 'degraded'.
   // Let's actually give it two refreshes for Codex to be fully 'down' if needed, or check if 'degraded' is excluded.
   // getConfirmedRoutes only returns "up". "degraded" is NOT "up", so codex will still be excluded.
-  
+
   assert.equal(routes.length, 2);
   const routeIds = routes.map(r => r.lane_id);
   assert.ok(routeIds.includes("claude-1"));
@@ -62,6 +62,6 @@ test("RouteTable getConfirmedRoutes forces concurrent refresh and returns only u
   const claudeRoute = routes.find(r => r.lane_id === "claude-1")!;
   assert.equal(claudeRoute.provider, "claude");
   assert.equal(claudeRoute.credential_ref, "CLAUDE_TOKEN");
-  
+
   store.close();
 });

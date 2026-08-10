@@ -37,7 +37,7 @@ export async function probeGeminiLane(
     try {
       body = await response.json();
     } catch {}
-    
+
     const message = body.error?.message ?? "";
     if (/quota/i.test(message)) {
       return { status: "out_of_credit", reset_at: null, reason: message || "insufficient quota" };
