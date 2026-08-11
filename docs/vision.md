@@ -57,6 +57,17 @@ runs today:
 - `reconcile()` runs every sense-loop tick for every lane → idempotent
   retry-for-free on partial failures; every attempt is emitted to Argus.
 
+**Advisory routing (`route-selection`, shipped on dev).**
+- Policy-backed scoring is implemented from `config/routing-policy.yaml`:
+  planning favors Claude/Gemini, build favors Codex, review favors Claude/Codex,
+  with a headroom floor and cost preference folded into candidate scores.
+- `RouteSelector.select()` ranks healthy lanes, records every decision in
+  `RouteLedger`, assigns deterministic experiment arms when enabled, and returns
+  a human-readable rationale.
+- The route selector is exposed over **HTTP** (`POST /route`), **CLI**
+  (`npm run cli -- route ...`), and **MCP** (`route_selection`), alongside the
+  older `GET /available-route` advisory endpoint.
+
 **Honest stubs / gaps.**
 - Actuation is tested **entirely against local mocks**. The real hive Multica
   instance (`:8090`) is never called by the test suite — **live end-to-end
@@ -67,8 +78,9 @@ runs today:
   Multica runtime on/off toggling) that is scaffolded, not wired.
 - Only **Claude and Codex** signal adapters exist; other providers are vision,
   not code.
-- There is **no routing decision** yet — Heimdall reports and actuates on health;
-  it does not yet choose a lane for a task.
+- Routing decisions exist, but the handoff is still advisory. Production route
+  inputs still need non-stubbed headroom/cost metadata, route responses need a
+  dispatch-ready handle, and callers need an outcome-feedback surface.
 
 ---
 
@@ -76,6 +88,9 @@ runs today:
 
 - **Live end-to-end actuation verification** against the real hive Multica
   (`:8090`) — close the mocks-only gap with an operator-run smoke test.
+- **Routing dispatch handoff:** feed the router with real lane headroom/cost
+  metadata, return dispatch-ready credential references without leaking secrets,
+  and let callers report route outcomes back into the ledger.
 - **Per-lane scheduler / health-probe tuning:** smarter probe cadence driven by
   recent state (probe suspect lanes harder, healthy lanes rarely) to minimize
   spend while keeping the 10-second correctness SLA.

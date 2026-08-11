@@ -1,0 +1,56 @@
+id: rdh-01-lane-metadata-headroom
+epic: routing-dispatch-handoff
+title: "Lane metadata and real headroom inputs for RouteSelector"
+status: pending
+complexity: medium
+methodology: classic
+depends_on: []
+parallel_allowed: true
+parallel_rationale: "Pure route-input preparation; independent of response-contract and outcome surfaces."
+files_to_modify:
+  - file: src/core/lane-registry.ts
+    change: "parse optional lane routing metadata from env declarations"
+  - file: src/core/route-selector.ts
+    change: "derive LaneHealth from lane metadata and current status instead of hardcoded headroom/cost"
+  - file: .env.example
+    change: "document HEIMDALL_LANE_<N>_HEADROOM and HEIMDALL_LANE_<N>_COST_TIER"
+  - file: README.md
+    change: "document route metadata configuration"
+  - file: src/core/lane-registry.test.ts
+    change: "cover valid, missing, and malformed metadata parsing"
+  - file: src/core/route-selector.select.test.ts
+    change: "cover metadata-backed candidate ranking and no-route behavior"
+
+description: |
+  RouteSelector.select() already ranks caller-supplied LaneHealth values, but
+  the production path through getLaneHealths() currently fabricates headroom
+  and cost_tier for every up lane. Add optional per-lane routing metadata to
+  lane declarations and use it when building LaneHealth.
+
+acceptance_criteria:
+  - "Given a lane declares HEIMDALL_LANE_1_HEADROOM=2500 and HEIMDALL_LANE_1_COST_TIER=low, when getLaneHealths() runs for an up lane with a credential, then the returned LaneHealth uses headroom=2500 and cost_tier=low."
+  - "Given routing metadata is omitted, when getLaneHealths() runs, then it uses documented safe defaults and records no secret material."
+  - "Given HEADROOM is non-numeric, negative, or not finite, when lane declarations load, then the lane is still declared but its routing metadata is rejected with a clear validation path covered by tests."
+  - "Given COST_TIER is not one of low|medium|high, when lane declarations load, then the invalid value does not silently influence scoring."
+  - "Given two up lanes differ only by headroom/cost metadata, when POST /route or CLI route calls through getLaneHealths(), then the ranked candidates reflect the metadata rather than the old hardcoded values."
+  - "Given no lane meets the policy headroom floor, when a route is requested, then chosen_lane remains null and the rationale names the headroom floor."
+
+steps:
+  - id: implement
+    description: "Add typed lane routing metadata and wire it into getLaneHealths()."
+    agent: developer
+  - id: test
+    description: "Add focused unit tests for metadata parsing and route-input generation."
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: "Review for backwards compatibility with existing .env files and for no secret leakage."
+    agent: reviewer
+    depends_on: [test]
+
+context:
+  key_files:
+    - path: src/core/route-selector.ts
+      purpose: "contains getLaneHealths(), currently the stubbed production input path"
+    - path: config/routing-policy.yaml
+      purpose: "defines the headroom floor and cost preference used by scoring"

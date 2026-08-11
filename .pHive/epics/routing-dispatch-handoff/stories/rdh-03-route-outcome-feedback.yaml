@@ -1,0 +1,64 @@
+id: rdh-03-route-outcome-feedback
+epic: routing-dispatch-handoff
+title: "Route outcome feedback API backed by RouteLedger"
+status: pending
+complexity: medium
+methodology: classic
+depends_on: []
+parallel_allowed: true
+parallel_rationale: "RouteLedger.reportOutcome already exists and can be surfaced independently of dispatch-contract expansion."
+files_to_modify:
+  - file: src/core/routing/route-ledger.ts
+    change: "reuse existing reportOutcome and getDecision behavior; add helpers only if needed"
+  - file: src/api/http-server.ts
+    change: "add POST /route/:decisionId/outcome"
+  - file: src/cli/route-command.ts
+    change: "add route outcome reporting subcommand or flag set"
+  - file: src/mcp/route-tool.ts
+    change: "add route outcome MCP tool"
+  - file: src/api/http-server.test.ts
+    change: "cover outcome recording and unknown decisions"
+  - file: src/api/cli.test.ts
+    change: "cover CLI outcome reporting"
+  - file: src/api/mcp-server.test.ts
+    change: "cover MCP outcome reporting"
+  - file: README.md
+    change: "document outcome feedback"
+
+description: |
+  RouteLedger can already store route outcomes, but callers have no supported
+  API to report them. Add outcome reporting over the same supported surfaces
+  so Heimdall can learn from selected-lane results without requiring direct
+  SQLite access.
+
+acceptance_criteria:
+  - "Given an existing routing decision_id, when POST /route/:decisionId/outcome receives outcome, actual_cost, and metadata, then RouteLedger stores the outcome and returns 200 with the persisted decision summary."
+  - "Given the decision_id is unknown, when outcome reporting is attempted, then the surface returns a clear 404/false result and does not create an orphan outcome row."
+  - "Given metadata includes sensitive keys such as prompt, token, credential, or raw payload, when it is persisted, then the existing sanitization rules prevent raw sensitive values from being stored."
+  - "Given outcome reporting is invoked from CLI and MCP, when the same payload is submitted, then it reaches RouteLedger.reportOutcome with the same semantics as HTTP."
+  - "Given an outcome is reported twice for the same decision_id, when the second report completes, then it updates the outcome row without rewriting the original routing_decision row."
+  - "Given tests run, when npm test completes, then existing RouteLedger decision tests still pass."
+
+steps:
+  - id: research
+    description: "Read RouteLedger's existing reportOutcome/getDecision tests and decide the smallest public surface shape."
+    agent: researcher
+  - id: implement
+    description: "Add HTTP, CLI, and MCP outcome reporting over RouteLedger.reportOutcome."
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: "Cover success, unknown decision, update, and sensitive metadata cases."
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: "Review for storage correctness and sensitive metadata handling."
+    agent: reviewer
+    depends_on: [test]
+
+context:
+  key_files:
+    - path: src/core/routing/route-ledger.ts
+      purpose: "already owns routing_decisions and routing_outcomes"
+    - path: src/core/routing/route-ledger.test.ts
+      purpose: "existing behavioral contract for outcome updates and sanitization"
