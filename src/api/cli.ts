@@ -8,6 +8,7 @@ import { buildLaneRegistry, getLaneStatuses } from "./http-server.js";
 import { StateStore } from "../core/state-store.js";
 import type { LaneStatus } from "../core/status-model.js";
 import { runRouteCommand } from "../cli/route-command.js";
+import { runRouteOutcomeCommand } from "../cli/route-outcome-command.js";
 
 export function formatAsTable(lanes: readonly LaneStatus[]): string {
   if (lanes.length === 0) return "No lanes configured.";
@@ -59,6 +60,8 @@ if (isMainModule) {
   try {
     if (command === "route") {
       runRouteCommand(args.slice(1), registry, store);
+    } else if (command === "route-outcome") {
+      runRouteOutcomeCommand(args.slice(1));
     } else {
       const lanes = getLaneStatuses(registry, store);
       console.log(renderLanes(lanes, parseFormatFlag(args)));

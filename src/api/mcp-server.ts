@@ -24,7 +24,14 @@ import {
 import { buildLaneRegistry, getLaneStatuses } from "./http-server.js";
 import { StateStore } from "../core/state-store.js";
 import type { LaneRegistry } from "../core/lane-registry.js";
-import { routeSelectionToolDescriptor, callRouteSelectionTool, ROUTE_SELECTION_TOOL_NAME } from "../mcp/route-tool.js";
+import { 
+  routeSelectionToolDescriptor, 
+  callRouteSelectionTool, 
+  ROUTE_SELECTION_TOOL_NAME,
+  routeOutcomeToolDescriptor,
+  callRouteOutcomeTool,
+  ROUTE_OUTCOME_TOOL_NAME
+} from "../mcp/route-tool.js";
 
 export const LANES_LIST_TOOL_NAME = "heimdall.lanes.list";
 
@@ -55,7 +62,8 @@ export function createMcpServer(registry: LaneRegistry, store: StateStore): Serv
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
       ...listLaneToolsDescriptor(),
-      routeSelectionToolDescriptor()
+      routeSelectionToolDescriptor(),
+      routeOutcomeToolDescriptor()
     ],
   }));
 
@@ -65,6 +73,9 @@ export function createMcpServer(registry: LaneRegistry, store: StateStore): Serv
     }
     if (request.params.name === ROUTE_SELECTION_TOOL_NAME) {
       return callRouteSelectionTool(request.params.arguments, registry, store);
+    }
+    if (request.params.name === ROUTE_OUTCOME_TOOL_NAME) {
+      return callRouteOutcomeTool(request.params.arguments);
     }
     throw new Error(`Unknown tool: ${request.params.name}`);
   });

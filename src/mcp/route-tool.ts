@@ -6,6 +6,56 @@ import type { LaneRegistry } from "../core/lane-registry.js";
 import type { StateStore } from "../core/state-store.js";
 
 export const ROUTE_SELECTION_TOOL_NAME = "route_selection";
+export const ROUTE_OUTCOME_TOOL_NAME = "report_route_outcome";
+
+export function routeOutcomeToolDescriptor() {
+  return {
+    name: ROUTE_OUTCOME_TOOL_NAME,
+    description: "Report the actual outcome and cost of a routing decision back to the route ledger.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        decision_id: { type: "string" },
+        outcome: { type: "string" },
+        actual_cost: { type: "number" },
+        metadata: {
+          type: "object",
+          additionalProperties: true
+        }
+      },
+      required: ["decision_id"]
+    }
+  };
+}
+
+export function callRouteOutcomeTool(
+  params: any
+) {
+  const decisionId = params.decision_id;
+  if (!decisionId) {
+    throw new Error("Missing decision_id");
+  }
+
+  const ledger = new RouteLedger(process.env.HEIMDALL_DB_PATH ?? ":memory:");
+  const ok = ledger.reportOutcome({
+    decisionId,
+    outcome: params.outcome,
+    actualCost: params.actual_cost,
+    metadata: params.metadata,
+  });
+
+  if (!ok) {
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify({ error: "not_found", message: "Decision ID not found" }) }],
+      isError: true,
+    };
+  }
+
+  const entry = ledger.getDecision(decisionId);
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(entry) }]
+  };
+}
 
 export function routeSelectionToolDescriptor() {
   return {

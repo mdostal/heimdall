@@ -200,7 +200,7 @@ export class RouteLedger {
         outcome.decisionId,
         outcome.outcome ?? null,
         outcome.actualCost ?? null,
-        stringifyJson(outcome.metadata ?? {}),
+        stringifyJson(outcome.metadata ? (sanitizeJsonValue(outcome.metadata) ?? {}) : {}),
         reportedAt,
       );
 

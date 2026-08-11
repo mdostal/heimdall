@@ -46,6 +46,7 @@ export function createHttpServer(
   store: StateStore,
   refreshLane?: RefreshLaneFn,
   routeSelector?: RouteSelector,
+  routeLedger?: RouteLedger,
 ): Server {
   return createServer((req, res) => {
     // Liveness alias — distinct from /lanes on purpose: a monitor (e.g.
@@ -139,6 +140,44 @@ export function createHttpServer(
       return;
     }
 
+    const outcomeMatch = req.method === "POST" && req.url?.match(/^\/route\/([^/]+)\/outcome$/);
+    if (outcomeMatch) {
+      const decisionId = decodeURIComponent(outcomeMatch[1]);
+      if (!routeLedger) {
+        res.writeHead(501, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "route_ledger_not_configured" }));
+        return;
+      }
+      
+      let body = "";
+      req.on("data", (chunk) => { body += chunk.toString(); });
+      req.on("end", () => {
+        try {
+          const payload = JSON.parse(body || "{}");
+          const ok = routeLedger.reportOutcome({
+            decisionId,
+            outcome: payload.outcome,
+            actualCost: payload.actual_cost,
+            metadata: payload.metadata,
+          });
+          
+          if (!ok) {
+            res.writeHead(404, { "content-type": "application/json" });
+            res.end(JSON.stringify({ error: "not_found", message: "Decision ID not found" }));
+            return;
+          }
+          
+          const entry = routeLedger.getDecision(decisionId);
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify(entry));
+        } catch (err) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json_body" }));
+        }
+      });
+      return;
+    }
+
     const refreshMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/refresh$/);
     if (refreshMatch) {
       const laneId = decodeURIComponent(refreshMatch[1]);
@@ -181,7 +220,7 @@ if (isMainModule) {
   const ledger = new RouteLedger(process.env.HEIMDALL_DB_PATH ?? ":memory:");
   const routeSelector = new RouteSelector(policy, ledger);
 
-  createHttpServer(registry, store, undefined, routeSelector).listen(port, () => {
+  createHttpServer(registry, store, undefined, routeSelector, ledger).listen(port, () => {
     console.log(`heimdall dev server listening on http://localhost:${port}`);
   });
 }
