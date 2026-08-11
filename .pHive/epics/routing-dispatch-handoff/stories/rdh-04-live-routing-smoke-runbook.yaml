@@ -1,0 +1,50 @@
+id: rdh-04-live-routing-smoke-runbook
+epic: routing-dispatch-handoff
+title: "Live routing smoke runbook and operator verification harness"
+status: pending
+complexity: medium
+methodology: classic
+depends_on:
+  - rdh-01-lane-metadata-headroom
+  - rdh-02-dispatch-ready-route-contract
+  - rdh-03-route-outcome-feedback
+files_to_modify:
+  - file: test/e2e/route-dispatch-handoff.test.ts
+    change: "new local smoke for route request, dispatch contract, and outcome reporting"
+  - file: docs/ops/route-dispatch-handoff.md
+    change: "new operator runbook for local and live hive verification"
+  - file: README.md
+    change: "link the route dispatch handoff runbook"
+
+description: |
+  Add the executable smoke and operator runbook that prove the slice works as a
+  handoff, not just as isolated unit tests. The automated test uses local lane
+  declarations and a temp SQLite DB only. The runbook documents the live hive
+  steps the operator can run when real Multica/Auriga credentials are present.
+
+acceptance_criteria:
+  - "Given at least three declared lanes (claude, codex, gemini) with credentials represented by credential_ref handles, when the local smoke requests planning/build/review routes, then each response is valid JSON and includes a dispatch handle or an explicit no-route result."
+  - "Given the smoke gets a route decision_id, when it reports an outcome, then RouteLedger returns the persisted outcome for that decision."
+  - "Given live hive verification is not safe for CI, when docs/ops/route-dispatch-handoff.md is read, then it separates automated local checks from explicit operator-only live checks."
+  - "Given the runbook references secrets, when reviewed, then it uses env var names and placeholders only, never committed values."
+  - "Given npm test and npm run build run, when this story is complete, then both pass."
+
+steps:
+  - id: implement
+    description: "Add the local e2e smoke and operator runbook."
+    agent: developer
+  - id: test
+    description: "Run the full npm test suite and npm run build."
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: "Review the runbook for clear live-vs-local boundaries and no secret leakage."
+    agent: reviewer
+    depends_on: [test]
+
+context:
+  key_files:
+    - path: test/e2e/route-selection-handshake.test.ts
+      purpose: "existing route-selection live-style test to mirror carefully"
+    - path: docs/ops/token-rotation-setup.md
+      purpose: "existing ops doc style and secret-placeholder conventions"

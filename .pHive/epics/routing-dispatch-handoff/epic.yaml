@@ -1,0 +1,47 @@
+name: routing-dispatch-handoff
+title: "Routing Dispatch Handoff (slice 2)"
+description: >
+  Turns the route-selection primitives now on dev into a usable swarm handoff:
+  route decisions use real lane metadata instead of stubbed headroom/cost,
+  every transport returns a dispatch-ready handle without leaking credentials,
+  outcomes can be reported back into the RouteLedger, and an end-to-end
+  operator smoke verifies Auriga/Minerva can consume the contract.
+target_codebase: /Users/mdostal/Code/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: committed
+
+git_flow:
+  base_branch: dev
+  branch_strategy: per-story
+
+planning_team:
+  note: >
+    Slice recovered from dev on 2026-08-11. The prior "no routing decision"
+    vision is stale: scoring, policy loading, deterministic experiments,
+    rationale generation, RouteLedger, HTTP POST /route, CLI route, and MCP
+    route_selection are already present and tested. The next slice therefore
+    hardens the handoff and feedback loop rather than rebuilding the selector.
+  roles_represented: [analyst, architect, tpm, technical-writer]
+  matched_tags: [routing, dispatch-handoff, observability, policy, multica]
+
+stories:
+  - id: rdh-01-lane-metadata-headroom
+    title: "Lane metadata and real headroom inputs for RouteSelector"
+    complexity: medium
+    depends_on: []
+  - id: rdh-02-dispatch-ready-route-contract
+    title: "Dispatch-ready route contract across HTTP, CLI, and MCP"
+    complexity: high
+    depends_on: [rdh-01-lane-metadata-headroom]
+  - id: rdh-03-route-outcome-feedback
+    title: "Route outcome feedback API backed by RouteLedger"
+    complexity: medium
+    depends_on: []
+  - id: rdh-04-live-routing-smoke-runbook
+    title: "Live routing smoke runbook and operator verification harness"
+    complexity: medium
+    depends_on:
+      - rdh-01-lane-metadata-headroom
+      - rdh-02-dispatch-ready-route-contract
+      - rdh-03-route-outcome-feedback

@@ -22,10 +22,12 @@ alive; only a real signal is. Heimdall exists as its own service so that this
 sensing-and-actuation loop lives in **one** place with **one** contract, instead
 of being re-implemented ad hoc inside every orchestrator, script, and daemon.
 
-Today Heimdall is the **gateway half** of that vision: it *senses* lane health
-from layered signals and *actuates* by toggling Multica agent concurrency. The
-routing brain — "given this task, pick the best healthy lane" — is deliberately
-out of scope for now and tracked as future work (see [`docs/vision.md`](docs/vision.md)).
+Today Heimdall is the **gateway plus advisory-router half** of that vision: it
+*senses* lane health from layered signals, *actuates* by toggling Multica agent
+concurrency, and can already answer "given this task, which healthy lane should
+I use?" through the policy-backed route selector. The next routing work is
+dispatch hardening: real headroom/cost inputs, a stable handoff contract, and
+outcome feedback (see [`docs/vision.md`](docs/vision.md)).
 
 ## Architecture
 

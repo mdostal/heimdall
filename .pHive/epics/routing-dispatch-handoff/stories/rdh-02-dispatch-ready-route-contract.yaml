@@ -1,0 +1,67 @@
+id: rdh-02-dispatch-ready-route-contract
+epic: routing-dispatch-handoff
+title: "Dispatch-ready route contract across HTTP, CLI, and MCP"
+status: pending
+complexity: high
+methodology: classic
+depends_on: [rdh-01-lane-metadata-headroom]
+files_to_modify:
+  - file: src/core/route-selector.ts
+    change: "extend RouteResult with selected lane dispatch metadata"
+  - file: src/api/http-server.ts
+    change: "return the expanded route contract from POST /route"
+  - file: src/cli/route-command.ts
+    change: "print route handle in JSON mode and concise lane/rationale in text mode"
+  - file: src/mcp/route-tool.ts
+    change: "return the same expanded contract"
+  - file: src/api/http-server.test.ts
+    change: "cover contract shape and no-secret guarantee"
+  - file: src/api/cli.test.ts
+    change: "cover CLI JSON contract"
+  - file: src/api/mcp-server.test.ts
+    change: "cover MCP route_selection contract"
+  - file: README.md
+    change: "document the dispatch contract"
+
+description: |
+  The existing route result has decision metadata and chosen_lane, but an
+  orchestrator still needs to know provider/runtime/model and the credential
+  reference to use. Extend the route contract so callers receive a stable
+  dispatch handle without a second lane lookup and without exposing secret
+  values.
+
+acceptance_criteria:
+  - "Given an up lane is selected, when POST /route returns 200, then the response includes decision_id, chosen_lane, dispatch.lane_id, dispatch.provider, dispatch.runtime, dispatch.model, dispatch.credential_ref, policy_version, ranked_candidates, rationale, and experiment_arm."
+  - "Given a lane credential is resolved from an env var, when any route surface returns the dispatch handle, then it includes only the credential_ref name and never the credential value."
+  - "Given no route is available, when POST /route returns a result, then dispatch is null, chosen_lane is null, ranked_candidates is present, and the response does not throw or return a partial stale handle."
+  - "Given the same state and policy, when HTTP POST /route, CLI route --json, and MCP route_selection are invoked, then they return the same JSON contract fields."
+  - "Given an invalid task_type or missing task_id, when a route is requested, then existing 400 behavior remains covered by tests."
+  - "Given the route contract changes, when README examples are read, then they show the new response shape and explicitly state credential_ref is a handle, not a secret."
+
+steps:
+  - id: research
+    description: "Confirm current route result call sites and tests so the contract expands without breaking lane-list surfaces."
+    agent: researcher
+  - id: implement
+    description: "Add dispatch metadata to RouteResult and wire all three route transports through it."
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: "Add HTTP, CLI, and MCP contract tests, including the no-secret guarantee."
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: "Review response compatibility and ensure no raw credential can be serialized."
+    agent: reviewer
+    depends_on: [test]
+
+context:
+  key_files:
+    - path: src/core/route-selector.ts
+      purpose: "RouteResult is defined here"
+    - path: src/api/http-server.ts
+      purpose: "HTTP POST /route transport"
+    - path: src/cli/route-command.ts
+      purpose: "CLI route transport"
+    - path: src/mcp/route-tool.ts
+      purpose: "MCP route_selection transport"
