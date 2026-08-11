@@ -53,8 +53,8 @@ export function getLaneHealths(
     .map((lane) => ({
       lane_id: lane.lane_id,
       provider: lane.provider,
-      headroom: 10000, // Stub for now, real headroom tracking lands later
-      cost_tier: "medium", // Stub for now
+      headroom: lane.headroom,
+      cost_tier: lane.cost_tier,
     }));
 }
 
@@ -170,7 +170,7 @@ export class RouteSelector {
 
     const rationale = chosen
       ? generateRationale(chosen, ranked)
-      : "No candidate lane meets the headroom floor; no route chosen.";
+      : `No candidate lane meets the headroom floor (${this.policy.headroom_floor}); no route chosen.`;
 
     const result: RouteResult = {
       decision_id: decisionId,

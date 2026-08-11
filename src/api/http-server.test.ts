@@ -469,6 +469,86 @@ test("POST /route returns a RouteResult for valid request", async () => {
   }
 });
 
+test("POST /route ranks up lanes by declared headroom metadata", async () => {
+  const { RouteSelector } = await import("../core/route-selector.js");
+  const { RouteLedger } = await import("../core/routing/route-ledger.js");
+
+  const registry = new LaneRegistry(
+    [
+      {
+        lane_id: "codex-low-headroom",
+        provider: "codex",
+        credential_ref: "CODEX_LOW_TOKEN",
+        headroom: 500,
+        cost_tier: "medium",
+      },
+      {
+        lane_id: "codex-high-headroom",
+        provider: "codex",
+        credential_ref: "CODEX_HIGH_TOKEN",
+        headroom: 2500,
+        cost_tier: "medium",
+      },
+    ],
+    new EnvCredentialSource({
+      CODEX_LOW_TOKEN: "secret-low",
+      CODEX_HIGH_TOKEN: "secret-high",
+    }),
+  );
+  const store = new StateStore(":memory:");
+  for (const lane of registry.list()) {
+    store.upsertLane({ lane_id: lane.lane_id, provider: lane.provider, credential_ref: lane.credential_ref });
+    store.recordStatus({
+      lane_id: lane.lane_id,
+      status: "up",
+      reset_at: null,
+      reason: null,
+      signal_source: "passive",
+      observed_at: "2026-08-11T00:00:00.000Z",
+    });
+  }
+
+  const ledger = new RouteLedger(":memory:");
+  const selector = new RouteSelector(
+    {
+      version: "1.0",
+      task_type_weights: {
+        planning: { codex: 100 },
+        build: { codex: 100 },
+        review: { codex: 100 },
+      },
+      headroom_floor: 1000,
+      cost_preference: "balanced",
+      experiments: { enabled: false, arms: { control: { split: 1 } } },
+    },
+    ledger,
+    { generateDecisionId: () => "decision-headroom-http" },
+  );
+  const server = createHttpServer(registry, store, undefined, selector);
+  server.listen(0);
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/route`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task_id: "task-headroom", task_type: "build" }),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.chosen_lane, "codex-high-headroom");
+    assert.deepEqual(
+      body.ranked_candidates.map((candidate: { lane_id: string }) => candidate.lane_id),
+      ["codex-high-headroom", "codex-low-headroom"],
+    );
+    assert.doesNotMatch(JSON.stringify(body), /secret-(low|high)/);
+  } finally {
+    server.close();
+    store.close();
+    ledger.close();
+  }
+});
+
 test("POST /route returns 400 for missing task_id or task_type", async () => {
   const { RouteSelector } = await import("../core/route-selector.js");
   const { PolicyLoader } = await import("../core/routing/policy-loader.js");
@@ -495,4 +575,3 @@ test("POST /route returns 400 for missing task_id or task_type", async () => {
     server.close();
   }
 });
-

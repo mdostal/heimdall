@@ -64,10 +64,12 @@ cp .env.example .env        # declare lanes + fill in tokens (never commit .env)
 
 Lanes are declared as contiguous `HEIMDALL_LANE_<N>_{ID,PROVIDER,CREDENTIAL_REF}`
 triples starting at `1`, with optional `HEIMDALL_LANE_<N>_MODEL` for advisory
-routing; `CREDENTIAL_REF` names another env var holding the actual secret. A lane
-with a missing or empty credential is still reported by `GET /lanes` — as `down`
-with an `unconfigured` reason — rather than crashing the service or silently
-disappearing.
+routing; `CREDENTIAL_REF` names another env var holding the actual secret.
+`HEIMDALL_LANE_<N>_HEADROOM` and `HEIMDALL_LANE_<N>_COST_TIER` can declare
+routing inputs; omitted values default to `HEADROOM=10000` and
+`COST_TIER=medium`. A lane with a missing or empty credential is still reported
+by `GET /lanes` — as `down` with an `unconfigured` reason — rather than crashing
+the service or silently disappearing.
 
 **Never commit `.env`** — it's gitignored; only `.env.example` (with empty
 secret values) is tracked.
