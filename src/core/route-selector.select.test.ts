@@ -1,9 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { RouteSelector, type RouteRequest } from "./route-selector.js";
+import { EnvCredentialSource } from "./credential-source.js";
+import { LaneRegistry } from "./lane-registry.js";
+import { getLaneHealths, RouteSelector, type RouteRequest } from "./route-selector.js";
 import { RouteLedger } from "./routing/route-ledger.js";
 import type { Policy } from "./routing/policy-loader.js";
 import type { LaneHealth } from "./routing/scorer.js";
+import { StateStore } from "./state-store.js";
 
 function policy(overrides: Partial<Policy> = {}): Policy {
   return {
@@ -19,6 +22,73 @@ function policy(overrides: Partial<Policy> = {}): Policy {
     ...overrides,
   };
 }
+
+function markUp(store: StateStore, lane_id: string, provider = "codex", credential_ref = "TOKEN"): void {
+  store.upsertLane({ lane_id, provider, credential_ref });
+  store.recordStatus({
+    lane_id,
+    status: "up",
+    reset_at: null,
+    reason: null,
+    signal_source: "active_probe",
+    observed_at: "2026-08-11T00:00:00.000Z",
+  });
+}
+
+test("getLaneHealths uses declared routing metadata for up credentialed lanes without exposing secrets", () => {
+  const registry = new LaneRegistry(
+    [
+      {
+        lane_id: "codex",
+        provider: "codex",
+        credential_ref: "CODEX_TOKEN",
+        headroom: 2500,
+        cost_tier: "low",
+      },
+    ],
+    new EnvCredentialSource({ CODEX_TOKEN: "secret-codex" }),
+  );
+  const store = new StateStore(":memory:");
+  markUp(store, "codex", "codex", "CODEX_TOKEN");
+
+  try {
+    const laneHealth = getLaneHealths(registry, store);
+
+    assert.deepEqual(laneHealth, [
+      {
+        lane_id: "codex",
+        provider: "codex",
+        headroom: 2500,
+        cost_tier: "low",
+      },
+    ]);
+    assert.doesNotMatch(JSON.stringify(laneHealth), /secret-codex/);
+  } finally {
+    store.close();
+  }
+});
+
+test("getLaneHealths applies documented safe defaults when routing metadata is omitted", () => {
+  const registry = new LaneRegistry(
+    [{ lane_id: "codex", provider: "codex", credential_ref: "CODEX_TOKEN" }],
+    new EnvCredentialSource({ CODEX_TOKEN: "secret-codex" }),
+  );
+  const store = new StateStore(":memory:");
+  markUp(store, "codex", "codex", "CODEX_TOKEN");
+
+  try {
+    assert.deepEqual(getLaneHealths(registry, store), [
+      {
+        lane_id: "codex",
+        provider: "codex",
+        headroom: 10000,
+        cost_tier: "medium",
+      },
+    ]);
+  } finally {
+    store.close();
+  }
+});
 
 test("select() returns a RouteResult and records a matching ledger entry for the chosen lane", () => {
   const ledger = new RouteLedger(":memory:");
@@ -82,7 +152,7 @@ test("select() returns chosen_lane=null and logs result='no_route' when every la
   ]);
 
   assert.equal(result.chosen_lane, null);
-  assert.match(result.rationale, /No candidate lane/);
+  assert.match(result.rationale, /headroom floor \(1000\)/);
 
   const recorded = ledger.getDecision("decision-no-route");
   assert.ok(recorded);
