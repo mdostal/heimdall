@@ -1,10 +1,17 @@
 # Heimdall
 
+[![Build Status](https://img.shields.io/github/actions/workflow/status/mdostal/heimdall/ci.yml?branch=main)](https://github.com/mdostal/heimdall/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![OSS Ready](https://img.shields.io/badge/OSS-Ready-brightgreen.svg)]()
+
 **The health-aware lane gateway for [Pantheon](https://github.com/mdostal/pantheon-v2).**
+
 Heimdall watches every LLM/runtime *lane* — a `provider × account × runtime`
 triple like `claude@mathew.dostal`, `codex`, or `gemini-3-pro` — reports whether
 each one is **up, down, out of credit, or degraded**, and actuates on that signal
 by disabling or re-enabling a lane's mapped Multica agents.
+
+📖 **[Read the Documentation Site](https://mdostal.github.io/heimdall/)**
 
 ## What & why
 
@@ -18,51 +25,9 @@ of being re-implemented ad hoc inside every orchestrator, script, and daemon.
 Today Heimdall is the **gateway half** of that vision: it *senses* lane health
 from layered signals and *actuates* by toggling Multica agent concurrency. The
 routing brain — "given this task, pick the best healthy lane" — is deliberately
-out of scope for now and tracked as future work (see [`VISION.md`](VISION.md)).
+out of scope for now and tracked as future work (see [`docs/vision.md`](docs/vision.md)).
 
 ## Architecture
-
-```mermaid
-flowchart TB
-    subgraph Pantheon
-        Auriga["Auriga (router / orchestrator)"]
-        Vesta["Vesta (config)"]
-        Portunus["Portunus (secrets — future)"]
-        Argus["Argus (OTEL observability)"]
-    end
-
-    subgraph Heimdall["Heimdall service (:4870)"]
-        direction TB
-        Reg["Lane Registry\n(env-declared lanes)"]
-        Sched["Schedulers\nMulticaAutopilot (coarse cron)\nInProcess (~5s, suspect lanes)"]
-        Pipe["Lane Pipeline\n(per-lane sense loop)"]
-        subgraph Signals["Signal sources (layered)"]
-            Passive["passive\n(observed traffic)"]
-            Public["public_status\n(provider status page)"]
-            Probe["active_probe\n(cheap real call)"]
-        end
-        Model["status-model\n(4-state resolve +\ncorroboration)"]
-        Store["State Store\n(node:sqlite)"]
-        Ctrl["ControlAdapter\nMulticaControlAdapter | StubControlAdapter"]
-        API["Query surfaces\nHTTP · CLI · MCP"]
-    end
-
-    Multica["Multica REST API\n(agents / runtimes)"]
-
-    Vesta -. lane + agent config .-> Reg
-    Portunus -. tokens (future) .-> Reg
-    Sched --> Pipe
-    Pipe --> Signals
-    Signals --> Model
-    Model --> Store
-    Store --> API
-    Store --> Ctrl
-    Ctrl -->|max_concurrent_tasks 0/N| Multica
-    Auriga -->|GET /lanes| API
-    Sched -. cron trigger .-> Multica
-    Multica -. POST /lanes/:id/refresh .-> API
-    Heimdall -->|OTEL spans| Argus
-```
 
 Internally the loop is: **schedulers** tick a lane → the **lane pipeline** gathers
 layered **signals** (passive observation, provider status-page piggybacking, sparse
@@ -71,6 +36,9 @@ corroboration guard against provider false-positives → the result is persisted
 the **SQLite state store** → the shared status-watcher calls the lane's
 **ControlAdapter** to reconcile Multica agent concurrency. Every tick, status flip,
 and actuation attempt emits OTEL to Argus.
+
+For full architectural details and the component flow diagram, see:
+- [Architecture & Diagrams](https://mdostal.github.io/heimdall/architecture) or [`docs/architecture.md`](docs/architecture.md)
 
 ## How it fits
 
@@ -114,26 +82,12 @@ npm run dev:http-only  # HTTP server only, no scheduling (isolated debugging)
 Runs `src/main.ts` — the full composed service: lane registry + SQLite state
 store + Argus OTEL telemetry + a per-lane `MulticaAutopilotScheduler` (coarse
 cron, default) and `InProcessScheduler` (fine ~5s, suspect-lane only) + the
-HTTP server on `http://localhost:4870` (override with `PORT=<n>`). See
-[`docs/decisions/DEC-hdl-scheduler-backend.md`](docs/decisions/DEC-hdl-scheduler-backend.md)
-for the scheduler design and the `multica-native-no-box-runners` HARD LAW it
-satisfies. Requires `MULTICA_AUTOPILOT_AGENT` to be set (see `.env.example`)
-for the Multica backend to register cron triggers; missing it fails that
-lane's coarse scheduling clearly without crashing the rest of the service.
+HTTP server on `http://localhost:4870` (override with `PORT=<n>`).
 
 `GET /lanes` reads the SQLite state store (override the DB path with
-`HEIMDALL_DB_PATH`, default in-memory), reflecting whatever the Claude/Codex
-signal pipeline (`src/core/lane-pipeline.ts`) last persisted. `POST
-/lanes/:laneId/refresh` triggers a real refresh on demand — this is the
-endpoint Multica's dispatched agent calls when a lane's autopilot fires. To
-run just the HTTP server without any scheduling (e.g. for isolated debugging),
-use `npm run dev:http-only` instead — see
-[`.pHive/epics/lane-health-status/docs/vertical-plan.md`](.pHive/epics/lane-health-status/docs/vertical-plan.md).
-
-`GET /available-route?task-type=planning|build|review` returns one usable
-advisory route backed by the same lane state. It only chooses lanes with an `up`
-status and a resolved credential, and returns the credential reference handle
-(`token-ref`) rather than the secret.
+`HEIMDALL_DB_PATH`, default in-memory). `POST /lanes/:laneId/refresh` triggers a real 
+refresh on demand. `GET /available-route?task-type=planning|build|review` returns one usable
+advisory route backed by the same lane state.
 
 ## Query lane status — CLI
 
@@ -151,10 +105,6 @@ npm run cli -- --format table   # human-readable table
 npm run mcp
 ```
 
-Other scripts: `npm test` (Node built-in test runner via `tsx`),
-`npm run build` (type-check + compile to `dist/`), `npm run sla-report`
-(status-correctness SLA harness).
-
 **Actuation** (v2) is enabled per-lane by mapping it to Multica agents via
 `HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS` plus `MULTICA_BASE_URL` /
 `MULTICA_WORKSPACE_ID` / `MULTICA_PAT_TOKEN`. Mapped lanes get the real
@@ -162,11 +112,13 @@ Other scripts: `npm test` (Node built-in test runner via `tsx`),
 (log-only, never a silent no-op). See [`.env.example`](.env.example) for every
 knob.
 
-## Status
+## Support & OSS
 
-**Live / working scaffold (v0.4.0).** Sensing (4-state lane health across layered
-signals, SLA-verified) and actuation (Multica agent concurrency toggling via a
-circuit-breaker-hardened REST client) both run; actuation is tested against local
-mocks only — live end-to-end against the hive Multica is an explicit operator
-follow-up, and health-aware *routing* is not built yet. Full trajectory and how to
-contribute: **[VISION.md](VISION.md)**.
+We welcome contributions and value community involvement! 
+
+- Read our [Contributing Guide](CONTRIBUTING.md) to get started.
+- See the [Vision & Roadmap](docs/vision.md) to understand where Heimdall is headed.
+
+If Heimdall helps your agent infrastructure, please consider supporting the project:
+- ❤️ **[Sponsor on GitHub](https://github.com/sponsors/mdostal)**
+- ☕ **[Buy Me A Coffee](https://www.buymeacoffee.com/mdostal)**
