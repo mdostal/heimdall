@@ -1,12 +1,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { createHttpServer, getLaneStatuses } from "./http-server.js";
 import { LaneRegistry } from "../core/lane-registry.js";
 import { StateStore } from "../core/state-store.js";
 import { EnvCredentialSource } from "../core/credential-source.js";
 import { LANE_STATUS_VALUES, SIGNAL_SOURCES } from "../core/status-model.js";
 import { LanePipeline, claudeAdapters } from "../core/lane-pipeline.js";
+
+/** Never the real repo .env — every POST /lanes test uses one of these, cleaned up after. */
+function tmpEnvPath(): string {
+  return path.join(os.tmpdir(), `heimdall-http-server-test-${Date.now()}-${Math.random().toString(36).slice(2)}.env`);
+}
 
 function registryWithOneConfiguredLane(): LaneRegistry {
   const env = { CLAUDE_TOKEN: "secret" };
@@ -483,6 +491,291 @@ test("GET / (hdl-ui-01) — the served script guards against a null reset_at (st
   }
 });
 
+test("hdl-lm-01: POST /lanes creates a lane, writes .env, and responds with restart_required", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const envPath = tmpEnvPath();
+  const server = createHttpServer(registry, store, undefined, envPath);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ lane_id: "gemini@ops", provider: "gemini", model: "gemini-3-pro", token: "secret-value" }),
+    });
+    assert.equal(res.status, 201);
+    const body = await res.json();
+    assert.equal(body.lane_id, "gemini@ops");
+    assert.equal(body.credential_ref, "GEMINI_OPS_TOKEN");
+    assert.equal(body.restart_required, true);
+    assert.equal(body.restart_command, "npm run dev");
+
+    // envPath starts empty in this test (independent of the in-memory
+    // registry fixture, which is constructed programmatically, not from
+    // this file) — appendLane's index-continuation logic is covered
+    // separately and thoroughly in env-file.test.ts.
+    const envContent = fs.readFileSync(envPath, "utf8");
+    assert.match(envContent, /HEIMDALL_LANE_1_ID=gemini@ops/);
+    assert.match(envContent, /GEMINI_OPS_TOKEN=secret-value/);
+  } finally {
+    server.close();
+    store.close();
+    fs.rmSync(envPath, { force: true });
+  }
+});
+
+test("hdl-lm-01: POST /lanes rejects a duplicate lane_id with 409", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const envPath = tmpEnvPath();
+  const server = createHttpServer(registry, store, undefined, envPath);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ lane_id: "claude@mathew.dostal", provider: "claude", model: "claude-sonnet", token: "x" }),
+    });
+    assert.equal(res.status, 409);
+    const body = await res.json();
+    assert.equal(body.error, "lane_already_declared");
+  } finally {
+    server.close();
+    store.close();
+    fs.rmSync(envPath, { force: true });
+  }
+});
+
+test("hdl-lm-01: POST /lanes with a missing field returns 400 naming the field", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const envPath = tmpEnvPath();
+  const server = createHttpServer(registry, store, undefined, envPath);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ lane_id: "gemini@ops", provider: "gemini", model: "gemini-3-pro" }), // no token
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.error, "missing_field");
+    assert.equal(body.field, "token");
+  } finally {
+    server.close();
+    store.close();
+    fs.rmSync(envPath, { force: true });
+  }
+});
+
+test("hdl-lm-01: POST /lanes with malformed JSON returns 400, not a crash", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const envPath = tmpEnvPath();
+  const server = createHttpServer(registry, store, undefined, envPath);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{not valid json",
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.error, "invalid_json");
+  } finally {
+    server.close();
+    store.close();
+    fs.rmSync(envPath, { force: true });
+  }
+});
+
+test("hdl-lm-02: GET /lanes reports credential_configured: true for a lane whose credential resolved", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes`);
+    const body = await res.json();
+    assert.equal(body[0].credential_configured, true);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-lm-02: GET /lanes reports credential_configured: false for a lane with an unresolved credential_ref, and never leaks the secret's env var name/value as a raw field", async () => {
+  const registry = new LaneRegistry(
+    [{ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "MISSING_TOKEN_VAR" }],
+    new EnvCredentialSource({}), // MISSING_TOKEN_VAR is not set
+  );
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes`);
+    const rawBody = await res.text();
+    const body = JSON.parse(rawBody);
+    assert.equal(body[0].credential_configured, false);
+    assert.doesNotMatch(rawBody, /"credential":/, "the raw Lane.credential field must never be serialized");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-lm-03: GET /lanes includes each lane's manual_reset_at (null when unset)", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes`);
+    const body = await res.json();
+    assert.equal(body[0].manual_reset_at, null);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-lm-03: POST /lanes/:laneId/reset-at sets it and GET /lanes reflects it", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+
+  try {
+    const setRes = await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/reset-at`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reset_at: future }),
+    });
+    assert.equal(setRes.status, 200);
+    const setBody = await setRes.json();
+    assert.equal(setBody.manual_reset_at, future);
+
+    const lanesRes = await fetch(`http://localhost:${port}/lanes`);
+    const lanes = await lanesRes.json();
+    assert.equal(lanes[0].manual_reset_at, future);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-lm-03: POST /lanes/:laneId/reset-at with reset_at: null clears a previously-set value", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+
+  try {
+    await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/reset-at`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reset_at: future }),
+    });
+    const clearRes = await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/reset-at`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reset_at: null }),
+    });
+    assert.equal(clearRes.status, 200);
+    const clearBody = await clearRes.json();
+    assert.equal(clearBody.manual_reset_at, null);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-lm-03: POST /lanes/:laneId/reset-at for an unknown lane returns 404", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes/never-declared/reset-at`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reset_at: new Date(Date.now() + 60_000).toISOString() }),
+    });
+    assert.equal(res.status, 404);
+    const body = await res.json();
+    assert.equal(body.error, "unknown_lane");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-lm-03: POST /lanes/:laneId/reset-at rejects a malformed timestamp with 400", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/reset-at`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reset_at: "not-a-real-timestamp" }),
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.error, "invalid_reset_at");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-lm-03: POST /lanes/:laneId/reset-at rejects a past timestamp with 400", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/reset-at`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reset_at: "2020-01-01T00:00:00.000Z" }),
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.error, "reset_at_in_the_past");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
 test("hdl-lo-01: GET /lanes includes each lane's manual_override state (null when unset)", async () => {
   const registry = registryWithOneConfiguredLane();
   const store = new StateStore(":memory:");
@@ -652,6 +945,66 @@ test("hdl-lo-02: GET / (dashboard) renders an override indicator distinct from t
     const body = await res.text();
     assert.match(body, /overrideBadge/, "must render a distinct override indicator, not fold override state into the status badge");
     assert.match(body, /if \(!manualOverride\) return ""/, "the override badge must render nothing when no override is set (not 'null' or an empty badge)");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-lm-04: GET / (dashboard) includes an Add Lane form posting to /lanes", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /id="add-lane-form"/);
+    assert.match(body, /name="lane_id"/);
+    assert.match(body, /name="provider"/);
+    assert.match(body, /name="model"/);
+    assert.match(body, /name="token"/);
+    assert.match(body, /fetch\("\/lanes"/, "the form must POST to /lanes, not a different endpoint");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-lm-04: GET / (dashboard) shows a token-configured indicator distinct from the status/override badges", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /function tokenChip/);
+    assert.match(body, /chip-missing/, "must visually distinguish a missing token, not just omit an indicator");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-lm-04: GET / (dashboard) includes an editable reset-at control calling POST /lanes/:laneId/reset-at", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /type=\\"datetime-local\\"/);
+    assert.match(body, /data-reset-save/);
+    assert.match(body, /"\/reset-at"/, "the save control must POST to the lane's /reset-at endpoint");
+    assert.match(body, /function toDatetimeLocalValue/, "must convert the stored UTC/ISO value into the input's local-time format");
   } finally {
     server.close();
     store.close();

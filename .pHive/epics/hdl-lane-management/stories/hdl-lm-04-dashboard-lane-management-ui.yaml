@@ -1,0 +1,79 @@
+id: hdl-lm-04-dashboard-lane-management-ui
+epic: hdl-lane-management
+title: Dashboard — add-lane form, token status, editable reset-at
+status: completed
+complexity: medium
+methodology: classic
+depends_on: [hdl-lm-01-env-autoload-and-add-lane, hdl-lm-02-credential-visibility, hdl-lm-03-manual-reset-at]
+
+description: |
+  Extends the dashboard (hdl-lane-status-ui, hdl-lane-override) with:
+  an Add Lane form (calls POST /lanes, shows a restart-required banner
+  with the exact restart command on success); a token-configured
+  indicator per row (distinct from the status badge and the override
+  badge); an editable reset-at control (datetime-local input + save,
+  calls POST /lanes/:laneId/reset-at) alongside the existing read-only
+  reset_at display.
+
+acceptance_criteria:
+  - "Given the dashboard is loaded, when the operator opens the Add Lane form and submits valid values, then POST /lanes is called and a restart-required banner appears showing the exact command to run"
+  - "Given POST /lanes returns 409/400 (duplicate lane_id or missing field), when the form is submitted, then the error is shown inline, not a silent failure or a generic crash"
+  - "Given a lane's credential_configured is false, when its row renders, then a visible indicator distinguishes it from a configured lane (e.g. a 'token missing' chip)"
+  - "Given a lane has an active manual_reset_at, when its row renders, then the editable reset-at control shows that value AND it's visually distinguishable from a purely sensed reset_at (matching the override badge's 'never silent' principle from hdl-lo-02)"
+  - "Given the operator sets a new reset-at value and saves, when the request completes, then the dashboard's next poll reflects it without a manual page reload"
+  - "All controls only ever call Heimdall's own endpoints (relative fetch, same-origin) — no external network requests, consistent with the zero-external-dependency ethos already established"
+
+steps:
+  - id: research
+    description: Confirm hdl-lm-01/02/03's exact request/response shapes before wiring the UI
+    agent: researcher
+  - id: implement
+    description: Add the Add Lane form, token indicator, and editable reset-at control to src/api/ui/dashboard.ts
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Extend http-server.test.ts's GET / structural checks with cases covering the new form/indicator/control markup
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review for correctness and convention compliance (matches dashboard.ts's existing event-delegation and poll-driven rendering patterns, no new dependencies)
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/api/ui/dashboard.ts
+      purpose: "renderRow()/overrideControls()'s event-delegation pattern (hdl-lo-02) is what the new Add Lane form and reset-at control should follow — one listener on #root, data-attributes on interactive elements"
+
+files_to_modify:
+  - file: src/api/ui/dashboard.ts
+    change: "Add an Add Lane form section above the table; add a token-configured chip and an editable reset-at control per row."
+
+design_decisions:
+  - decision: The reset-at editor uses a native <input type=\"datetime-local\">, converted to ISO-8601 on submit, rather than raw ISO text entry.
+    rationale: Meaningfully better UX for a time-entry field with zero new dependency — datetime-local is a standard HTML input type, not a framework/library.
+
+cross_cutting:
+  - concern: documentation
+    action: "None beyond hdl-lm-01/02/03's README updates — this story is UI-only."
+
+risks:
+  - severity: low
+    description: A control click racing the 5s poll could look like a no-op if the operator expects instant feedback.
+    mitigation: Same accepted latency as hdl-lo-02's override controls — matches established precedent in this exact codebase.
+
+references:
+  - path: .pHive/epics/hdl-lane-management/docs/design-discussion.md
+    relevant_excerpt: |
+      Extends the dashboard with: an Add lane form ... a token-configured
+      indicator per row ... an editable reset-at control ... alongside
+      the existing read-only reset_at display.

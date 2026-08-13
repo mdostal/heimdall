@@ -11,10 +11,38 @@ import { getAvailableRoute, parseTaskType } from "../core/route-selector.js";
 import { StateStore, type ManualOverride } from "../core/state-store.js";
 import type { LaneStatus } from "../core/status-model.js";
 import { renderDashboardHtml } from "./ui/dashboard.js";
+import { appendLane, deriveCredentialRef, laneIdAlreadyDeclared } from "../core/env-file.js";
 
-/** GET /lanes' response shape — LaneStatus plus the hdl-lo-01 manual override, so a UI/API consumer never needs a second request to know both. */
+const DEFAULT_ENV_FILE_PATH = ".env";
+
+/** Collects and JSON-parses a request body. Shared by every mutation route (override, reset-at, add-lane). */
+function readJsonBody(req: import("node:http").IncomingMessage): Promise<{ ok: true; data: unknown } | { ok: false }> {
+  return new Promise((resolve) => {
+    let rawBody = "";
+    req.on("data", (chunk) => {
+      rawBody += chunk;
+    });
+    req.on("end", () => {
+      try {
+        resolve({ ok: true, data: JSON.parse(rawBody || "{}") });
+      } catch {
+        resolve({ ok: false });
+      }
+    });
+  });
+}
+
+/**
+ * GET /lanes' response shape — LaneStatus plus the hdl-lo-01 manual override
+ * and hdl-lm-02's credential_configured, so a UI/API consumer never needs a
+ * second request to know any of them. credential_configured is a boolean
+ * ONLY — the raw secret is never serialized here or anywhere else in this
+ * codebase (REQ-07 invariant).
+ */
 export interface LaneStatusWithOverride extends LaneStatus {
   manual_override: ManualOverride;
+  credential_configured: boolean;
+  manual_reset_at: string | null;
 }
 
 const VALID_OVERRIDE_STATES = new Set(["enabled", "disabled", "auto"]);
@@ -37,6 +65,8 @@ export function getLaneStatuses(registry: LaneRegistry, store: StateStore): Lane
   return store.getAllCurrentStatuses().map((status) => ({
     ...status,
     manual_override: store.getManualOverride(status.lane_id),
+    credential_configured: registry.get(status.lane_id)?.credential != null,
+    manual_reset_at: store.getManualResetAt(status.lane_id),
   }));
 }
 
@@ -54,6 +84,7 @@ export function createHttpServer(
   registry: LaneRegistry,
   store: StateStore,
   refreshLane?: RefreshLaneFn,
+  envFilePath: string = DEFAULT_ENV_FILE_PATH,
 ): Server {
   return createServer((req, res) => {
     // Liveness alias — distinct from /lanes on purpose: a monitor (e.g.
@@ -77,6 +108,56 @@ export function createHttpServer(
     if (req.method === "GET" && req.url === "/lanes") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(getLaneStatuses(registry, store)));
+      return;
+    }
+
+    // hdl-lm-01: add a new lane — writes a HEIMDALL_LANE_<N>_* block to the
+    // local .env (see src/core/env-file.ts). Does NOT restart the process —
+    // loadLaneDeclarations() only runs at boot, so the new lane is inert
+    // until the operator restarts (see the response's restart_command).
+    if (req.method === "POST" && req.url === "/lanes") {
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+        const input = body.data as { lane_id?: unknown; provider?: unknown; model?: unknown; token?: unknown };
+        const missing = (["lane_id", "provider", "model", "token"] as const).find(
+          (field) => typeof input[field] !== "string" || input[field] === "",
+        );
+        if (missing) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "missing_field", field: missing }));
+          return;
+        }
+        const laneId = input.lane_id as string;
+
+        if (registry.get(laneId) || laneIdAlreadyDeclared(envFilePath, laneId)) {
+          res.writeHead(409, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "lane_already_declared", lane_id: laneId }));
+          return;
+        }
+
+        const credentialRef = deriveCredentialRef(laneId);
+        appendLane(envFilePath, {
+          lane_id: laneId,
+          provider: input.provider as string,
+          model: input.model as string,
+          credential_ref: credentialRef,
+          token: input.token as string,
+        });
+
+        res.writeHead(201, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            lane_id: laneId,
+            credential_ref: credentialRef,
+            restart_required: true,
+            restart_command: "npm run dev",
+          }),
+        );
+      });
       return;
     }
 
@@ -151,21 +232,14 @@ export function createHttpServer(
         return;
       }
 
-      let rawBody = "";
-      req.on("data", (chunk) => {
-        rawBody += chunk;
-      });
-      req.on("end", () => {
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(rawBody || "{}");
-        } catch {
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_json" }));
           return;
         }
 
-        const state = (parsed as { state?: unknown }).state;
+        const state = (body.data as { state?: unknown }).state;
         if (typeof state !== "string" || !VALID_OVERRIDE_STATES.has(state)) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(
@@ -181,6 +255,58 @@ export function createHttpServer(
         store.setManualOverride(laneId, value);
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ lane_id: laneId, manual_override: value }));
+      });
+      return;
+    }
+
+    // hdl-lm-03: manual reset_at ("change the times") — mirrors the
+    // override route exactly. Scheduling-only: InProcessScheduler prefers
+    // this over the sensed reset_at (hdl-rar-01); does not touch
+    // ControlAdapter/ReconcileContext/Argus.
+    const resetAtMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/reset-at$/);
+    if (resetAtMatch) {
+      const laneId = decodeURIComponent(resetAtMatch[1]);
+      if (!registry.get(laneId)) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "unknown_lane", lane_id: laneId }));
+        return;
+      }
+
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+
+        const resetAt = (body.data as { reset_at?: unknown }).reset_at;
+        if (resetAt === null) {
+          store.setManualResetAt(laneId, null);
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ lane_id: laneId, manual_reset_at: null }));
+          return;
+        }
+
+        if (typeof resetAt !== "string") {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_reset_at", message: "reset_at must be an ISO-8601 string or null" }));
+          return;
+        }
+        const parsedMs = Date.parse(resetAt);
+        if (Number.isNaN(parsedMs)) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_reset_at", message: "reset_at is not a valid ISO-8601 timestamp" }));
+          return;
+        }
+        if (parsedMs <= Date.now()) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "reset_at_in_the_past", message: "reset_at must be in the future" }));
+          return;
+        }
+
+        store.setManualResetAt(laneId, resetAt);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ lane_id: laneId, manual_reset_at: resetAt }));
       });
       return;
     }

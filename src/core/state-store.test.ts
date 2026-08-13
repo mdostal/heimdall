@@ -251,3 +251,74 @@ test("a StateStore opened against a DB file created before manual_override exist
     fs.rmSync(dbPath, { force: true });
   }
 });
+
+test("getManualResetAt defaults to null for a lane with no manual reset_at set (hdl-lm-03)", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+
+  assert.equal(store.getManualResetAt("claude@mathew.dostal"), null);
+  store.close();
+});
+
+test("setManualResetAt persists and getManualResetAt reads it back, including clearing (hdl-lm-03)", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+
+  store.setManualResetAt("claude@mathew.dostal", "2026-08-13T18:00:00.000Z");
+  assert.equal(store.getManualResetAt("claude@mathew.dostal"), "2026-08-13T18:00:00.000Z");
+
+  store.setManualResetAt("claude@mathew.dostal", null);
+  assert.equal(store.getManualResetAt("claude@mathew.dostal"), null);
+  store.close();
+});
+
+test("setManualResetAt works even when the lane was never upserted first (hdl-lm-03)", () => {
+  const store = new StateStore(":memory:");
+
+  assert.doesNotThrow(() => store.setManualResetAt("never-upserted", "2026-08-13T18:00:00.000Z"));
+  assert.equal(store.getManualResetAt("never-upserted"), "2026-08-13T18:00:00.000Z");
+  store.close();
+});
+
+test("setManualResetAt does not clobber manual_override or provider/credential_ref already on file (hdl-lm-03)", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+  store.setManualOverride("claude@mathew.dostal", "disabled");
+
+  store.setManualResetAt("claude@mathew.dostal", "2026-08-13T18:00:00.000Z");
+
+  assert.equal(store.getManualOverride("claude@mathew.dostal"), "disabled");
+  const lanes = store.listLanes().map((lane) => ({ ...lane }));
+  assert.deepEqual(lanes, [
+    { lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" },
+  ]);
+  store.close();
+});
+
+test("a StateStore opened against a DB file created before manual_reset_at existed does not crash (defensive migration, hdl-lm-03)", () => {
+  // Simulate a pre-hdl-lm-03 database — has manual_override (hdl-lo-01) but
+  // not yet manual_reset_at.
+  const dbPath = path.join(os.tmpdir(), `heimdall-migration-test-lm03-${Date.now()}.sqlite`);
+  const legacyDb = new DatabaseSync(dbPath);
+  legacyDb.exec(`
+    CREATE TABLE lanes (
+      lane_id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      credential_ref TEXT NOT NULL,
+      manual_override TEXT
+    );
+  `);
+  legacyDb.close();
+
+  try {
+    assert.doesNotThrow(() => {
+      const store = new StateStore(dbPath);
+      store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+      store.setManualResetAt("claude@mathew.dostal", "2026-08-13T18:00:00.000Z");
+      assert.equal(store.getManualResetAt("claude@mathew.dostal"), "2026-08-13T18:00:00.000Z");
+      store.close();
+    });
+  } finally {
+    fs.rmSync(dbPath, { force: true });
+  }
+});
