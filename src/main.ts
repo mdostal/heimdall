@@ -173,7 +173,7 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
       if (!current) continue;
       const adapter = controlAdapters.get(lane.lane_id);
       if (!adapter) continue;
-      adapter.reconcile(lane, current.status).catch((err) => {
+      adapter.reconcile(lane, current.status, { reason: current.reason, reset_at: current.reset_at }).catch((err) => {
         console.error(`[main] reconcile() failed for lane ${lane.lane_id}:`, err);
       });
     }

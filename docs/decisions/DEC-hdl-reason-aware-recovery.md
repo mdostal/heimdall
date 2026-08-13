@@ -1,0 +1,42 @@
+# DEC-hdl-reason-aware-recovery
+
+**Status:** Accepted (2026-08-12) — items 1+2 implemented directly (small, isolated, testable per the recommendation below) as epic `hdl-reason-aware-recovery` (stories `hdl-rar-01-scheduler-reset-at`, `hdl-rar-02-actuation-reason-context`). Item 3 (UI + agent tooling) remains a separate future planning pass, unchanged.
+**Supersedes:** [`DEC-hdl-429-corroboration.md`](DEC-hdl-429-corroboration.md)'s narrower "what should a Claude 429 resolve to" framing — generalized per operator feedback: this isn't a Claude-specific or 429-specific problem, it's a structural gap in how `reason`/`reset_at` are (not) consumed downstream of signal capture, across every provider and every suspect status.
+
+## The operator's direction (verbatim intent, 2026-08-12)
+
+- Recovery from `degraded` should already run "a few checks with a basic backoff," escalating to `down` only once *consistently* down — this is the corroboration pattern that exists today (see below), so the flip-flopping symptom pointed at a different bug: **status is treated as the only lever, when Heimdall already captures the full reason.**
+- **`out_of_credit` with a known `reset_at`** → Heimdall should schedule the retry *for* that timestamp, not poll blindly until then.
+- **Down for an unrelated/unknown reason** → no known reset time exists, so periodic retry ("try every so often to see when it comes back") is the correct fallback — but that's a distinct code path from the reset_at case, not the same blind interval for both.
+- This is not novel: "status codes and descriptions and errors and error codes" as differentiated signals predate AI entirely — the ask is to actually use the structured data already being captured, not invent new status semantics.
+- **The lane on/off toggle is not the probe's decision to make.** A signal-source adapter (e.g. `probeClaudeLane`) reporting `degraded`/`down`/`up` is correct and should stay a status+reason+reset_at signal. The actual **traffic-directing decision — route through or block — belongs one layer up**, at Heimdall's control/actuation layer (`ControlAdapter` → Multica `max_concurrent_tasks`), which already exists as the "top-level direct through" mechanism. The gap isn't that probes need a new override lever; it's that the layer that already does the directing isn't using the reason/reset_at data available to it.
+- Separately (tracked, not scoped in this doc): a UI to see lane state, manually disable/enable lanes, add new lanes, and tools/plugins for agents to exercise and test through Heimdall — this is the standalone-mode UI requirement already captured as `has_ui: true` in `.pHive/project-profile.yaml` (see the `[[project_pantheon_god_ui_model]]` memory) — restated here because this feedback thread is what's driving it concretely (a lane-control surface, not just a settings/lane-registration surface).
+
+## Current behavior, verified against the actual code (2026-08-12)
+
+The `reason`/`reset_at` gap is real and precisely located — capture is fully correct, consumption is where it's dropped:
+
+**Capture (correct, nothing to fix here):**
+- `resolveWithCorroboration` (`src/core/signal-sources/escalation.ts:65-90`) already implements exactly the "run a few checks, escalate to down only when consistently down" pattern the operator described — `down`/`out_of_credit` require two consecutive matching raw verdicts before being trusted; a single reading downgrades to `degraded` instead. **This part already works as intended.**
+- `LanePipeline.persistResolved` (`src/core/lane-pipeline.ts:140-163`) persists `reset_at` and `reason` into the state store on every resolved tick, and correctly suppresses `reset_at` while a verdict is still uncorroborated (`corroboration.corroborated ? resolved.reset_at : null`) — so a trustworthy `reset_at` reaching storage means the corroboration gate already passed.
+- `GET /lanes` exposes both fields today (verified live in the 2026-08-12 standalone smoke test — every lane entry includes `reset_at` and a human-readable `reason`).
+
+**Consumption (the actual gap, two call sites):**
+
+1. **`InProcessScheduler.poll()`** (`src/core/scheduler/in-process-scheduler.ts:86-123`) — polls every suspect lane (`degraded`/`down`/`out_of_credit`) on a flat `DEFAULT_INTERVAL_MS = 5_000`, unconditionally. It reads `current.status` (line 88) but never reads `current.reset_at`. A lane that's `out_of_credit` with a `reset_at` six hours out gets hammered with a real probe call every 5 seconds for six hours — wasted calls, and exactly the kind of blind polling the operator is pointing at. This is also the doc's own previously-flagged deferred item (`DEC-hdl-scheduler-backend.md`: *"Gradual backoff curve for InProcessScheduler ... currently deferred"*) — this generalizes that TODO into "backoff informed by reset_at, not just a curve."
+
+2. **`ControlAdapter.reconcile(lane, status)`** (`src/core/actuation/control-adapter.ts:14`, implemented by `MulticaControlAdapter.reconcile` at `src/core/actuation/multica-control-adapter.ts:58-65`) — the interface signature only passes `status: LaneStatusValue`, not the full `LaneStatus`. `reason`/`reset_at` never reach the actuation layer at all today. The block/allow decision itself (`SUSPECT_STATUSES = {down, degraded, out_of_credit}` → `max_concurrent_tasks: 0`, `multica-control-adapter.ts:30,60`) is the correct top-level directing mechanism the operator confirmed should exist — it's *right* that this is a binary "let it through or don't," not a per-signal-source override. What's missing is that this layer can't yet log or act on *why* it's blocking, because it was never handed that information.
+
+## Proposed shape (not yet built — for sign-off before implementation)
+
+1. **Reset_at-aware scheduling in `InProcessScheduler`.** When the current stored status has a non-null `reset_at` in the future, schedule the next `refresh()` at (or shortly after) that timestamp instead of the flat 5s interval — collapsing to a `Math.max(DEFAULT_INTERVAL_MS, resetAt - now)` style delay computation. When `reset_at` is null (down for an unknown/unstructured reason), keep the existing flat-interval periodic retry — that's already the correct fallback per the operator's own framing ("tried every so often"). This is a scheduling-layer change only; it doesn't touch the `multica-native-no-box-runners` HARD LAW (still the same in-process event loop, just smarter about its own delay).
+2. **Widen `ControlAdapter.reconcile` to receive the full `LaneStatus`** (or at minimum `reason`/`reset_at` alongside `status`), so `MulticaControlAdapter`'s Argus emission (`emitResult`, `multica-control-adapter.ts:134-149`) can record *why* a lane was blocked — out-of-credit-until-`reset_at` vs. down-for-unknown-reason are operationally different events even though today they produce the same `max_concurrent_tasks: 0` action. This is additive (existing block/allow logic is unchanged) and is what a future lane-control UI would read to show real status, not just up/down.
+3. **UI + agent tooling** (tracked here, not designed here): a lane-control surface satisfying the standalone `has_ui: true` requirement — view live lane state (status, reason, reset_at), manually disable/enable a lane (an operator override that should itself flow through the same `ControlAdapter` path, not a separate code path), add new lanes, and expose the same capability as tools for agents to exercise/test through Heimdall (MCP tool surface already exists at `src/api/mcp-server.ts` — extending it with disable/enable/add-lane tools is the natural agent-facing half of this).
+
+## Recommendation
+
+Items 1 and 2 are small, well-isolated changes (one file each) with clear current-vs-desired behavior — low risk to implement directly. Item 3 is UI-scale work and belongs in its own planning pass (`/plugin-hive:plan`), not bundled into this doc's code-level fix. Given this spans multiple files and an epic already exists for the scheduler design (`lane-health-status`/`hdl-scheduler`/`hdl-actuation`), recommend routing 1+2 through a short follow-up story under the relevant epic rather than an unplanned direct edit, so it's tracked and tested like the rest of this codebase's REQ-numbered work — but this doc captures the full technical shape already, so that story shouldn't need re-deriving it.
+
+## Open question for operator sign-off
+
+Implement 1+2 now directly (small, isolated, testable), or run it through `/plugin-hive:plan` as a proper story first? Either way, item 3 (UI) needs its own planning pass regardless.

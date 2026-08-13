@@ -1,13 +1,22 @@
 project_name: "heimdall"
-type: greenfield
+type: brownfield
 discovered: "2026-07-25"
 source: "docs/north-star.md + kickoff discovery conversation"
+re_kickoff:
+  date: "2026-08-12"
+  reason: >
+    Project shipped real code since the 2026-07-25 greenfield kickoff
+    (lane-health-status, hdl-scheduler, hdl-actuation epics all merged to
+    main, v0.4.0). Re-kickoff transitions type greenfield -> brownfield and
+    backfills tech_stack/structure/architecture/test_infrastructure from the
+    now-existing codebase. ship_target, project_type, and north_star were
+    reviewed and kept as-is; has_ui was changed false -> true (see notes).
 
 ship_target:
   kind: github-release
 
 project_type: service
-has_ui: false
+has_ui: true
 
 notes: |
   Hybrid classification, captured verbatim from kickoff discovery (2026-07-25):
@@ -15,24 +24,201 @@ notes: |
     other components call (the Auriga orchestrator, per-dispatch). Secondary
     framework/plugin-interface surface lets it plug into Pantheon or be
     consumed by any harness capable of multi-agent spin-up.
-  - has_ui=false describes the core headless service only. A light
-    standalone-only settings UI is planned for signing up/verifying new
-    agents & runtimes when NOT running inside Pantheon; inside Pantheon that
-    config surface lives in Vesta/Multica instead, not in Heimdall.
+  - has_ui: at 2026-07-25 kickoff this was recorded false (core headless
+    service only). Corrected to true at the 2026-08-12 re-kickoff — this is
+    a firm requirement of the dual-mode distribution model, not an optional
+    nice-to-have:
+      - **Standalone mode** (NOT running inside Pantheon): Heimdall MUST
+        stand up its own app UI. It has no L2 Plugin Descriptor/lifecycle to
+        piggyback on, so it owns the full interaction surface itself —
+        settings, adding/verifying new lanes and runtimes, and a liveliness
+        view (lane/token/work status across the board). It also still needs
+        harness-plugin interaction (e.g. a Claude Code skill, or whatever
+        harness is driving multi-agent spin-up) in this mode, in addition to
+        the UI.
+      - **Pantheon-plugin mode**: Heimdall piggybacks on Pantheon's L2
+        Plugin Descriptor and lifecycle instead of building its own UI —
+        config/interaction surfaces live in Vesta/Multica, not in Heimdall.
+    This is exactly what every other Pantheon "god" must satisfy too (see
+    docs/north-star.md lines 24-26). As of 2026-08-12 no UI framework/code
+    has landed yet (tech_stack scan below found none) — has_ui:true tracks
+    the requirement, not shipped code; do not re-flip it to false, the
+    standalone build is not shippable without it.
   - Distribution property (applies to every Pantheon "god", not just
     Heimdall — see docs/north-star.md "Finalized kickoff classification"):
     every plugin ships OSS + standalone-capable (works with any multi-agent
     harness) AND as a Pantheon plugin (fuller vision via Auriga/Vesta/Multica).
     This is a distribution property, not a project_type change.
 
+claude_md_summary: |
+  No CLAUDE.md present at re-kickoff (2026-08-12). Authoritative project
+  context instead lives in docs/north-star.md, docs/decisions/ (DEC-*.md
+  ADRs), docs/scheduler-constraints.md, docs/heimdall-role-and-actuation.md,
+  and .pHive/planning/architecture.md. Key rules pulled from those sources:
+  - HARD LAW `multica-native-no-box-runners` (docs/decisions/
+    DEC-hdl-scheduler-backend.md): never a standalone box cron/launchd/
+    shell-daemon for scheduling. Use a Multica autopilot (coarse, cron,
+    >=1min) or the service's own in-process event loop (fine,
+    suspect-lane-only, with back-off).
+  - Build: `npm run build` (tsc -p tsconfig.json). Dev: `npm run dev`
+    (node --experimental-sqlite --import tsx src/main.ts). Test: `npm test`
+    (node's native --test runner over src/**/*.test.ts + test/**/*.test.ts).
+  - REQ-00 (per-provider signal inventory spike) had not been run as of the
+    architecture doc — signal-source adapter specifics are deliberately left
+    pluggable pending that spike.
+
 tech_stack:
-  languages: []
-  frameworks: []
-  build_tools: []
-  package_managers: []
-  versions: {}
-  # Greenfield: no code yet. Populated during the Architecture step of the
-  # greenfield product-kickoff pipeline (.pHive/planning/architecture.md).
+  languages:
+    - typescript
+    - javascript
+  frameworks:
+    - "@modelcontextprotocol/sdk"
+    - "@opentelemetry/sdk-node"
+  build_tools:
+    - tsc
+    - tsx
+  package_managers:
+    - npm
+  versions:
+    node: ">=22.5.0"
+    typescript: "^5.7.0"
+    tsx: "^4.19.0"
+    "@modelcontextprotocol/sdk": "^1.29.0"
+    "@opentelemetry/api": "^1.9.1"
+  # No UI framework detected (no react/vue/svelte/next/vite in package.json)
+  # despite has_ui: true above — the planned settings UI hasn't landed yet.
+
+structure:
+  modules:
+    - name: core
+      purpose: >
+        Domain logic — lane registry/credentials, status model, lane
+        pipeline, route selection, state store (SQLite), scheduler backends
+        (Multica autopilot + in-process), actuation (circuit breaker,
+        Multica REST/control adapters), telemetry (Argus/OTel client).
+      source: src/core/
+      tests: src/core/**/*.test.ts (co-located)
+    - name: api
+      purpose: >
+        Service interfaces over the same core query surface — HTTP server,
+        CLI, MCP server (Pantheon-mode tool exposure).
+      source: src/api/
+      tests: src/api/**/*.test.ts (co-located)
+  entry_points:
+    - src/main.ts (full service: registry + state store + telemetry + schedulers + control-adapter loop + HTTP)
+    - src/api/http-server.ts (HTTP-only dev entry)
+    - src/api/cli.ts (CLI query surface)
+    - src/api/mcp-server.ts (MCP tool server)
+
+architecture:
+  pattern: >
+    Composition-root service (composeService() in src/main.ts) wiring
+    independently-testable core modules; no MVC/MVVM framework layer.
+  di_framework: manual (constructor/factory injection, e.g. injectable CommandRunner/fetchImpl for tests)
+  state_management: SQLite-backed StateStore (src/core/state-store.ts) — current + historical per-lane status
+  navigation: n/a (no UI)
+  data_layer: >
+    LaneRegistry loads lane declarations from HEIMDALL_LANE_<N>_* env vars;
+    CredentialSource resolves secrets; StateStore persists status; adapters
+    (multica-rest-client, multica-control-adapter, control-adapter/stub)
+    bridge to external Multica control plane.
+
+conventions:
+  naming: >
+    kebab-case filenames, PascalCase classes/types, camelCase functions;
+    REQ-NN / DEC-xxx identifiers cross-referenced from code comments to
+    docs/decisions/ and .pHive/planning/prd.md.
+  file_organization: co-located *.test.ts next to source; per-concern
+    subdirectories under src/core/ (scheduler/, actuation/, telemetry/,
+    signal-sources/).
+  branching: >
+    feat/<epic-or-ticket-slug> branches merged to dev, dev merged to main via
+    PR (per recent git log: "Merge pull request #N from mdostal/<branch>").
+  commit_messages: >
+    Mix of epic-tagged commits (e.g. "[hda-05] DEC-... decision record"),
+    conventional-ish prefixes (fix:, docs:, ci:, test(e2e):), and ticket IDs
+    (PAN-NNNN) referencing Linear-style tracking.
+
+test_infrastructure:
+  unit:
+    framework: "node:test (native Node.js test runner via tsx)"
+    location: src/**/*.test.ts (co-located with source)
+    count: "10 files (co-located under src/core/ and src/api/)"
+    coverage_tool: none detected
+  integration:
+    framework: "node:test"
+    location: test/sla-harness/index.test.ts
+  e2e:
+    framework: "node:test"
+    location: test/e2e/route-selection-handshake.test.ts
+    count: "1 spec (Minerva route-selection handshake vs live declared lanes)"
+  mocking: hand-rolled fakes/stubs (e.g. injected CommandRunner/fetchImpl, StubControlAdapter) — no mocking library
+  test_commands:
+    - "npm test"
+    - "npm run sla-report"
+
+ci_cd:
+  platform: GitHub Actions
+  workflows:
+    - ci.yml (stack-auto-detect install/build/test gate on PRs into dev and main/master)
+    - promote.yml
+  gating: "ci.yml is the standard Pantheon/god-repo CI gate on every PR into dev/main"
+
+documentation_found:
+  - path: docs/north-star.md
+    content_summary: Product north star and finalized kickoff classification
+  - path: docs/heimdall-role-and-actuation.md
+    content_summary: Role and actuation model description
+  - path: docs/scheduler-constraints.md
+    content_summary: Constraints behind the pluggable scheduler design (feeds DEC-hdl-scheduler-backend)
+  - path: docs/decisions/DEC-hdl-role-actuation.md
+    content_summary: ADR — role/actuation decision record
+  - path: docs/decisions/DEC-hdl-scheduler-backend.md
+    content_summary: "ADR — scheduler backend decision; source of the multica-native-no-box-runners HARD LAW"
+  - path: .pHive/planning/architecture.md
+    content_summary: v1/P0 architecture — tech stack, components, API contract, data model
+  - path: README.md
+    content_summary: OSS project overview
+  - path: VISION.md
+    content_summary: Project vision statement
+
+existing_knowledge:
+  mcp_servers: []
+  existing_skills: []
+  existing_hooks: []
+  # No .claude/ directory present at re-kickoff (2026-08-12) — no project-local settings/skills/hooks to inventory.
+
+code_quality:
+  linters: []
+  formatters: []
+  pre_commit:
+    framework: null
+    hooks: []
+  code_snippets:
+    - path: src/main.ts
+      pattern: composition-root
+      annotation: >
+        composeService() wires registry, state store, telemetry, schedulers,
+        and control-adapter reconcile loop into one running service; kept
+        separate from the entrypoint so tests can inject a mock
+        CommandRunner/fetchImpl and inspect every piece without touching a
+        real Multica daemon, Argus connection, or bound port.
+      lines: "1-40"
+    - path: src/core/lane-registry.ts
+      pattern: env-driven-declarative-config
+      annotation: >
+        Lanes declared via HEIMDALL_LANE_<N>_{ID,PROVIDER,CREDENTIAL_REF}
+        env-var triples (contiguous numbering, stops at first gap);
+        credential resolution failure is reported as down/unconfigured
+        rather than crashing or silently dropping the lane (REQ-07).
+      lines: "1-25"
+  test_first_signals:
+    co_located_tests: true
+    test_before_source: inconclusive
+    test_runner_in_precommit: false
+    bdd_keywords: false
+    test_absence: false
+project_maturity: active_development
 
 integrations:
   cli_tools:
@@ -43,7 +229,7 @@ integrations:
   mcp_servers:
     firecrawl: missing
     context7: missing
-    posthog: missing
+    posthog: detected  # re-detected at 2026-08-12 re-kickoff (was missing 2026-07-25)
     firebase: missing
     mobile-mcp: missing
   vaults:

@@ -40,6 +40,29 @@ test("does not fire on the very first observation (no prior status to compare)",
   assert.equal(adapter.getRecordedActions().length, 0);
 });
 
+test("threads reason/reset_at context through to the recorded action when provided", async () => {
+  const adapter = new StubControlAdapter();
+  await adapter.reconcile(LANE, "up");
+  await adapter.reconcile(LANE, "out_of_credit", {
+    reason: "billing error (402)",
+    reset_at: "2026-08-13T00:00:00.000Z",
+  });
+
+  const action = adapter.getRecordedActions()[0];
+  assert.equal(action.reason, "billing error (402)");
+  assert.equal(action.reset_at, "2026-08-13T00:00:00.000Z");
+});
+
+test("reconcile() without a context argument still works — reason/reset_at default to null (back-compat)", async () => {
+  const adapter = new StubControlAdapter();
+  await adapter.reconcile(LANE, "up");
+  await adapter.reconcile(LANE, "down");
+
+  const action = adapter.getRecordedActions()[0];
+  assert.equal(action.reason, null);
+  assert.equal(action.reset_at, null);
+});
+
 test("logs loudly (console.warn) by default, not a quiet debug line", async () => {
   const originalWarn = console.warn;
   let warned = false;

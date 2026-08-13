@@ -62,6 +62,26 @@ test("makes no real network/CLI call — pure in-memory bookkeeping only (struct
   assert.ok(!/fetch\(|execFile|child_process|CommandRunner/.test(src), "actuation-stub.ts must stay a stub with no real external calls");
 });
 
+test("threads reason/reset_at context through to the recorded action when provided", () => {
+  const stub = new ActuationStub(() => "2026-07-25T00:00:00.000Z", () => {});
+  stub.onStatusChange(LANE, "up");
+  stub.onStatusChange(LANE, "out_of_credit", { reason: "billing error (402)", reset_at: "2026-07-25T18:00:00.000Z" });
+
+  const action = stub.getRecordedActions()[0];
+  assert.equal(action.reason, "billing error (402)");
+  assert.equal(action.reset_at, "2026-07-25T18:00:00.000Z");
+});
+
+test("reason/reset_at default to null when no context is provided (back-compat, existing callers unaffected)", () => {
+  const stub = new ActuationStub(() => "2026-07-25T00:00:00.000Z", () => {});
+  stub.onStatusChange(LANE, "up");
+  stub.onStatusChange(LANE, "down");
+
+  const action = stub.getRecordedActions()[0];
+  assert.equal(action.reason, null);
+  assert.equal(action.reset_at, null);
+});
+
 test("tracks lanes independently — one lane's transition does not affect another's baseline", () => {
   const stub = new ActuationStub(() => "2026-07-25T00:00:00.000Z", () => {});
   const laneA = { lane_id: "claude@mathew.dostal", provider: "claude" };
