@@ -42,3 +42,5 @@ npm-debug.log*
 !.pHive/epics/hdl-routing-strategies/**
 !.pHive/epics/hdl-gemini-signals/
 !.pHive/epics/hdl-gemini-signals/**
+!.pHive/epics/hdl-kimi-signals/
+!.pHive/epics/hdl-kimi-signals/**
