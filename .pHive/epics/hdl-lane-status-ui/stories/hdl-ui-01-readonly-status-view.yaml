@@ -1,0 +1,127 @@
+id: hdl-ui-01-readonly-status-view
+epic: hdl-lane-status-ui
+title: GET / serves a read-only live lane-status dashboard
+status: completed
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  Add GET / to the existing node:http router in src/api/http-server.ts,
+  returning a single self-contained HTML page (inline <style>/<script>, no
+  build step, no new npm dependency) that polls the existing GET /lanes
+  endpoint and renders one row per lane: lane_id, provider, a color-coded
+  status badge, reason, a human-formatted reset_at (blank when null),
+  last_updated, and signal_source. This is the first vertical slice of
+  Heimdall's standalone-mode UI requirement (has_ui: true) — read-only
+  visibility only; manual disable/enable, add-lane, and MCP agent-tooling
+  are explicitly deferred to follow-up epics (see design-discussion.md).
+
+acceptance_criteria:
+  - "Given the server is running with 0 or more declared lanes, when a browser requests GET /, then it receives a 200 text/html response containing a table (or equivalent) that will render one row per lane returned by GET /lanes"
+  - "Given a lane has a non-null reset_at, when the page renders that lane's row, then reset_at is shown in a human-readable form (not a raw ISO string dumped verbatim, though a straightforward Date formatting call is sufficient — no timezone-conversion complexity required)"
+  - "Given a lane has reset_at: null (the common case — up, or unconfigured), when the page renders that lane's row, then the reset_at cell is blank, not 'Invalid Date', 'null', or similar"
+  - "Given zero lanes are declared, when GET / is requested, then the page still renders 200 with an empty-state message, not an error"
+  - "The page's JS only ever calls Heimdall's own GET /lanes endpoint (relative fetch, same-origin) — no external network requests, no CDN script/style tags (matches the zero-external-dependency ethos already established for this repo)"
+  - "GET /lanes, GET /healthz, GET /available-route, and POST /lanes/:laneId/refresh all continue to behave exactly as before — this story only adds a new route, it does not modify existing ones"
+
+steps:
+  - id: research
+    description: Confirm the existing router structure in http-server.ts and the exact LaneStatus shape returned by GET /lanes before writing the new route
+    agent: researcher
+  - id: implement
+    description: Add src/api/ui/dashboard.ts (HTML/CSS/JS template) and wire GET / into http-server.ts's existing router chain
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Extend src/api/http-server.test.ts with cases for GET / per the acceptance criteria above
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review for correctness, convention compliance (matches existing router style, zero new dependencies), and confirm no existing route's behavior changed
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/api/http-server.ts
+      purpose: "The existing router (129 lines, plain node:http, if-chain style) — GET / slots into the same createServer((req, res) => {...}) chain as the existing routes"
+    - path: src/api/http-server.test.ts
+      purpose: Existing test file to extend, not a new file
+    - path: src/core/status-model.ts
+      purpose: "LaneStatus shape (lane_id, provider, status, reset_at, reason, last_updated, signal_source) — exactly what GET /lanes already returns and what the dashboard renders"
+
+files_to_modify:
+  - file: src/api/ui/dashboard.ts
+    change: "New file — exports a renderDashboardHtml() function (or a DASHBOARD_HTML constant, implementer's call) producing the self-contained HTML/CSS/JS page described above."
+  - file: src/api/http-server.ts
+    change: "Import the dashboard module and add a GET / branch to the existing router if-chain, following the exact style of the existing GET /healthz / GET /lanes branches (writeHead + res.end)."
+  - file: src/api/http-server.test.ts
+    change: Add test cases per acceptance criteria above.
+
+code_examples:
+  - title: Existing router style — the new GET / branch should match this exactly
+    file: src/api/http-server.ts
+    snippet: |
+      if (req.method === "GET" && req.url === "/healthz") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ status: "ok" }));
+        return;
+      }
+
+      if (req.method === "GET" && req.url === "/lanes") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(getLaneStatuses(registry, store)));
+        return;
+      }
+
+  - title: The data shape the dashboard renders (LaneStatus) — already correct end-to-end
+    file: src/core/status-model.ts
+    snippet: |
+      export interface LaneStatus {
+        lane_id: string;
+        provider: string;
+        status: LaneStatusValue;
+        reset_at: string | null;
+        reason: string | null;
+        last_updated: string;
+        signal_source: SignalSource;
+      }
+
+design_decisions:
+  - decision: Keep the HTML/CSS/JS in a separate module (src/api/ui/dashboard.ts) rather than a large inline string literal inside http-server.ts.
+    rationale: Keeps the router file scannable; matches this repo's existing one-concern-per-file layout (route-selector.ts, status-model.ts are each single-purpose files).
+  - decision: No build step, no framework, no new npm dependency — a plain string-templated HTML page with inline <style>/<script>.
+    rationale: "Matches package.json's existing zero-UI-dependency footprint and north_star.audience (\"internal/operator-facing... not a polished public product\"); a build step or framework would be disproportionate to a single-operator read-only status page."
+
+cross_cutting:
+  - concern: documentation
+    action: "Update README.md's architecture diagram/Query-surfaces section to mention the new GET / dashboard alongside HTTP·CLI·MCP."
+
+risks:
+  - severity: low
+    description: A malformed/missing reset_at could render as 'Invalid Date' if formatted naively.
+    mitigation: Explicit acceptance criterion above (blank when null) — test must cover this case directly.
+
+references:
+  - path: docs/decisions/DEC-hdl-reason-aware-recovery.md
+    relevant_excerpt: |
+      3. UI + agent tooling (tracked here, not designed here): a lane-control
+      surface satisfying the standalone has_ui: true requirement — view live
+      lane state (status, reason, reset_at), manually disable/enable a lane
+      ..., add new lanes, and expose the same capability as tools for agents
+      to exercise/test through Heimdall.
+  - path: .pHive/epics/hdl-lane-status-ui/docs/design-discussion.md
+    relevant_excerpt: |
+      Ship the first vertical slice of Heimdall's standalone-mode UI
+      requirement (has_ui: true): a read-only live lane-status view ...
+      before layering on write operations ... in follow-up epics.

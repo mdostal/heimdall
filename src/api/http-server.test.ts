@@ -422,3 +422,83 @@ test("GET /healthz returns 200 without touching the registry or store", async ()
     store.close();
   }
 });
+
+test("GET / (hdl-ui-01) returns 200 text/html and references /lanes for its data", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /text\/html/);
+    const body = await res.text();
+    assert.match(body, /<table|<div id="root"/);
+    assert.match(body, /fetch\("\/lanes"\)/, "the dashboard must fetch its data from Heimdall's own /lanes endpoint");
+    assert.doesNotMatch(body, /https?:\/\/(?!localhost)/, "no external network requests (CDN scripts/styles etc.)");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("GET / returns 200 even with zero declared lanes (empty-state is a client-side render, not a server error)", async () => {
+  const registry = new LaneRegistry([], new EnvCredentialSource({}));
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    assert.match(body, /No lanes declared/, "the client-side empty-state message must be present in the served script");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("GET / (hdl-ui-01) — the served script guards against a null reset_at (structural check, no DOM execution)", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(
+      body,
+      /if\s*\(\s*!resetAt\s*\)\s*return\s*""/,
+      "formatResetAt must return an empty string for a null/falsy reset_at rather than formatting 'null' or producing Invalid Date",
+    );
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("GET / does not change existing routes' behavior", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const lanesRes = await fetch(`http://localhost:${port}/lanes`);
+    assert.equal(lanesRes.status, 200);
+    assert.equal(lanesRes.headers.get("content-type"), "application/json");
+
+    const healthzRes = await fetch(`http://localhost:${port}/healthz`);
+    assert.equal(healthzRes.status, 200);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
