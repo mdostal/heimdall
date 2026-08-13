@@ -5,6 +5,9 @@ build/
 *.log
 npm-debug.log*
 
+# Playwright MCP session artifacts (manual browser smoke-testing)
+.playwright-mcp/
+
 # Secrets — REQ-07 credential loading reads from this; never commit it
 .env
 .env.*
@@ -50,3 +53,5 @@ npm-debug.log*
 !.pHive/epics/hdl-ollama-signals/**
 !.pHive/epics/hdl-mcp-routing-strategy/
 !.pHive/epics/hdl-mcp-routing-strategy/**
+!.pHive/epics/hdl-claude-subscription-lanes/
+!.pHive/epics/hdl-claude-subscription-lanes/**

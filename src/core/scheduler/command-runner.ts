@@ -14,13 +14,22 @@ export interface CommandResult {
   stderr: string;
 }
 
+export interface CommandRunOptions {
+  /** Merged additively into the subprocess's environment — never replaces
+   * or mutates the parent process's own process.env. */
+  env?: Record<string, string>;
+}
+
 export interface CommandRunner {
-  run(command: string, args: string[]): Promise<CommandResult>;
+  run(command: string, args: string[], options?: CommandRunOptions): Promise<CommandResult>;
 }
 
 export class NodeCommandRunner implements CommandRunner {
-  async run(command: string, args: string[]): Promise<CommandResult> {
-    const { stdout, stderr } = await execFileAsync(command, args);
+  async run(command: string, args: string[], options?: CommandRunOptions): Promise<CommandResult> {
+    const { stdout, stderr } = await execFileAsync(command, args, {
+      encoding: "utf8",
+      ...(options?.env ? { env: { ...process.env, ...options.env } } : {}),
+    });
     return { stdout, stderr };
   }
 }

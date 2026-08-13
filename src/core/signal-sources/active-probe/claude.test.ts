@@ -1,6 +1,26 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { probeClaudeLane } from "./claude.js";
+import { probeClaudeLane, probeClaudeSubscriptionLane } from "./claude.js";
+import type { CommandRunner, CommandRunOptions } from "../../scheduler/command-runner.js";
+
+// The CLI's own exit code is the real liveness signal (execFile rejects on
+// non-zero exit) — succeedsWithReply models a real "OK" completion, throws
+// models a real auth failure (non-zero exit), matching how a real
+// `claude -p ... --max-turns 1` call actually behaves for a valid vs.
+// invalid token (verified live — see design-discussion.md's correction note).
+function fakeCommandRunner(succeeds: boolean): CommandRunner {
+  return {
+    run: async (command: string, args: string[], options?: CommandRunOptions) => {
+      assert.equal(command, "claude");
+      assert.deepEqual(args, ["-p", "reply with the single word OK", "--max-turns", "1"]);
+      assert.ok(options?.env?.CLAUDE_CODE_OAUTH_TOKEN, "must set CLAUDE_CODE_OAUTH_TOKEN for this call");
+      if (!succeeds) {
+        throw new Error("Failed to authenticate. API Error: 401 OAuth access token is invalid.");
+      }
+      return { stdout: "OK", stderr: "" };
+    },
+  };
+}
 
 function fakeFetch(status: number, headers: Record<string, string> = {}): typeof fetch {
   return (async (_url: unknown, init?: RequestInit) => {
@@ -64,4 +84,28 @@ test("uses the lightweight models-list endpoint, not a completion call", async (
   }) as typeof fetch;
   await probeClaudeLane("sk-ant-fake", fetchImpl);
   assert.equal(calledUrl, "https://api.anthropic.com/v1/models");
+});
+
+test("hdl-csl-02: a credential starting with sk-ant-oat01- dispatches to the CLI-based subscription check, never HTTP", async () => {
+  const fetchImpl: typeof fetch = (async () => {
+    throw new Error("must not call fetch for a subscription-token credential");
+  }) as typeof fetch;
+  const result = await probeClaudeLane(
+    "sk-ant-oat01-fake-subscription-token",
+    fetchImpl,
+    fakeCommandRunner(true),
+  );
+  assert.equal(result.status, "up");
+});
+
+test("hdl-csl-02: probeClaudeSubscriptionLane resolves a successful completion (exit 0) to up", async () => {
+  const result = await probeClaudeSubscriptionLane("sk-ant-oat01-fake", fakeCommandRunner(true));
+  assert.deepEqual(result, { status: "up", reset_at: null, reason: null });
+});
+
+test("hdl-csl-02: probeClaudeSubscriptionLane never throws on a CommandRunner exec failure (invalid token / non-zero exit) — resolves to down", async () => {
+  const result = await probeClaudeSubscriptionLane("sk-ant-oat01-fake", fakeCommandRunner(false));
+  assert.equal(result.status, "down");
+  assert.match(result.reason ?? "", /claude CLI auth check failed/);
+  assert.match(result.reason ?? "", /401/);
 });
