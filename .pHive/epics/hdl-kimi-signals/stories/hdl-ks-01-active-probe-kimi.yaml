@@ -1,7 +1,7 @@
 id: hdl-ks-01-active-probe-kimi
 epic: hdl-kimi-signals
 title: Kimi K3 active-probe adapter (models list, Bearer auth, typed error.type quota-vs-transient split)
-status: pending
+status: completed
 complexity: medium
 methodology: classic
 depends_on: []

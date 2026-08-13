@@ -1,7 +1,7 @@
 id: hdl-ks-02-public-status-kimi
 epic: hdl-kimi-signals
 title: Kimi K3 public-status adapter (status.moonshot.cn StatusPage.io feed)
-status: pending
+status: completed
 complexity: low
 methodology: classic
 depends_on: []
