@@ -1,0 +1,60 @@
+name: service-team
+description: >
+  Backend service team for Heimdall — no frontend surface yet (has_ui: true
+  is a planned settings UI, not yet built; add a UI member/domain when that
+  work starts).
+lead: team-lead
+methodology: classic  # from hive.config.yaml -> execution.default_methodology
+
+members:
+  - agent: backend-developer
+    role: Core domain logic — lane registry, status model, state store, schedulers, actuation, telemetry
+    domain:
+      - path: src/core/**
+        read: true
+        write: true
+        delete: false
+
+  - agent: backend-developer
+    role: Service interfaces — HTTP server, CLI, MCP server
+    domain:
+      - path: src/api/**
+        read: true
+        write: true
+        delete: false
+
+  - agent: tester
+    role: Test authoring and execution (node:test — unit, integration, e2e)
+    domain:
+      - path: test/**
+        read: true
+        write: true
+        delete: false
+      - path: "**/*.test.ts"
+        read: true
+        write: true
+        delete: false
+
+  - agent: reviewer
+    role: Code review
+    tool_access: [codex]  # codex CLI detected during integration preflight
+    # no domain override — uses agent default (read-only everywhere)
+
+context:
+  tech_stack:
+    language: typescript
+    runtime: node
+    frameworks:
+      - "@modelcontextprotocol/sdk"
+      - "@opentelemetry/sdk-node"
+  commit_granularity: feature-scoped  # from hive.config.yaml -> developer.commit_granularity
+  pr_style: single-commit             # from hive.config.yaml -> developer.pr_style
+  review_depth: standard              # from hive.config.yaml -> developer.review_depth
+  notes: |
+    Generated at re-kickoff (2026-08-12) from project discovery.
+    HARD LAW: no standalone box cron/daemon for scheduling — use a Multica
+    autopilot or the service's own in-process event loop
+    (docs/decisions/DEC-hdl-scheduler-backend.md; see
+    .pHive/cross-cutting-concerns.yaml -> no-box-daemon).
+
+team_memory_path: .pHive/team-memories/service-team/
