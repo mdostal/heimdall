@@ -1,0 +1,101 @@
+id: hdl-mcp-02-mcp-tools
+epic: hdl-mcp-lane-tools
+title: MCP tools for override, reset-at, and add-lane
+status: completed
+complexity: medium
+methodology: classic
+depends_on: [hdl-mcp-01-extract-shared-mutation-functions]
+
+description: |
+  Adds heimdall.lanes.override, heimdall.lanes.setResetAt, and
+  heimdall.lanes.add as MCP tools alongside the existing
+  heimdall.lanes.list, each a thin wrapper over hdl-mcp-01's shared
+  functions. Validation failures return a structured {ok: false, error}
+  text content block, matching heimdall.lanes.list's never-throws
+  philosophy -- only a genuinely unknown tool name throws. The
+  CallToolRequestSchema dispatch becomes a small lookup table instead of
+  a single if-check (four tools now, not one).
+
+acceptance_criteria:
+  - "listLaneToolsDescriptor() returns 4 tools: heimdall.lanes.list, heimdall.lanes.override, heimdall.lanes.setResetAt, heimdall.lanes.add"
+  - "Given callLaneOverrideTool is invoked with a valid lane_id and state, then it returns the same {ok: true, lane_id, manual_override} shape setLaneOverride produces, wrapped in MCP's {content: [{type: 'text', text: ...}]} contract"
+  - "Given callLaneOverrideTool is invoked with an unknown lane_id, then it returns {ok: false, error: 'unknown_lane', ...} as text content -- it does NOT throw"
+  - "Given callAddLaneTool successfully adds a lane, then the response includes restart_required: true and restart_command -- an agent calling this tool must be able to tell the lane isn't live yet"
+  - "Given the MCP server dispatches a call to a genuinely unknown tool name (not one of the 4), then it throws, matching the existing (pre-this-story) behavior for an unrecognized tool"
+  - "Every new tool's inputSchema requires exactly the fields its shared function needs (lane_id always required; state/reset_at/provider+model+token per tool) -- an agent introspecting the tool list can construct a valid call without guessing"
+
+steps:
+  - id: research
+    description: Confirm hdl-mcp-01's exact shared-function signatures and result shapes before wrapping them as tools
+    agent: researcher
+  - id: implement
+    description: Add the 3 new tool descriptors, their call*Tool functions, and the dispatch-table CallToolRequestSchema handler to mcp-server.ts
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Extend mcp-server.test.ts with cases per the acceptance criteria above, following the existing callLanesListTool test pattern
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review for correctness and confirm the never-throws-on-validation-failure / throws-on-unknown-tool-name distinction is implemented consistently across all 4 tools
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/api/mcp-server.ts
+      purpose: "listLaneToolsDescriptor/callLanesListTool's existing split (the pattern to follow) and createMcpServer's single-tool CallToolRequestSchema handler (becomes a dispatch table)"
+
+files_to_modify:
+  - file: src/api/mcp-server.ts
+    change: "Add 3 new tool name constants, 3 new descriptor entries, 3 new call*Tool functions wrapping hdl-mcp-01's shared functions, and a dispatch table replacing the single if-check in createMcpServer."
+
+code_examples:
+  - title: The existing single-tool pattern being extended to 4 tools
+    file: src/api/mcp-server.ts
+    snippet: |
+      export const LANES_LIST_TOOL_NAME = "heimdall.lanes.list";
+
+      export function callLanesListTool(registry: LaneRegistry, store: StateStore) {
+        const lanes = getLaneStatuses(registry, store);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(lanes) }],
+        };
+      }
+
+      server.setRequestHandler(CallToolRequestSchema, async (request) => {
+        if (request.params.name !== LANES_LIST_TOOL_NAME) {
+          throw new Error(`Unknown tool: ${request.params.name}`);
+        }
+        return callLanesListTool(registry, store);
+      });
+
+design_decisions:
+  - decision: Validation failures (unknown lane, invalid state, etc.) return structured text content, never throw; only a genuinely unknown tool NAME throws.
+    rationale: Matches heimdall.lanes.list's existing never-throws-on-empty-data philosophy and REQ-07's down/unconfigured-is-data-not-exception pattern -- an agent gets one consistent error-handling shape across every Heimdall tool, not a special case for mutations.
+
+cross_cutting:
+  - concern: documentation
+    action: "README's MCP section lists all 4 tools with their input shapes."
+
+risks:
+  - severity: low
+    description: Forgetting to add a new tool to the dispatch table would silently make it uncallable despite being listed.
+    mitigation: Acceptance criterion covers exactly this -- each new tool's callable path is asserted directly, not just its presence in listLaneToolsDescriptor().
+
+references:
+  - path: .pHive/epics/hdl-mcp-lane-tools/docs/design-discussion.md
+    relevant_excerpt: |
+      on a validation failure ... the tool returns the SAME {ok: false,
+      error: ...} JSON as a text content block -- it does NOT throw ...
+      createMcpServer's dispatch only throws for a genuinely unknown tool
+      name (unchanged from today).

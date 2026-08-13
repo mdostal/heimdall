@@ -1,0 +1,42 @@
+name: hdl-mcp-lane-tools
+title: MCP tools for lane override, reset-at, and add-lane
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [backend, mcp, refactor, small-scope]
+  roster: [researcher, technical-writer]
+  per_tag_reasoning:
+    backend: shared validation-function extraction is the correctness core.
+    mcp: the point of the epic -- exposing existing operations as MCP tools.
+    refactor: story 1 is behavior-preserving by construction, gated on zero test changes.
+    small-scope: every operation already has a fully-specified, tested HTTP route -- design discussion alone is sufficient per the plan skill's Small-scope routing rule.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (autonomous loop, no open design question per research-brief.md)
+    hv_planning: not_applicable (small scope)
+    structured_outline: not_applicable (small scope)
+
+description: >
+  Closes the last open piece of docs/decisions/DEC-hdl-reason-aware-recovery.md
+  item 3: exposes override, reset-at, and add-lane as MCP tools so an agent
+  can exercise/test them through Heimdall, not just a human at the
+  dashboard. Story 1 extracts the HTTP routes' inline validation logic into
+  shared functions (mirroring getLaneStatuses's existing role); story 2
+  wraps them as MCP tools alongside the existing heimdall.lanes.list.
+
+stories:
+  - id: hdl-mcp-01-extract-shared-mutation-functions
+    title: Extract override/reset-at/add-lane validation into shared functions
+    complexity: medium
+    depends_on: []
+  - id: hdl-mcp-02-mcp-tools
+    title: MCP tools for override, reset-at, and add-lane
+    complexity: medium
+    depends_on: [hdl-mcp-01-extract-shared-mutation-functions]

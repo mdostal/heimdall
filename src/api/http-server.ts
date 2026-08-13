@@ -47,6 +47,115 @@ export interface LaneStatusWithOverride extends LaneStatus {
 
 const VALID_OVERRIDE_STATES = new Set(["enabled", "disabled", "auto"]);
 
+// hdl-mcp-01: shared mutation functions — extracted from the HTTP routes'
+// former inline logic so both the HTTP layer AND the MCP tools (mcp-server.ts)
+// call ONE implementation each, mirroring getLaneStatuses's existing role.
+// Discriminated results, never exceptions, matching REQ-07's
+// data-not-exception philosophy — lets every caller (HTTP status code, or
+// an MCP tool's structured content) translate the same result its own way.
+
+export type SetOverrideResult =
+  | { ok: true; lane_id: string; manual_override: ManualOverride }
+  | { ok: false; error: "unknown_lane"; lane_id: string }
+  | { ok: false; error: "invalid_override_state"; allowed_states: string[] };
+
+export function setLaneOverride(
+  registry: LaneRegistry,
+  store: StateStore,
+  laneId: string,
+  rawState: unknown,
+): SetOverrideResult {
+  if (!registry.get(laneId)) {
+    return { ok: false, error: "unknown_lane", lane_id: laneId };
+  }
+  if (typeof rawState !== "string" || !VALID_OVERRIDE_STATES.has(rawState)) {
+    return { ok: false, error: "invalid_override_state", allowed_states: [...VALID_OVERRIDE_STATES] };
+  }
+  const value: ManualOverride = rawState === "auto" ? null : (rawState as "enabled" | "disabled");
+  store.setManualOverride(laneId, value);
+  return { ok: true, lane_id: laneId, manual_override: value };
+}
+
+export type SetResetAtResult =
+  | { ok: true; lane_id: string; manual_reset_at: string | null }
+  | { ok: false; error: "unknown_lane"; lane_id: string }
+  | { ok: false; error: "invalid_reset_at"; message: string }
+  | { ok: false; error: "reset_at_in_the_past"; message: string };
+
+export function setLaneResetAt(
+  registry: LaneRegistry,
+  store: StateStore,
+  laneId: string,
+  rawResetAt: unknown,
+): SetResetAtResult {
+  if (!registry.get(laneId)) {
+    return { ok: false, error: "unknown_lane", lane_id: laneId };
+  }
+  if (rawResetAt === null) {
+    store.setManualResetAt(laneId, null);
+    return { ok: true, lane_id: laneId, manual_reset_at: null };
+  }
+  if (typeof rawResetAt !== "string") {
+    return { ok: false, error: "invalid_reset_at", message: "reset_at must be an ISO-8601 string or null" };
+  }
+  const parsedMs = Date.parse(rawResetAt);
+  if (Number.isNaN(parsedMs)) {
+    return { ok: false, error: "invalid_reset_at", message: "reset_at is not a valid ISO-8601 timestamp" };
+  }
+  if (parsedMs <= Date.now()) {
+    return { ok: false, error: "reset_at_in_the_past", message: "reset_at must be in the future" };
+  }
+  store.setManualResetAt(laneId, rawResetAt);
+  return { ok: true, lane_id: laneId, manual_reset_at: rawResetAt };
+}
+
+export interface AddLaneInput {
+  lane_id?: unknown;
+  provider?: unknown;
+  model?: unknown;
+  token?: unknown;
+}
+
+export type AddLaneResult =
+  | { ok: true; lane_id: string; credential_ref: string; restart_required: true; restart_command: string }
+  | { ok: false; error: "missing_field"; field: string }
+  | { ok: false; error: "lane_already_declared"; lane_id: string };
+
+export function addLane(
+  registry: LaneRegistry,
+  envFilePath: string,
+  input: AddLaneInput,
+): AddLaneResult {
+  const missing = (["lane_id", "provider", "model", "token"] as const).find(
+    (field) => typeof input[field] !== "string" || input[field] === "",
+  );
+  if (missing) {
+    return { ok: false, error: "missing_field", field: missing };
+  }
+  const laneId = input.lane_id as string;
+
+  if (registry.get(laneId) || laneIdAlreadyDeclared(envFilePath, laneId)) {
+    return { ok: false, error: "lane_already_declared", lane_id: laneId };
+  }
+
+  const credentialRef = deriveCredentialRef(laneId);
+  appendLane(envFilePath, {
+    lane_id: laneId,
+    provider: input.provider as string,
+    model: input.model as string,
+    credential_ref: credentialRef,
+    token: input.token as string,
+  });
+
+  return {
+    ok: true,
+    lane_id: laneId,
+    credential_ref: credentialRef,
+    restart_required: true,
+    restart_command: "npm run dev",
+  };
+}
+
 export function buildLaneRegistry(env: NodeJS.ProcessEnv = process.env): LaneRegistry {
   return new LaneRegistry(loadLaneDeclarations(env), new EnvCredentialSource(env));
 }
@@ -122,41 +231,17 @@ export function createHttpServer(
           res.end(JSON.stringify({ error: "invalid_json" }));
           return;
         }
-        const input = body.data as { lane_id?: unknown; provider?: unknown; model?: unknown; token?: unknown };
-        const missing = (["lane_id", "provider", "model", "token"] as const).find(
-          (field) => typeof input[field] !== "string" || input[field] === "",
-        );
-        if (missing) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "missing_field", field: missing }));
+        const result = addLane(registry, envFilePath, body.data as AddLaneInput);
+        if (!result.ok) {
+          const status = result.error === "lane_already_declared" ? 409 : 400;
+          const { ok: _ok, ...wire } = result;
+          res.writeHead(status, { "content-type": "application/json" });
+          res.end(JSON.stringify(wire));
           return;
         }
-        const laneId = input.lane_id as string;
-
-        if (registry.get(laneId) || laneIdAlreadyDeclared(envFilePath, laneId)) {
-          res.writeHead(409, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "lane_already_declared", lane_id: laneId }));
-          return;
-        }
-
-        const credentialRef = deriveCredentialRef(laneId);
-        appendLane(envFilePath, {
-          lane_id: laneId,
-          provider: input.provider as string,
-          model: input.model as string,
-          credential_ref: credentialRef,
-          token: input.token as string,
-        });
-
+        const { ok: _ok, ...wire } = result;
         res.writeHead(201, { "content-type": "application/json" });
-        res.end(
-          JSON.stringify({
-            lane_id: laneId,
-            credential_ref: credentialRef,
-            restart_required: true,
-            restart_command: "npm run dev",
-          }),
-        );
+        res.end(JSON.stringify(wire));
       });
       return;
     }
@@ -226,35 +311,24 @@ export function createHttpServer(
     const overrideMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/override$/);
     if (overrideMatch) {
       const laneId = decodeURIComponent(overrideMatch[1]);
-      if (!registry.get(laneId)) {
-        res.writeHead(404, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: "unknown_lane", lane_id: laneId }));
-        return;
-      }
-
       readJsonBody(req).then((body) => {
         if (!body.ok) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_json" }));
           return;
         }
-
         const state = (body.data as { state?: unknown }).state;
-        if (typeof state !== "string" || !VALID_OVERRIDE_STATES.has(state)) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(
-            JSON.stringify({
-              error: "invalid_override_state",
-              allowed_states: [...VALID_OVERRIDE_STATES],
-            }),
-          );
+        const result = setLaneOverride(registry, store, laneId, state);
+        if (!result.ok) {
+          const status = result.error === "unknown_lane" ? 404 : 400;
+          const { ok: _ok, ...wire } = result;
+          res.writeHead(status, { "content-type": "application/json" });
+          res.end(JSON.stringify(wire));
           return;
         }
-
-        const value: ManualOverride = state === "auto" ? null : (state as "enabled" | "disabled");
-        store.setManualOverride(laneId, value);
+        const { ok: _ok, ...wire } = result;
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ lane_id: laneId, manual_override: value }));
+        res.end(JSON.stringify(wire));
       });
       return;
     }
@@ -266,47 +340,24 @@ export function createHttpServer(
     const resetAtMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/reset-at$/);
     if (resetAtMatch) {
       const laneId = decodeURIComponent(resetAtMatch[1]);
-      if (!registry.get(laneId)) {
-        res.writeHead(404, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: "unknown_lane", lane_id: laneId }));
-        return;
-      }
-
       readJsonBody(req).then((body) => {
         if (!body.ok) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_json" }));
           return;
         }
-
         const resetAt = (body.data as { reset_at?: unknown }).reset_at;
-        if (resetAt === null) {
-          store.setManualResetAt(laneId, null);
-          res.writeHead(200, { "content-type": "application/json" });
-          res.end(JSON.stringify({ lane_id: laneId, manual_reset_at: null }));
+        const result = setLaneResetAt(registry, store, laneId, resetAt);
+        if (!result.ok) {
+          const status = result.error === "unknown_lane" ? 404 : 400;
+          const { ok: _ok, ...wire } = result;
+          res.writeHead(status, { "content-type": "application/json" });
+          res.end(JSON.stringify(wire));
           return;
         }
-
-        if (typeof resetAt !== "string") {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_reset_at", message: "reset_at must be an ISO-8601 string or null" }));
-          return;
-        }
-        const parsedMs = Date.parse(resetAt);
-        if (Number.isNaN(parsedMs)) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_reset_at", message: "reset_at is not a valid ISO-8601 timestamp" }));
-          return;
-        }
-        if (parsedMs <= Date.now()) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "reset_at_in_the_past", message: "reset_at must be in the future" }));
-          return;
-        }
-
-        store.setManualResetAt(laneId, resetAt);
+        const { ok: _ok, ...wire } = result;
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ lane_id: laneId, manual_reset_at: resetAt }));
+        res.end(JSON.stringify(wire));
       });
       return;
     }

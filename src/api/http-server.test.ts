@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createHttpServer, getLaneStatuses } from "./http-server.js";
+import { createHttpServer, getLaneStatuses, setLaneOverride, setLaneResetAt, addLane } from "./http-server.js";
 import { LaneRegistry } from "../core/lane-registry.js";
 import { StateStore } from "../core/state-store.js";
 import { EnvCredentialSource } from "../core/credential-source.js";
@@ -488,6 +488,141 @@ test("GET / (hdl-ui-01) — the served script guards against a null reset_at (st
   } finally {
     server.close();
     store.close();
+  }
+});
+
+test("hdl-mcp-01: setLaneOverride is independently callable without an HTTP server", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  try {
+    const result = setLaneOverride(registry, store, "claude@mathew.dostal", "disabled");
+    assert.deepEqual(result, { ok: true, lane_id: "claude@mathew.dostal", manual_override: "disabled" });
+    assert.equal(store.getManualOverride("claude@mathew.dostal"), "disabled");
+  } finally {
+    store.close();
+  }
+});
+
+test("hdl-mcp-01: setLaneOverride returns {ok: false, error: 'unknown_lane', ...} for an undeclared lane — the exact shape the HTTP route 404s with", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  try {
+    const result = setLaneOverride(registry, store, "never-declared", "disabled");
+    assert.deepEqual(result, { ok: false, error: "unknown_lane", lane_id: "never-declared" });
+  } finally {
+    store.close();
+  }
+});
+
+test("hdl-mcp-01: setLaneOverride returns {ok: false, error: 'invalid_override_state', ...} for a bad state value", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  try {
+    const result = setLaneOverride(registry, store, "claude@mathew.dostal", "not-a-real-state");
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.error, "invalid_override_state");
+      assert.deepEqual(result.allowed_states.sort(), ["auto", "disabled", "enabled"]);
+    }
+  } finally {
+    store.close();
+  }
+});
+
+test("hdl-mcp-01: setLaneResetAt is independently callable without an HTTP server", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  try {
+    const result = setLaneResetAt(registry, store, "claude@mathew.dostal", future);
+    assert.deepEqual(result, { ok: true, lane_id: "claude@mathew.dostal", manual_reset_at: future });
+    assert.equal(store.getManualResetAt("claude@mathew.dostal"), future);
+  } finally {
+    store.close();
+  }
+});
+
+test("hdl-mcp-01: setLaneResetAt returns {ok: false, error: 'unknown_lane', ...} for an undeclared lane", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  try {
+    const result = setLaneResetAt(registry, store, "never-declared", new Date(Date.now() + 60_000).toISOString());
+    assert.deepEqual(result, { ok: false, error: "unknown_lane", lane_id: "never-declared" });
+  } finally {
+    store.close();
+  }
+});
+
+test("hdl-mcp-01: setLaneResetAt(..., null) clears it and returns manual_reset_at: null", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  try {
+    store.setManualResetAt("claude@mathew.dostal", new Date(Date.now() + 60_000).toISOString());
+    const result = setLaneResetAt(registry, store, "claude@mathew.dostal", null);
+    assert.deepEqual(result, { ok: true, lane_id: "claude@mathew.dostal", manual_reset_at: null });
+  } finally {
+    store.close();
+  }
+});
+
+test("hdl-mcp-01: setLaneResetAt rejects a past timestamp with {ok: false, error: 'reset_at_in_the_past'}", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  try {
+    const result = setLaneResetAt(registry, store, "claude@mathew.dostal", "2020-01-01T00:00:00.000Z");
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.error, "reset_at_in_the_past");
+  } finally {
+    store.close();
+  }
+});
+
+test("hdl-mcp-01: addLane is independently callable without an HTTP server — unchanged response shape (restart_required, restart_command, no automatic restart)", () => {
+  const registry = registryWithOneConfiguredLane();
+  const envPath = tmpEnvPath();
+  try {
+    const result = addLane(registry, envPath, {
+      lane_id: "gemini@ops",
+      provider: "gemini",
+      model: "gemini-3-pro",
+      token: "secret-value",
+    });
+    assert.deepEqual(result, {
+      ok: true,
+      lane_id: "gemini@ops",
+      credential_ref: "GEMINI_OPS_TOKEN",
+      restart_required: true,
+      restart_command: "npm run dev",
+    });
+  } finally {
+    fs.rmSync(envPath, { force: true });
+  }
+});
+
+test("hdl-mcp-01: addLane returns {ok: false, error: 'missing_field', field} naming the missing field", () => {
+  const registry = registryWithOneConfiguredLane();
+  const envPath = tmpEnvPath();
+  try {
+    const result = addLane(registry, envPath, { lane_id: "gemini@ops", provider: "gemini", model: "gemini-3-pro" });
+    assert.deepEqual(result, { ok: false, error: "missing_field", field: "token" });
+  } finally {
+    fs.rmSync(envPath, { force: true });
+  }
+});
+
+test("hdl-mcp-01: addLane returns {ok: false, error: 'lane_already_declared', ...} for a lane already in the registry", () => {
+  const registry = registryWithOneConfiguredLane();
+  const envPath = tmpEnvPath();
+  try {
+    const result = addLane(registry, envPath, {
+      lane_id: "claude@mathew.dostal",
+      provider: "claude",
+      model: "claude-sonnet",
+      token: "x",
+    });
+    assert.deepEqual(result, { ok: false, error: "lane_already_declared", lane_id: "claude@mathew.dostal" });
+  } finally {
+    fs.rmSync(envPath, { force: true });
   }
 });
 

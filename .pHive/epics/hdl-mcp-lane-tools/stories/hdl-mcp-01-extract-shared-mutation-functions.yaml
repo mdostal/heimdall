@@ -1,0 +1,82 @@
+id: hdl-mcp-01-extract-shared-mutation-functions
+epic: hdl-mcp-lane-tools
+title: Extract override/reset-at/add-lane validation into shared functions
+status: completed
+complexity: medium
+methodology: classic
+depends_on: []
+
+description: |
+  Pure refactor (no behavior change): extracts the validation + side-effect
+  logic currently inline inside http-server.ts's POST /lanes/:laneId/override,
+  POST /lanes/:laneId/reset-at, and POST /lanes route handlers into three
+  standalone exported functions (setLaneOverride, setLaneResetAt, addLane),
+  mirroring how getLaneStatuses already serves as the one shared
+  implementation GET /lanes, cli.ts, and mcp-server.ts all call. The HTTP
+  routes become thin translators from the functions' discriminated result
+  types to status codes -- byte-identical response bodies to today.
+
+acceptance_criteria:
+  - "The full existing http-server.test.ts suite passes with ZERO test changes -- this proves the refactor is behavior-preserving, not just 'looks right'"
+  - "setLaneOverride/setLaneResetAt/addLane are exported and independently unit-testable without an HTTP server (no createServer, no fetch)"
+  - "Given setLaneOverride is called with a lane_id not in the registry, then it returns {ok: false, error: 'unknown_lane', lane_id} -- the exact shape the HTTP route already 404s with"
+  - "Given addLane is called with all valid fields, then it returns {ok: true, lane_id, credential_ref, restart_required: true, restart_command: 'npm run dev'} -- unchanged from the current inline response"
+  - "POST /lanes/:laneId/override, POST /lanes/:laneId/reset-at, and POST /lanes in http-server.ts each shrink to: parse body -> call the shared function -> map result to status code -- no validation logic remains inline in the route handlers"
+
+steps:
+  - id: research
+    description: Re-confirm the exact validation rules and response shapes of the three existing routes (already captured in research-brief.md) directly against the current http-server.ts source before refactoring
+    agent: researcher
+  - id: implement
+    description: Extract setLaneOverride, setLaneResetAt, addLane; rewire the three HTTP routes to call them
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Add direct unit tests for the three new exported functions; confirm the existing http-server.test.ts suite passes unmodified
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review specifically for response-shape drift -- diff every route's response against its pre-refactor shape line by line
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/api/http-server.ts
+      purpose: "overrideMatch, resetAtMatch, and POST /lanes blocks -- the inline logic being extracted. getLaneStatuses (same file) is the pattern being mirrored."
+    - path: .pHive/epics/hdl-mcp-lane-tools/docs/research-brief.md
+      purpose: "Documents each route's exact validation rules and response shapes to preserve"
+
+files_to_modify:
+  - file: src/api/http-server.ts
+    change: "Add exported setLaneOverride/setLaneResetAt/addLane functions with discriminated result types; rewrite the three route handlers to call them and translate results to HTTP responses."
+
+design_decisions:
+  - decision: Discriminated union result types ({ok: true, ...} | {ok: false, error, ...}), not exceptions, for the shared functions.
+    rationale: Matches REQ-07's established philosophy (down/unconfigured is data, not an exception) and gives story 2's MCP tools a clean, uniform way to surface validation failures as structured content rather than catching thrown errors differently per tool.
+
+cross_cutting:
+  - concern: documentation
+    action: "None -- pure internal refactor, no observable behavior or API surface change."
+
+risks:
+  - severity: medium
+    description: A refactor that subtly changes a response field name/shape would silently break the CLI or dashboard, which both parse these responses.
+    mitigation: Zero test changes required in http-server.test.ts is the acceptance gate specifically designed to catch this.
+
+references:
+  - path: .pHive/epics/hdl-mcp-lane-tools/docs/design-discussion.md
+    relevant_excerpt: |
+      The HTTP routes become thin: parse the body, call the shared
+      function, translate the discriminated result into a status code
+      exactly as today -- byte-identical response bodies, this is a
+      refactor, not a behavior change.
