@@ -1,0 +1,112 @@
+id: hdl-lm-03-manual-reset-at
+epic: hdl-lane-management
+title: Manual reset_at — "change the times" — mirrors hdl-lane-override's pattern
+status: pending
+complexity: medium
+methodology: classic
+depends_on: []
+
+description: |
+  A manual_reset_at column on StateStore's lanes table (same defensive
+  migration pattern as hdl-lo-01's manual_override), set via
+  POST /lanes/:laneId/reset-at, surfaced on GET /lanes.
+  InProcessScheduler's already-shipped reset_at-aware delay computation
+  (hdl-rar-01) prefers manual_reset_at over the sensed reset_at when set —
+  an operator who knows a lane's real recovery time (a plan reset the
+  automatic probes can't see) can tell Heimdall directly. Scheduling-only:
+  does not touch ReconcileContext, ControlAdapter, or Argus emission.
+
+acceptance_criteria:
+  - "Given a lane with no manual_reset_at set, when InProcessScheduler computes its next delay, then behavior is byte-identical to pre-this-story (sensed reset_at alone decides, matching hdl-rar-01)"
+  - "Given an operator sets manual_reset_at to a future ISO-8601 timestamp, when the scheduler computes the next delay for a suspect lane, then it uses manual_reset_at instead of the sensed reset_at"
+  - "Given manual_reset_at is cleared (POST .../reset-at with reset_at: null), when the scheduler next computes a delay, then it reverts to using the sensed reset_at"
+  - "POST /lanes/:laneId/reset-at with a malformed (non-ISO-8601) or past-dated reset_at returns 400 with a structured error, not a silently-accepted bad value"
+  - "POST /lanes/:laneId/reset-at for an unknown lane_id returns 404, matching the existing override/refresh routes' error shape"
+  - "GET /lanes includes each lane's manual_reset_at (null when unset)"
+  - "This story does not modify ReconcileContext, ControlAdapter, MulticaControlAdapter, or any Argus emission — grep the diff to confirm those files are untouched"
+
+steps:
+  - id: research
+    description: Confirm InProcessScheduler's exact delay-computation code (hdl-rar-01) and StateStore's manual_override migration pattern (hdl-lo-01) before implementing the mirrored manual_reset_at version
+    agent: researcher
+  - id: implement
+    description: Add manual_reset_at to StateStore (schema + migration + get/set); update InProcessScheduler's delay computation to prefer it; add POST /lanes/:laneId/reset-at; extend GET /lanes
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Extend state-store.test.ts, in-process-scheduler.test.ts, and http-server.test.ts per the acceptance criteria above
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review for correctness and confirm the scheduling-only scope boundary (no actuation-layer changes) is honored
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/core/scheduler/in-process-scheduler.ts
+      purpose: "computeDelayMs(resetAt) (hdl-rar-01) — the exact function whose input becomes manualResetAt ?? sensed reset_at"
+    - path: src/core/state-store.ts
+      purpose: "manual_override's schema/migration/get-set pattern (hdl-lo-01) — manual_reset_at follows it exactly, second application of the same shape"
+
+files_to_modify:
+  - file: src/core/state-store.ts
+    change: "Add manual_reset_at TEXT column (same CREATE TABLE + defensive ALTER TABLE pattern as manual_override); setManualResetAt/getManualResetAt methods."
+  - file: src/core/scheduler/in-process-scheduler.ts
+    change: "poll()'s delay computation reads store.getManualResetAt(lane.lane_id) and prefers it over latest.reset_at when non-null, before calling computeDelayMs."
+  - file: src/api/http-server.ts
+    change: "Add POST /lanes/:laneId/reset-at (validates ISO-8601 + not-in-the-past, 404 unknown lane); GET /lanes exposes manual_reset_at."
+
+code_examples:
+  - title: The delay computation this story feeds a preferred input into
+    file: src/core/scheduler/in-process-scheduler.ts
+    snippet: |
+      const latest = this.opts.store.getCurrentStatus(this.opts.lane.lane_id);
+      const stillSuspect = latest !== null && SUSPECT_STATUSES.includes(latest.status);
+      const delayMs = stillSuspect ? this.computeDelayMs(latest!.reset_at) : this.intervalMs;
+      // ^ becomes: this.computeDelayMs(manualResetAt ?? latest!.reset_at)
+
+  - title: The exact pattern being mirrored a second time (hdl-lo-01)
+    file: src/core/state-store.ts
+    snippet: |
+      setManualOverride(laneId: string, value: ManualOverride): void {
+        this.db
+          .prepare(
+            `INSERT INTO lanes (lane_id, provider, credential_ref) VALUES (?, '', '')
+             ON CONFLICT(lane_id) DO NOTHING`,
+          )
+          .run(laneId);
+        this.db.prepare(`UPDATE lanes SET manual_override = ? WHERE lane_id = ?`).run(value, laneId);
+      }
+
+design_decisions:
+  - decision: Reject a past-dated manual_reset_at at the API boundary (400), rather than silently accepting it.
+    rationale: A past reset_at would compute a delay that immediately clamps to the scheduler's floor anyway (per hdl-rar-01's Math.max) — accepting it silently would look like it did something when it didn't; better to tell the operator up front.
+  - decision: Scheduling-only — no ReconcileContext/ControlAdapter/Argus changes.
+    rationale: Keeps this story's blast radius separate from hdl-lane-override's actuation-layer work; a manual recovery-time hint changes WHEN Heimdall checks again, not whether a lane is currently routed through.
+
+cross_cutting:
+  - concern: documentation
+    action: "README gets the new POST /lanes/:laneId/reset-at endpoint documented alongside /override."
+
+risks:
+  - severity: low
+    description: An operator sets a manual_reset_at far in the future and forgets, silently suppressing checks for a long time.
+    mitigation: Deferred to hdl-lm-04's UI — the dashboard's editable reset_at control should make an active manual override visually obvious, same principle as hdl-lo-02's override badge.
+
+references:
+  - path: .pHive/epics/hdl-lane-management/docs/design-discussion.md
+    relevant_excerpt: |
+      Follows hdl-lane-override's exact shape ... InProcessScheduler's
+      already-shipped reset_at-aware delay computation prefers
+      manual_reset_at over the sensed reset_at when set ... Deliberately
+      scoped to scheduling only.

@@ -1,0 +1,51 @@
+name: hdl-lane-management
+title: Lane management — add, configure, and adjust recovery timing
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [backend, config, scheduler, ui, medium-scope]
+  roster: [researcher, technical-writer]
+  per_tag_reasoning:
+    backend: env-file utility, credential visibility, and the HTTP surface are the correctness core.
+    config: add-lane writes durable .env-based lane declarations.
+    scheduler: manual_reset_at feeds the already-shipped reset_at-aware delay computation.
+    ui: story 4 surfaces all three backend pieces on the dashboard.
+    medium-scope: more surface than the three prior Small-scope epics, but every story mirrors a pattern already proven in this codebase (hdl-lane-override) — design discussion plus the operator's resolved decision is sufficient context.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (autonomous loop, decision already resolved by operator via design-options artifact)
+    hv_planning: not_applicable (mirrors an established pattern per story)
+    structured_outline: not_applicable (mirrors an established pattern per story)
+
+description: >
+  Lanes-management surface following the operator's resolved design
+  decision (see docs referenced below): add-lane writes to a local,
+  gitignored .env (Portunus deferred), token/config visibility never
+  exposes raw secrets, and manual reset_at editing mirrors
+  hdl-lane-override's manual_override pattern exactly. Ships alongside
+  the already-live read-only dashboard and on/off override work.
+
+stories:
+  - id: hdl-lm-01-env-autoload-and-add-lane
+    title: Fix .env auto-load and add POST /lanes (add-lane backend)
+    complexity: medium
+    depends_on: []
+  - id: hdl-lm-02-credential-visibility
+    title: GET /lanes exposes credential_configured, never the raw secret
+    complexity: low
+    depends_on: []
+  - id: hdl-lm-03-manual-reset-at
+    title: Manual reset_at — "change the times" — mirrors hdl-lane-override's pattern
+    complexity: medium
+    depends_on: []
+  - id: hdl-lm-04-dashboard-lane-management-ui
+    title: Dashboard — add-lane form, token status, editable reset-at
+    complexity: medium
+    depends_on: [hdl-lm-01-env-autoload-and-add-lane, hdl-lm-02-credential-visibility, hdl-lm-03-manual-reset-at]

@@ -1,0 +1,102 @@
+id: hdl-lm-01-env-autoload-and-add-lane
+epic: hdl-lane-management
+title: Fix .env auto-load and add POST /lanes (add-lane backend)
+status: pending
+complexity: medium
+methodology: classic
+depends_on: []
+
+description: |
+  Two related fixes: (1) .env is never auto-loaded today (no dotenv, no
+  --env-file flag) — fix via Node's built-in --env-file flag on dev,
+  dev:http-only, cli, mcp scripts, zero new dependency. (2) Add
+  POST /lanes: writes a new HEIMDALL_LANE_<N>_* block + secret line to
+  .env (via a new src/core/env-file.ts utility), derives credential_ref
+  from lane_id, and responds with a restart-required instruction — no
+  automatic process restart (that needs a supervisor this standalone
+  setup doesn't assume).
+
+acceptance_criteria:
+  - "Given .env exists in the working directory, when npm run dev (or dev:http-only/cli/mcp) starts, then its variables are present in process.env without the operator manually sourcing it first"
+  - "Given .env currently declares lanes 1 and 2, when POST /lanes adds a new lane, then env-file.ts appends HEIMDALL_LANE_3_{ID,PROVIDER,MODEL,CREDENTIAL_REF} plus the secret line — never HEIMDALL_LANE_1 or _2 again, never a duplicate index"
+  - "Given lane_id 'gemini@ops', when credential_ref is derived, then it is GEMINI_OPS_TOKEN (uppercase, non-alphanumeric -> underscore, collapsed, _TOKEN suffix)"
+  - "Given a lane_id that's already declared, when POST /lanes is called with it again, then it returns 409 (or 400) with a structured error, not a silently-appended duplicate lane"
+  - "Given a request missing lane_id, provider, model, or token, when POST /lanes is called, then it returns 400 with a structured error naming the missing field"
+  - "Given a successful POST /lanes, when the response is read, then it includes restart_required: true and restart_command: 'npm run dev' — the process is NOT automatically restarted"
+  - "env-file.ts's append is idempotent-safe against a file with trailing/missing newlines and pre-existing comments — it never corrupts existing content"
+
+steps:
+  - id: research
+    description: Confirm .env.example's exact format, loadLaneDeclarations' parsing rules, and the existing POST /lanes/:laneId/refresh route's error-handling shape before implementing
+    agent: researcher
+  - id: implement
+    description: Add --env-file=.env to the relevant npm scripts; write src/core/env-file.ts; add POST /lanes to http-server.ts
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: New env-file.test.ts covering append/index-detection/idempotency; extend http-server.test.ts for POST /lanes
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review for correctness, convention compliance, and confirm no existing route/behavior changed
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: .env.example
+      purpose: "The exact format new lines must match — HEIMDALL_LANE_<N>_{ID,PROVIDER,MODEL,CREDENTIAL_REF} + a separate secret line"
+    - path: src/core/lane-registry.ts
+      purpose: "loadLaneDeclarations — the parser this epic's writes must stay compatible with (contiguous numbering from 1, stops at first gap)"
+    - path: package.json
+      purpose: "dev, dev:http-only, cli, mcp scripts need --env-file=.env added"
+
+files_to_modify:
+  - file: package.json
+    change: "Add --env-file=.env to the node invocation in dev, dev:http-only, cli, mcp scripts (not build or test, which don't need lane credentials)."
+  - file: src/core/env-file.ts
+    change: "New file. appendLane(path, {lane_id, provider, model, credential_ref, token}): reads the file, scans for the highest existing HEIMDALL_LANE_<N>_ID index, appends block N+1, writes back."
+  - file: src/api/http-server.ts
+    change: "Add POST /lanes — validate body, derive credential_ref, call env-file.ts, respond with restart_required."
+
+code_examples:
+  - title: The format new lines must match exactly
+    file: .env.example
+    snippet: |
+      HEIMDALL_LANE_1_ID=claude@mathew.dostal
+      HEIMDALL_LANE_1_PROVIDER=claude
+      HEIMDALL_LANE_1_MODEL=claude-sonnet
+      HEIMDALL_LANE_1_CREDENTIAL_REF=CLAUDE_MATHEW_DOSTAL_TOKEN
+      CLAUDE_MATHEW_DOSTAL_TOKEN=
+
+design_decisions:
+  - decision: No automatic process restart on add-lane.
+    rationale: "Per the add-lane-design-options artifact's Option 1 risk analysis: automating restart depends on a process supervisor this standalone setup doesn't assume, and a bad restart would turn 'add a lane' into 'the service is down.' The response tells the operator exactly what to run."
+  - decision: credential_ref is derived deterministically from lane_id, not operator-chosen.
+    rationale: Removes a field from the add-lane form and guarantees no collision with an existing credential_ref naming scheme, matching the existing examples' CLAUDE_MATHEW_DOSTAL_TOKEN / CODEX_TOKEN style closely enough to stay readable.
+
+cross_cutting:
+  - concern: documentation
+    action: "README gets the --env-file fix noted and the new POST /lanes endpoint documented."
+
+risks:
+  - severity: low
+    description: Concurrent add-lane requests could race on reading/writing .env.
+    mitigation: Out of scope for a local single-operator tool per design-discussion.md — single-writer is the realistic case.
+
+references:
+  - path: .pHive/epics/hdl-lane-management/docs/design-discussion.md
+    relevant_excerpt: |
+      .env auto-load fix ... Node's --env-file flag, zero new dependency
+      ... POST /lanes validates the input ... writes the file, and
+      responds with restart_required: true ... no automatic process
+      restart.
