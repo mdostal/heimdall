@@ -1,0 +1,51 @@
+name: hdl-gemini-signals
+title: Gemini signal-source adapters — public-status + active-probe, wired into lane dispatch
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [backend, signal-sources, provider-expansion, small-scope]
+  roster: [researcher, technical-writer]
+  per_tag_reasoning:
+    backend: two new adapter files behind the existing ProviderSignalAdapter shape.
+    signal-sources: directly extends REQ-01/02/03's layered signal model to a third provider.
+    provider-expansion: closes the largest concrete gap against north_star.expected_scale (Claude, Codex, Gemini, OpenRouter, Kimi K3, Ollama -- only 2 of 6 implemented before this epic).
+    small-scope: mirrors an already-proven file-for-file pattern (claude.ts/codex.ts); zero changes to shared/provider-agnostic code.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (autonomous loop; real web research performed and documented in research-brief.md, resolved inline in design-discussion.md rather than escalated -- this is an implementation-tradeoff question, not the ambiguous-product-direction class of decision the operator asked to see as an artifact)
+    hv_planning: not_applicable (small scope)
+    structured_outline: not_applicable (small scope)
+
+description: >
+  Adds Gemini as a third supported lane provider by implementing the two
+  adapter layers the existing ProviderSignalAdapter pattern requires
+  (public-status, active-probe) and wiring them into the single real
+  dispatch point (PROVIDER_ADAPTERS in src/main.ts). Real web research
+  (docs/decisions and research-brief.md) confirmed Gemini's actual signal
+  surface: a flatter error body than Claude's, no documented reset-timestamp
+  field for 429s (accepted gap, falls back to existing flat-interval
+  scheduling), and a Google-Cloud-wide incidents feed (not a fixed
+  per-component snapshot like Claude's) that still surfaces real
+  Gemini-specific incidents via fragment-filtering. Closes the largest
+  concrete remaining gap against the north star's provider-scale target.
+
+stories:
+  - id: hdl-gs-01-active-probe-gemini
+    title: Gemini active-probe adapter (models.list, x-goog-api-key header, quota-vs-rate-limit distinction)
+    complexity: medium
+    depends_on: []
+  - id: hdl-gs-02-public-status-gemini
+    title: Gemini public-status adapter (Google Cloud incidents feed, fragment-filtered)
+    complexity: medium
+    depends_on: []
+  - id: hdl-gs-03-wire-gemini-provider
+    title: Wire Gemini into lane-pipeline + main.ts PROVIDER_ADAPTERS registry, end-to-end test
+    complexity: low
+    depends_on: [hdl-gs-01-active-probe-gemini, hdl-gs-02-public-status-gemini]
