@@ -1,7 +1,7 @@
 id: hdl-mrs-01-routing-strategy-mcp-tools
 epic: hdl-mcp-routing-strategy
 title: heimdall.routingStrategy.get + heimdall.routingStrategy.set MCP tools
-status: pending
+status: completed
 complexity: low
 methodology: classic
 depends_on: []
