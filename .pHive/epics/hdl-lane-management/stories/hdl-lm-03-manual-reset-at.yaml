@@ -1,7 +1,7 @@
 id: hdl-lm-03-manual-reset-at
 epic: hdl-lane-management
 title: Manual reset_at — "change the times" — mirrors hdl-lane-override's pattern
-status: pending
+status: completed
 complexity: medium
 methodology: classic
 depends_on: []

@@ -144,7 +144,12 @@ export class InProcessScheduler implements Scheduler {
     // — reset_at only matters while still suspect.
     const latest = this.opts.store.getCurrentStatus(this.opts.lane.lane_id);
     const stillSuspect = latest !== null && SUSPECT_STATUSES.includes(latest.status);
-    const delayMs = stillSuspect ? this.computeDelayMs(latest!.reset_at) : this.intervalMs;
+    // hdl-lm-03: an operator-supplied manual_reset_at ("change the times")
+    // wins over the sensed reset_at, same precedence as manual_override
+    // wins over sensed status in MulticaControlAdapter — scheduling-only,
+    // does not touch ReconcileContext/ControlAdapter/Argus.
+    const manualResetAt = this.opts.store.getManualResetAt(this.opts.lane.lane_id);
+    const delayMs = stillSuspect ? this.computeDelayMs(manualResetAt ?? latest!.reset_at) : this.intervalMs;
     this.scheduleNext(delayMs);
   }
 }

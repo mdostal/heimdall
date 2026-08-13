@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS lanes (
   lane_id TEXT PRIMARY KEY,
   provider TEXT NOT NULL,
   credential_ref TEXT NOT NULL,
-  manual_override TEXT CHECK (manual_override IN ('enabled','disabled') OR manual_override IS NULL)
+  manual_override TEXT CHECK (manual_override IN ('enabled','disabled') OR manual_override IS NULL),
+  manual_reset_at TEXT
 );
 CREATE TABLE IF NOT EXISTS lane_status_history (
   lane_id TEXT NOT NULL REFERENCES lanes(lane_id),
@@ -65,6 +66,12 @@ export class StateStore {
     } catch {
       // Column already exists — expected on every fresh DB (added via
       // SCHEMA) and on any DB this migration already ran against.
+    }
+    // hdl-lm-03: same defensive migration, second column (mirrors manual_override).
+    try {
+      this.db.exec(`ALTER TABLE lanes ADD COLUMN manual_reset_at TEXT`);
+    } catch {
+      // Column already exists — same reasoning as manual_override above.
     }
   }
 
@@ -206,6 +213,31 @@ export class StateStore {
       .prepare(`SELECT manual_override FROM lanes WHERE lane_id = ?`)
       .get(laneId) as unknown as { manual_override: ManualOverride } | undefined;
     return row?.manual_override ?? null;
+  }
+
+  /**
+   * Manual reset_at (hdl-lm-03) — "change the times." An operator-supplied
+   * ISO-8601 timestamp that, when set, wins over the sensed reset_at in
+   * InProcessScheduler's delay computation (hdl-rar-01). null (the default)
+   * means the sensed reset_at alone decides, unchanged from
+   * pre-hdl-lm-03 behavior. Mirrors setManualOverride/getManualOverride
+   * exactly — same guard, same shape, second application of the pattern.
+   */
+  setManualResetAt(laneId: string, value: string | null): void {
+    this.db
+      .prepare(
+        `INSERT INTO lanes (lane_id, provider, credential_ref) VALUES (?, '', '')
+         ON CONFLICT(lane_id) DO NOTHING`,
+      )
+      .run(laneId);
+    this.db.prepare(`UPDATE lanes SET manual_reset_at = ? WHERE lane_id = ?`).run(value, laneId);
+  }
+
+  getManualResetAt(laneId: string): string | null {
+    const row = this.db
+      .prepare(`SELECT manual_reset_at FROM lanes WHERE lane_id = ?`)
+      .get(laneId) as unknown as { manual_reset_at: string | null } | undefined;
+    return row?.manual_reset_at ?? null;
   }
 
   close(): void {

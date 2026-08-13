@@ -355,3 +355,76 @@ test("reset_at-aware delay: a lane that recovers to healthy reverts to the flat 
   assert.equal(delays[1], 5_000, "a recovered (healthy) lane always gets the flat interval, unaffected by the pre-recovery reset_at");
   store.close();
 });
+
+test("hdl-lm-03: manual_reset_at wins over the sensed reset_at when set", async () => {
+  const store = seedStore("out_of_credit", "2026-07-25T12:05:00.000Z"); // sensed reset_at: 5 min out
+  store.setManualResetAt(LANE.lane_id, "2026-07-25T13:00:00.000Z"); // manual: 1 hour out
+  const delays: number[] = [];
+  const scheduler = new InProcessScheduler({
+    lane: LANE,
+    pipeline: fakePipeline(async () => {}),
+    store,
+    argus: fakeArgus(),
+    nowImpl: () => "2026-07-25T12:00:00.000Z",
+    setTimeoutImpl: ((fn: () => void, ms: number) => {
+      delays.push(ms);
+      return {} as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+  });
+
+  scheduler.start();
+  await scheduler.poll();
+
+  assert.equal(delays.length, 2);
+  assert.equal(delays[1], 60 * 60 * 1000, "expected the manual_reset_at (1 hour) to win over the sensed reset_at (5 minutes)");
+  store.close();
+});
+
+test("hdl-lm-03: byte-identical to pre-hdl-lm-03 behavior when manual_reset_at is unset (null)", async () => {
+  const store = seedStore("out_of_credit", "2026-07-25T12:30:00.000Z");
+  // no setManualResetAt call — stays null
+  const delays: number[] = [];
+  const scheduler = new InProcessScheduler({
+    lane: LANE,
+    pipeline: fakePipeline(async () => {}),
+    store,
+    argus: fakeArgus(),
+    nowImpl: () => "2026-07-25T12:00:00.000Z",
+    setTimeoutImpl: ((fn: () => void, ms: number) => {
+      delays.push(ms);
+      return {} as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+  });
+
+  scheduler.start();
+  await scheduler.poll();
+
+  assert.equal(delays.length, 2);
+  assert.equal(delays[1], 30 * 60 * 1000, "expected the sensed reset_at (30 minutes) to decide, unchanged from hdl-rar-01 behavior");
+  store.close();
+});
+
+test("hdl-lm-03: clearing manual_reset_at (set back to null) reverts to the sensed reset_at", async () => {
+  const store = seedStore("out_of_credit", "2026-07-25T12:10:00.000Z"); // sensed: 10 min out
+  store.setManualResetAt(LANE.lane_id, "2026-07-25T18:00:00.000Z"); // manual: far out
+  store.setManualResetAt(LANE.lane_id, null); // cleared
+  const delays: number[] = [];
+  const scheduler = new InProcessScheduler({
+    lane: LANE,
+    pipeline: fakePipeline(async () => {}),
+    store,
+    argus: fakeArgus(),
+    nowImpl: () => "2026-07-25T12:00:00.000Z",
+    setTimeoutImpl: ((fn: () => void, ms: number) => {
+      delays.push(ms);
+      return {} as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+  });
+
+  scheduler.start();
+  await scheduler.poll();
+
+  assert.equal(delays.length, 2);
+  assert.equal(delays[1], 10 * 60 * 1000, "expected the sensed reset_at (10 minutes) to decide once the manual override was cleared");
+  store.close();
+});

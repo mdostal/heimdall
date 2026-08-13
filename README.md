@@ -94,15 +94,21 @@ npm install
 cp .env.example .env        # declare lanes + fill in tokens (never commit .env)
 ```
 
+`.env` is loaded automatically (`--env-file-if-exists=.env` on `dev`,
+`dev:http-only`, `cli`, `mcp` — tolerant of a missing file, so a fresh clone
+without `.env` yet still runs, just with zero declared lanes).
+
 Lanes are declared as contiguous `HEIMDALL_LANE_<N>_{ID,PROVIDER,CREDENTIAL_REF}`
 triples starting at `1`, with optional `HEIMDALL_LANE_<N>_MODEL` for advisory
 routing; `CREDENTIAL_REF` names another env var holding the actual secret. A lane
 with a missing or empty credential is still reported by `GET /lanes` — as `down`
 with an `unconfigured` reason — rather than crashing the service or silently
-disappearing.
+disappearing. `POST /lanes` (see the dashboard section below) writes new lanes
+in this exact shape.
 
 **Never commit `.env`** — it's gitignored; only `.env.example` (with empty
-secret values) is tracked.
+secret values) is tracked. This is the REQ-07 local-secrets stopgap; Portunus
+is the planned future fix for secret storage, not yet built.
 
 ## Run the real service
 
@@ -144,6 +150,11 @@ curl -X POST http://localhost:4870/lanes/<laneId>/refresh   # force a refresh
 curl http://localhost:4870/healthz                          # liveness only, no lane data
 curl -X POST http://localhost:4870/lanes/<laneId>/override \
   -H "content-type: application/json" -d '{"state":"disabled"}'   # manual override: enabled | disabled | auto
+curl -X POST http://localhost:4870/lanes/<laneId>/reset-at \
+  -H "content-type: application/json" -d '{"reset_at":"2026-08-13T18:00:00.000Z"}'   # or {"reset_at":null} to clear
+curl -X POST http://localhost:4870/lanes \
+  -H "content-type: application/json" \
+  -d '{"lane_id":"gemini@ops","provider":"gemini","model":"gemini-3-pro","token":"..."}'   # add a lane
 
 # CLI
 npm run cli                     # JSON (default)
@@ -155,16 +166,34 @@ npm run mcp
 
 **Dashboard** — `GET /` (open `http://localhost:4870/` in a browser) serves a
 self-contained live lane-status view: no build step, no framework, no
-external network calls — it's a pure consumer of `GET /lanes`, polled every
-5s. Includes manual enable/disable/auto controls per lane, backed by
-`POST /lanes/:laneId/override` — the override wins outright over the sensed
-status until cleared back to `auto`, routed through the same
-`ControlAdapter.reconcile()` decision automatic status-driven actuation
-already uses (not a separate mechanism — see
-[`docs/decisions/DEC-hdl-reason-aware-recovery.md`](docs/decisions/DEC-hdl-reason-aware-recovery.md)
-item 3). An active override is always shown as a distinct "manual: …" badge,
-never silent. Add-lane and MCP agent-tooling for the same operations remain
-tracked as follow-up work.
+external network calls — it's a pure consumer of Heimdall's own HTTP
+endpoints, polled every 5s.
+
+- **On/off** — per-lane enable/disable/auto controls, backed by
+  `POST /lanes/:laneId/override`. The override wins outright over the sensed
+  status until cleared back to `auto`, routed through the same
+  `ControlAdapter.reconcile()` decision automatic status-driven actuation
+  already uses (not a separate mechanism — see
+  [`docs/decisions/DEC-hdl-reason-aware-recovery.md`](docs/decisions/DEC-hdl-reason-aware-recovery.md)
+  item 3). Always shown as a distinct "manual: …" badge, never silent.
+- **Add lane** — a form backed by `POST /lanes`, which writes a new
+  `HEIMDALL_LANE_<N>_*` block (+ its secret line) to the local, gitignored
+  `.env` (see `src/core/env-file.ts`). Does **not** restart the process —
+  the response names the exact command to run (`npm run dev`); the new lane
+  is inert until then.
+- **Token status** — a "configured" / "token missing" chip per lane
+  (`credential_configured`), reflecting whether its credential resolved.
+  The raw secret is never sent to the browser under any field, matching
+  every other credential-handling path in this codebase.
+- **Change the times** — an editable reset-at control per lane, backed by
+  `POST /lanes/:laneId/reset-at`. An operator who knows a lane's real
+  recovery time (a plan reset the automatic probes can't see, say) can set
+  it directly; `InProcessScheduler` prefers it over the sensed `reset_at`
+  when deciding when to check again (scheduling-only — doesn't touch
+  actuation). Shown with a "manual" badge whenever active.
+
+MCP agent-tooling for these same operations remains tracked as follow-up
+work.
 
 Other scripts: `npm test` (Node built-in test runner via `tsx`),
 `npm run build` (type-check + compile to `dist/`), `npm run sla-report`

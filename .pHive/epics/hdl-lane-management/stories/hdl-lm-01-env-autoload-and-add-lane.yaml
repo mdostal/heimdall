@@ -1,7 +1,7 @@
 id: hdl-lm-01-env-autoload-and-add-lane
 epic: hdl-lane-management
 title: Fix .env auto-load and add POST /lanes (add-lane backend)
-status: pending
+status: completed
 complexity: medium
 methodology: classic
 depends_on: []

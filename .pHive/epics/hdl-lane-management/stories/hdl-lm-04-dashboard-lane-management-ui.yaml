@@ -1,7 +1,7 @@
 id: hdl-lm-04-dashboard-lane-management-ui
 epic: hdl-lane-management
 title: Dashboard — add-lane form, token status, editable reset-at
-status: pending
+status: completed
 complexity: medium
 methodology: classic
 depends_on: [hdl-lm-01-env-autoload-and-add-lane, hdl-lm-02-credential-visibility, hdl-lm-03-manual-reset-at]
