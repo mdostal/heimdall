@@ -138,8 +138,21 @@ use `npm run dev:http-only` instead — see
 
 `GET /available-route?task-type=planning|build|review` returns one usable
 advisory route backed by the same lane state. It only chooses lanes with an `up`
-status and a resolved credential, and returns the credential reference handle
-(`token-ref`) rather than the secret.
+status and a resolved credential (a `manual_override: "disabled"` lane is
+always excluded, and `"enabled"` always included, regardless of sensed
+status — see `/routing-strategy` below), and returns the credential
+reference handle (`token-ref`) rather than the secret. *Which* eligible
+lane it picks is decided by the active **routing strategy** — pluggable,
+not hard-coded (`src/core/routing-strategies/`):
+
+| Strategy | Behavior |
+|---|---|
+| `priority` (default) | Today's original ranking — a fixed provider-priority order per task type. |
+| `round-robin` | Cycles through eligible lanes, one further per call. |
+| `off` | Never picks — `GET /available-route` always returns `no_available_route`; the caller uses `GET /lanes` and decides for itself. |
+
+`GET /routing-strategy` / `POST /routing-strategy` (`{"strategy": "priority"\|"round-robin"\|"off"}`)
+read/set the active strategy — a global setting, not per-lane.
 
 ## Query lane status — CLI, HTTP, MCP, and the dashboard
 
@@ -155,6 +168,9 @@ curl -X POST http://localhost:4870/lanes/<laneId>/reset-at \
 curl -X POST http://localhost:4870/lanes \
   -H "content-type: application/json" \
   -d '{"lane_id":"gemini@ops","provider":"gemini","model":"gemini-3-pro","token":"..."}'   # add a lane
+curl http://localhost:4870/routing-strategy
+curl -X POST http://localhost:4870/routing-strategy \
+  -H "content-type: application/json" -d '{"strategy":"round-robin"}'   # priority | round-robin | off
 
 # CLI
 npm run cli                     # JSON (default)
@@ -169,6 +185,10 @@ self-contained live lane-status view: no build step, no framework, no
 external network calls — it's a pure consumer of Heimdall's own HTTP
 endpoints, polled every 5s.
 
+- **Routing strategy** — a simple settings panel to pick the active strategy
+  (`priority` / `round-robin` / `off`). Selecting `off` is clearly flagged —
+  it means `/available-route` will stop making picks, never a silent
+  neutral state.
 - **On/off** — per-lane enable/disable/auto controls, backed by
   `POST /lanes/:laneId/override`. The override wins outright over the sensed
   status until cleared back to `auto`, routed through the same

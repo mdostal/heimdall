@@ -27,6 +27,10 @@ CREATE TABLE IF NOT EXISTS lane_status_history (
   observed_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_lane_status_latest ON lane_status_history(lane_id, observed_at DESC);
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 `;
 
 export type ManualOverride = "enabled" | "disabled" | null;
@@ -238,6 +242,28 @@ export class StateStore {
       .prepare(`SELECT manual_reset_at FROM lanes WHERE lane_id = ?`)
       .get(laneId) as unknown as { manual_reset_at: string | null } | undefined;
     return row?.manual_reset_at ?? null;
+  }
+
+  /**
+   * Generic global (not per-lane) key-value settings (hdl-rs-03). The
+   * active routing strategy is the first consumer, but this table isn't
+   * routing-specific — a future global setting doesn't need its own schema
+   * migration.
+   */
+  setSetting(key: string, value: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO settings (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      )
+      .run(key, value);
+  }
+
+  getSetting(key: string): string | null {
+    const row = this.db
+      .prepare(`SELECT value FROM settings WHERE key = ?`)
+      .get(key) as unknown as { value: string } | undefined;
+    return row?.value ?? null;
   }
 
   close(): void {

@@ -1,0 +1,101 @@
+id: hdl-rs-01-override-gates-routing
+epic: hdl-routing-strategies
+title: manual_override gates /available-route candidacy (block usage, direct it around)
+status: completed
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  getAvailableRoute's candidate filter currently reads only the sensed
+  status (store.getAllCurrentStatuses()), never manual_override — an
+  operator disabling a lane via the dashboard has zero effect on routing
+  today. Fixes this using the exact override-wins-outright precedence
+  already proven in MulticaControlAdapter.reconcile() (hdl-lane-override):
+  override "disabled" -> never a routing candidate regardless of sensed
+  status; override "enabled" -> always a candidate, bypassing the
+  sensed-status check; override unset (null) -> today's status === "up"
+  check, unchanged. Independent of which strategy is active — ships as
+  its own real value ("block the usage and direct it around") before any
+  strategy-selection work lands.
+
+acceptance_criteria:
+  - "Given a lane with sensed status 'up' and manual_override 'disabled', when GET /available-route is called for a task type that would otherwise pick it, then that lane is NEVER returned — routing goes to the next eligible candidate, or null if none remain"
+  - "Given a lane with sensed status 'down' and manual_override 'enabled', when GET /available-route is called, then that lane IS a valid candidate despite the down status — override wins outright, matching MulticaControlAdapter's precedence exactly"
+  - "Given a lane with manual_override unset (null), when GET /available-route is called, then behavior is byte-identical to pre-this-story — sensed status === 'up' alone decides"
+  - "Every existing http-server.test.ts /available-route test (which never sets an override) passes with ZERO test changes — proves the unset-override case is truly unchanged"
+
+steps:
+  - id: research
+    description: Confirm getAvailableRoute's exact current candidate-filter code and MulticaControlAdapter's override-precedence formula before implementing the mirrored version
+    agent: researcher
+  - id: implement
+    description: Add the override-aware candidacy filter to getAvailableRoute (or a small extracted helper), reading store.getManualOverride() per lane
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Add direct tests for the override-gates-candidacy behavior; confirm existing /available-route tests pass unmodified
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review specifically that the unset-override path is provably unchanged (the zero-test-change acceptance gate)
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/core/route-selector.ts
+      purpose: "getAvailableRoute's candidate filter (lines 46-53) — the exact code being made override-aware"
+    - path: src/core/actuation/multica-control-adapter.ts
+      purpose: "The exact override-wins-outright precedence formula being mirrored: context?.manualOverride != null ? context.manualOverride === 'enabled' : !SUSPECT_STATUSES.has(status)"
+
+files_to_modify:
+  - file: src/core/route-selector.ts
+    change: "Widen the candidate filter to read store.getManualOverride(lane.lane_id) per lane and apply the override-wins-outright precedence before (or instead of) the sensed status === 'up' check."
+
+code_examples:
+  - title: The current candidate filter (sensed status only)
+    file: src/core/route-selector.ts
+    snippet: |
+      const candidates = registry
+        .list()
+        .filter((lane) => lane.credential !== null)
+        .filter((lane) => statuses.get(lane.lane_id)?.status === "up")
+        .sort((a, b) => {...});
+
+  - title: The precedence formula being mirrored (hdl-lane-override)
+    file: src/core/actuation/multica-control-adapter.ts
+    snippet: |
+      const desiredEnabled =
+        context?.manualOverride != null
+          ? context.manualOverride === "enabled"
+          : !SUSPECT_STATUSES.has(status);
+
+design_decisions:
+  - decision: Reuse the exact override-wins-outright precedence from MulticaControlAdapter rather than inventing new semantics for routing.
+    rationale: One mental model for what "override" means across the whole codebase — an operator who disables a lane expects it blocked everywhere (actuation AND routing), not two different behaviors depending on which subsystem is asked.
+
+cross_cutting:
+  - concern: documentation
+    action: "README's /available-route description gains a note that manual_override now affects candidacy."
+
+risks:
+  - severity: low
+    description: A regression here would silently route traffic to a lane the operator explicitly disabled.
+    mitigation: Direct acceptance criteria cover both override states explicitly, not just the unset case.
+
+references:
+  - path: .pHive/epics/hdl-routing-strategies/docs/design-discussion.md
+    relevant_excerpt: |
+      The foundational fix, independent of which strategy is active ...
+      Ships alone as real, immediate value -- "block the usage and direct
+      it around" -- before any strategy-selection work lands.

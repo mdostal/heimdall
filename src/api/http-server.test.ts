@@ -271,6 +271,97 @@ test("GET /available-route returns an up lane with headroom and a token ref for 
   }
 });
 
+test("hdl-rs-01: GET /available-route skips a lane whose manual_override is 'disabled', even though its sensed status is 'up'", async () => {
+  const registry = registryWithRouteLanes();
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+  store.upsertLane({ lane_id: "codex", provider: "codex", credential_ref: "CODEX_TOKEN" });
+  store.upsertLane({ lane_id: "kimi", provider: "kimi", credential_ref: "KIMI_TOKEN" });
+  for (const laneId of ["claude@mathew.dostal", "codex", "kimi"]) {
+    store.recordStatus({
+      lane_id: laneId,
+      status: "up",
+      reset_at: null,
+      reason: null,
+      signal_source: "active_probe",
+      observed_at: "2026-08-05T16:00:00.000Z",
+    });
+  }
+  // codex would normally win task-type=build (RUNTIME_PRIORITY.build[0]) —
+  // disable it via override and confirm routing goes to claude instead.
+  store.setManualOverride("codex", "disabled");
+
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/available-route?task-type=build`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.lane_id, "claude@mathew.dostal", "codex must be skipped despite sensed status 'up' — override 'disabled' wins");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-rs-01: GET /available-route includes a lane whose manual_override is 'enabled', even though its sensed status is 'down'", async () => {
+  const registry = registryWithRouteLanes();
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "codex", provider: "codex", credential_ref: "CODEX_TOKEN" });
+  store.recordStatus({
+    lane_id: "codex",
+    status: "down",
+    reset_at: null,
+    reason: "provider outage",
+    signal_source: "active_probe",
+    observed_at: "2026-08-05T16:00:00.000Z",
+  });
+  store.setManualOverride("codex", "enabled");
+
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/available-route?task-type=build`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.lane_id, "codex", "override 'enabled' must win over sensed status 'down'");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-rs-01: GET /available-route with manual_override unset (null) is unaffected — a down lane is still excluded", async () => {
+  const registry = registryWithRouteLanes();
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "codex", provider: "codex", credential_ref: "CODEX_TOKEN" });
+  store.recordStatus({
+    lane_id: "codex",
+    status: "down",
+    reset_at: null,
+    reason: "provider outage",
+    signal_source: "active_probe",
+    observed_at: "2026-08-05T16:00:00.000Z",
+  });
+  // no setManualOverride call — stays null
+
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/available-route?task-type=build`);
+    assert.equal(res.status, 404);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
 test("GET /available-route skips lanes without headroom or a resolved token", async () => {
   const registry = new LaneRegistry(
     [
@@ -390,6 +481,137 @@ test("GET /available-route returns 404 when no usable lane has headroom and a va
     assert.equal(res.status, 404);
     const body = await res.json();
     assert.deepEqual(body, { error: "no_available_route", task_type: "planning" });
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-rs-03: GET /routing-strategy defaults to 'priority' active with all 3 strategies listed as available", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/routing-strategy`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.active, "priority");
+    assert.deepEqual(body.available.sort(), ["off", "priority", "round-robin"]);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-rs-03: POST /routing-strategy sets the active strategy, and GET /routing-strategy reflects it", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const setRes = await fetch(`http://localhost:${port}/routing-strategy`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ strategy: "round-robin" }),
+    });
+    assert.equal(setRes.status, 200);
+    const setBody = await setRes.json();
+    assert.equal(setBody.active, "round-robin");
+
+    const getRes = await fetch(`http://localhost:${port}/routing-strategy`);
+    const getBody = await getRes.json();
+    assert.equal(getBody.active, "round-robin");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-rs-03: POST /routing-strategy with an unrecognized name returns 400 and does NOT change the active strategy", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/routing-strategy`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ strategy: "not-a-real-strategy" }),
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.error, "invalid_strategy");
+
+    const getRes = await fetch(`http://localhost:${port}/routing-strategy`);
+    assert.equal((await getRes.json()).active, "priority", "an invalid POST must not change the persisted setting");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-rs-03: with the 'off' strategy active, GET /available-route always returns no_available_route, regardless of eligible candidates", async () => {
+  const registry = registryWithRouteLanes();
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+  store.upsertLane({ lane_id: "codex", provider: "codex", credential_ref: "CODEX_TOKEN" });
+  for (const laneId of ["claude@mathew.dostal", "codex"]) {
+    store.recordStatus({
+      lane_id: laneId,
+      status: "up",
+      reset_at: null,
+      reason: null,
+      signal_source: "active_probe",
+      observed_at: "2026-08-05T16:00:00.000Z",
+    });
+  }
+  store.setSetting("routing_strategy", "off");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/available-route?task-type=build`);
+    assert.equal(res.status, 404);
+    const body = await res.json();
+    assert.equal(body.error, "no_available_route");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-rs-03: with the 'round-robin' strategy active, consecutive GET /available-route calls pick different lanes", async () => {
+  const registry = registryWithRouteLanes();
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+  store.upsertLane({ lane_id: "codex", provider: "codex", credential_ref: "CODEX_TOKEN" });
+  for (const laneId of ["claude@mathew.dostal", "codex"]) {
+    store.recordStatus({
+      lane_id: laneId,
+      status: "up",
+      reset_at: null,
+      reason: null,
+      signal_source: "active_probe",
+      observed_at: "2026-08-05T16:00:00.000Z",
+    });
+  }
+  store.setSetting("routing_strategy", "round-robin");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const first = await (await fetch(`http://localhost:${port}/available-route?task-type=build`)).json();
+    const second = await (await fetch(`http://localhost:${port}/available-route?task-type=build`)).json();
+    assert.notEqual(first.lane_id, second.lane_id, "round-robin must not pick the same lane twice in a row with 2 eligible candidates");
   } finally {
     server.close();
     store.close();
@@ -1080,6 +1302,45 @@ test("hdl-lo-02: GET / (dashboard) renders an override indicator distinct from t
     const body = await res.text();
     assert.match(body, /overrideBadge/, "must render a distinct override indicator, not fold override state into the status badge");
     assert.match(body, /if \(!manualOverride\) return ""/, "the override badge must render nothing when no override is set (not 'null' or an empty badge)");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-rs-04: GET / (dashboard) includes a Routing strategy panel that loads from and saves to /routing-strategy", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /id="routing-strategy-select"/);
+    assert.match(body, /id="routing-strategy-save"/);
+    assert.match(body, /id="routing-strategy-status"/);
+    assert.match(body, /fetch\("\/routing-strategy"\)/, "the panel must load its state from GET /routing-strategy");
+    assert.match(body, /"\/routing-strategy"/, "the save control must POST to /routing-strategy");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-rs-04: GET / (dashboard) visibly flags the 'off' strategy's consequence — never a silent/neutral dropdown", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /function renderRoutingStrategyStatus/);
+    assert.match(body, /no_available_route/, "the panel's 'off' state must explain the consequence, not just show a value");
   } finally {
     server.close();
     store.close();

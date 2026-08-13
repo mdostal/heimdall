@@ -38,3 +38,5 @@ npm-debug.log*
 !.pHive/epics/hdl-lane-management/**
 !.pHive/epics/hdl-mcp-lane-tools/
 !.pHive/epics/hdl-mcp-lane-tools/**
+!.pHive/epics/hdl-routing-strategies/
+!.pHive/epics/hdl-routing-strategies/**
