@@ -1,0 +1,118 @@
+id: hdl-rar-01-scheduler-reset-at
+epic: hdl-reason-aware-recovery
+title: InProcessScheduler retries at reset_at instead of a flat 5s interval when known
+status: pending
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  InProcessScheduler.poll() currently polls every suspect lane (degraded/down/
+  out_of_credit) on a flat DEFAULT_INTERVAL_MS (5000ms), ignoring the
+  reset_at timestamp already captured on the lane's current status. When
+  reset_at is known (e.g. a provider's rate-limit or out-of-credit reset
+  time), schedule the next refresh() at or shortly after that timestamp
+  instead of blindly polling every 5s. When reset_at is null (down for an
+  unknown/unstructured reason), keep today's flat-interval behavior — that's
+  already the correct fallback.
+
+acceptance_criteria:
+  - "Given a suspect lane with a current status reset_at 30 minutes in the future, when poll() schedules its next tick, then the delay is computed from reset_at (clamped to at least DEFAULT_INTERVAL_MS as a floor), not the flat 5s default"
+  - "Given a suspect lane with reset_at null, when poll() schedules its next tick, then the delay is the existing flat DEFAULT_INTERVAL_MS (unchanged behavior)"
+  - "Given a suspect lane with reset_at in the past (clock skew / stale data), when poll() schedules its next tick, then the delay clamps to DEFAULT_INTERVAL_MS rather than producing a zero/negative/near-zero delay"
+  - "Given a lane recovers to a healthy status, when poll() runs, then scheduling reverts to the existing 'no refresh this cycle' healthy-lane behavior (unchanged — this story only changes the suspect-lane delay computation, not the healthy-lane path)"
+
+steps:
+  - id: research
+    description: Confirm current InProcessScheduler.poll()/scheduleNext() behavior and existing test coverage before changing the delay computation
+    agent: researcher
+  - id: implement
+    description: Add reset_at-aware delay computation to InProcessScheduler; keep the flat-interval fallback for null reset_at
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Extend in-process-scheduler.test.ts with cases for known reset_at, null reset_at, past reset_at, and the unchanged healthy-lane path
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review implementation and tests for correctness and convention compliance (options-object injection pattern, no-box-daemon compliance)
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/core/scheduler/in-process-scheduler.ts
+      purpose: "The file being changed — poll()/scheduleNext() currently use a flat DEFAULT_INTERVAL_MS (line 31) regardless of reset_at"
+    - path: src/core/scheduler/in-process-scheduler.test.ts
+      purpose: Existing test file to extend with new cases, not a new file
+    - path: src/core/status-model.ts
+      purpose: "LaneStatus shape — reset_at: string | null is already on this type, nothing to add here"
+
+files_to_modify:
+  - file: src/core/scheduler/in-process-scheduler.ts
+    change: >
+      In poll(), when the lane is suspect, read current.reset_at alongside
+      current.status. Compute the next-poll delay as
+      Math.max(this.intervalMs, resetAtMs - nowMs) when reset_at parses to a
+      future timestamp; otherwise use the existing this.intervalMs. Pass this
+      computed delay into scheduleNext() (currently hardcoded to
+      this.intervalMs at line 77) for this cycle only — subsequent healthy
+      cycles are unaffected.
+  - file: src/core/scheduler/in-process-scheduler.test.ts
+    change: Add test cases per acceptance criteria above.
+
+code_examples:
+  - title: Current flat-interval scheduling (what's being made reset_at-aware)
+    file: src/core/scheduler/in-process-scheduler.ts
+    snippet: |
+      private scheduleNext(): void {
+        if (this.timer) {
+          this.clearTimeoutImpl(this.timer);
+          this.timer = null;
+        }
+        if (this.stopped) return;
+        this.timer = this.setTimeoutImpl(() => {
+          void this.poll();
+        }, this.intervalMs);
+      }
+
+  - title: Where reset_at is already available on the current status
+    file: src/core/scheduler/in-process-scheduler.ts
+    snippet: |
+      async poll(): Promise<void> {
+        const current = this.opts.store.getCurrentStatus(this.opts.lane.lane_id);
+        const isSuspect = current !== null && SUSPECT_STATUSES.includes(current.status);
+        // current.reset_at exists here (LaneStatus.reset_at) but is unused today
+
+design_decisions:
+  - decision: Clamp the reset_at-derived delay to a floor of DEFAULT_INTERVAL_MS, never scheduling less frequently than that floor even for a far-future reset_at is NOT the intent — clarify at implement time that the floor applies to the MINIMUM delay (don't retry sooner than 5s even if reset_at says "now"), and there is no ceiling (a reset_at 6 hours out should wait the full 6 hours, not be capped).
+    rationale: Prevents busy-looping on stale/near-past reset_at values while still honoring long known-recovery windows (the whole point of this story per DEC-hdl-reason-aware-recovery.md).
+
+cross_cutting:
+  - concern: no-box-daemon
+    action: "No new scheduler/daemon introduced — this changes only the delay argument passed into the existing InProcessScheduler event loop (setTimeout-based, already HARD-LAW-compliant per DEC-hdl-scheduler-backend.md)."
+  - concern: documentation
+    action: "Update docs/decisions/DEC-hdl-reason-aware-recovery.md's Status line to reflect this story's completion once both stories in this epic are merged."
+
+risks:
+  - severity: medium
+    description: A stale or clock-skewed reset_at could compute a very long delay, effectively stopping retries for longer than intended.
+    mitigation: Floor at DEFAULT_INTERVAL_MS handles the near/past case; no ceiling is intentional per design_decisions above, but flag in review if a sanity ceiling (e.g. cap at 24h) seems warranted in practice.
+
+references:
+  - path: docs/decisions/DEC-hdl-reason-aware-recovery.md
+    relevant_excerpt: |
+      1. Reset_at-aware scheduling in InProcessScheduler. When the current
+      stored status has a non-null reset_at in the future, schedule the next
+      refresh() at (or shortly after) that timestamp instead of the flat 5s
+      interval — collapsing to a Math.max(DEFAULT_INTERVAL_MS, resetAt - now)
+      style delay computation.

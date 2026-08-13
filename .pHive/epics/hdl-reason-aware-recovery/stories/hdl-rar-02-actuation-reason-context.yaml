@@ -1,0 +1,135 @@
+id: hdl-rar-02-actuation-reason-context
+epic: hdl-reason-aware-recovery
+title: ControlAdapter.reconcile carries reason/reset_at so actuation logging can say why
+status: pending
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  ControlAdapter.reconcile(lane, status) only receives the bare status enum
+  today — reason/reset_at never reach the actuation layer, so
+  MulticaControlAdapter's Argus emission (emitResult) can't record why a
+  lane was blocked (out-of-credit-until-reset_at vs down-for-unknown-reason
+  are operationally different events that currently look identical in
+  telemetry). Widen the interface to pass the full LaneStatus (or at least
+  reason + reset_at alongside status) through to both ControlAdapter
+  implementations. The block/allow decision itself (SUSPECT_STATUSES check)
+  is unchanged — this is additive context threading only.
+
+acceptance_criteria:
+  - "Given a lane is blocked because it's out_of_credit with a known reset_at, when MulticaControlAdapter.reconcile runs, then the Argus emitActuationResult call includes the reason and reset_at, not just success/failure"
+  - "Given a lane is blocked for an unknown-reason down status (reset_at null), when MulticaControlAdapter.reconcile runs, then the Argus emission reflects reset_at: null distinctly from the out_of_credit case"
+  - "Given StubControlAdapter handles an unmapped lane, when it logs via ActuationStub.onStatusChange, then it has access to the same reason/reset_at context (even if the current stub logging doesn't yet print it — the data must be threaded through, not dropped at the interface boundary)"
+  - "The existing block/allow logic (SUSPECT_STATUSES.has(status) -> max_concurrent_tasks 0/N) is unchanged — this story does not alter which lanes get blocked, only what context is available when logging the decision"
+  - "npm run build (tsc) passes with no errors — the interface signature change is applied consistently at its one call site (src/main.ts:176) and both implementations (StubControlAdapter, MulticaControlAdapter)"
+
+steps:
+  - id: research
+    description: Confirm ControlAdapter interface, both implementations, and the single call site in src/main.ts before changing the signature
+    agent: researcher
+  - id: implement
+    description: Widen ControlAdapter.reconcile's signature to carry reason/reset_at (or the full LaneStatus); update both implementations and the src/main.ts call site
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Extend multica-control-adapter.test.ts (and stub adapter tests if present) to assert reason/reset_at reach the Argus emission
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review for correctness, convention compliance, and confirm the block/allow decision logic is genuinely unchanged
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/core/actuation/control-adapter.ts
+      purpose: "Defines the ControlAdapter interface (reconcile(lane, status)) and StubControlAdapter — the interface signature change originates here"
+    - path: src/core/actuation/multica-control-adapter.ts
+      purpose: "The real implementation — reconcile() at line 58, emitResult() at line 134 is what should gain reason/reset_at in its Argus payload"
+    - path: src/main.ts
+      purpose: "Line 176 is the ONE call site: adapter.reconcile(lane, current.status) — current is already the full LaneStatus object from store.getCurrentStatus(), so this call site already has reason/reset_at available, just needs to pass them through"
+    - path: src/core/telemetry/argus-client.ts
+      purpose: "ArgusEmitter.emitActuationResult's payload shape — check whether it already accepts optional reason/reset_at fields or needs widening too"
+
+files_to_modify:
+  - file: src/core/actuation/control-adapter.ts
+    change: >
+      Widen ControlAdapter.reconcile(lane, status) to
+      reconcile(lane, status) where status is the full LaneStatus (or add
+      reason/reset_at as additional params — implementer's call on whichever
+      reads more cleanly given StubControlAdapter's usage). Update
+      StubControlAdapter.reconcile to match.
+  - file: src/core/actuation/multica-control-adapter.ts
+    change: >
+      Update reconcile()'s signature to match, thread reason/reset_at through
+      to emitResult() calls in disableAgent/enableAgent, and extend
+      emitActuationResult's payload in emitResult() (line 134-149).
+  - file: src/main.ts
+    change: "Line 176: pass current (full LaneStatus) instead of current.status, or explicitly current.status plus current.reason/current.reset_at depending on the interface shape chosen above."
+
+code_examples:
+  - title: The one call site that already has the full status object
+    file: src/main.ts
+    snippet: |
+      const current = store.getCurrentStatus(lane.lane_id);
+      if (!current) continue;
+      const adapter = controlAdapters.get(lane.lane_id);
+      if (!adapter) continue;
+      adapter.reconcile(lane, current.status).catch((err) => {
+        console.error(`[main] reconcile() failed for lane ${lane.lane_id}:`, err);
+      });
+
+  - title: Where the reason should end up (Argus emission, currently reason-blind)
+    file: src/core/actuation/multica-control-adapter.ts
+    snippet: |
+      private emitResult(
+        lane: Lane,
+        agentId: string,
+        action: string,
+        success: boolean,
+        reason?: string,
+      ): void {
+        this.opts.argus.emitActuationResult({
+          laneId: lane.lane_id,
+          provider: lane.provider,
+          agentId,
+          action,
+          success,
+          reason,
+        });
+      }
+
+design_decisions:
+  - decision: Do not change SUSPECT_STATUSES or the desiredEnabled boolean logic in reconcile()/reconcileAgent() — this story is additive context threading only, per the operator's explicit confirmation that the on/off top-level directing mechanism is correct as-is.
+    rationale: Scope discipline — conflating this with a behavior change to the block/allow decision would make the story harder to review and risk regressing already-correct actuation logic.
+
+cross_cutting:
+  - concern: argus-otel-emit
+    action: "This story directly touches the Argus emission path (emitActuationResult) — verify the emitted span/event still conforms to whatever OTEL semantic conventions the argus-otel-emit concern specifies (check .pHive/cross-cutting-concerns.yaml for the concern's implementation_checklist)."
+  - concern: documentation
+    action: "Update docs/decisions/DEC-hdl-reason-aware-recovery.md's Status line to Accepted once both stories in this epic are merged."
+
+risks:
+  - severity: low
+    description: Widening a public interface signature could be missed at a call site if there's more than one (research step should confirm the single-call-site claim above before implementing).
+    mitigation: npm run build (tsc, strict mode) will fail loudly on any missed call site — treat a clean build as the acceptance gate for this risk specifically.
+
+references:
+  - path: docs/decisions/DEC-hdl-reason-aware-recovery.md
+    relevant_excerpt: |
+      2. Widen ControlAdapter.reconcile to receive the full LaneStatus (or at
+      minimum reason/reset_at alongside status), so MulticaControlAdapter's
+      Argus emission (emitResult, multica-control-adapter.ts:134-149) can
+      record why a lane was blocked ... This is additive (existing
+      block/allow logic is unchanged) and is what a future lane-control UI
+      would read to show real status, not just up/down.
