@@ -1,0 +1,105 @@
+id: hdl-gs-02-public-status-gemini
+epic: hdl-gemini-signals
+title: Gemini public-status adapter (Google Cloud incidents feed, fragment-filtered)
+status: pending
+complexity: medium
+methodology: classic
+depends_on: []
+
+description: |
+  Implements src/core/signal-sources/public-status/gemini.ts, mirroring
+  public-status/claude.ts's PublicStatusSignal contract and defensive
+  posture (unreachable -> degraded, unrecognized shape -> degraded, never
+  a silent "up" on ambiguity) but adapted to the real feed available for
+  Gemini: status.cloud.google.com/incidents.json (no auth). Unlike
+  Claude's fixed per-component snapshot, this is a flat, Google-Cloud-wide
+  incident list -- there is no positive "operational" entry to read.
+  Filter to currently-open incidents whose affected_products[].title
+  matches one of a documented fragment list (mirroring claude.ts's
+  RELEVANT_COMPONENT_NAME_FRAGMENTS pattern, adapted to the different
+  field shape); no matching open incident means up. A matching incident's
+  severity maps to degraded/down.
+
+acceptance_criteria:
+  - "Given a fetch of incidents.json with no open incident matching the Gemini/Vertex-AI fragment list, when checkGeminiPublicStatus is called, then it returns { status: 'up', reason: null }"
+  - "Given an open incident (no end timestamp) whose affected_products includes a title matching one of the documented fragments, with severity indicating a partial/medium impact, when checkGeminiPublicStatus is called, then it returns { status: 'degraded', reason: '<incident name/description>' }"
+  - "Given an open incident matching the fragment list with severity/status_impact indicating a full outage, when checkGeminiPublicStatus is called, then it returns { status: 'down', reason: '<incident name/description>' }"
+  - "Given an incident matching the fragment list that has already ended (has an end timestamp in the past), when checkGeminiPublicStatus is called, then that incident is NOT treated as currently affecting status"
+  - "Given the incidents.json endpoint is unreachable or returns a non-2xx response, when checkGeminiPublicStatus is called, then it returns { status: 'degraded', reason: '<explanation>' }, never throws, never silently returns 'up'"
+  - "Given an incidents.json response with an unrecognized/malformed shape (schema drift), when checkGeminiPublicStatus is called, then it returns 'degraded', not 'up' -- ambiguity is never read as healthy"
+
+steps:
+  - id: research
+    description: Confirm the incidents.json shape and fragment-filter approach already captured in research-brief.md
+    agent: researcher
+  - id: implement
+    description: Implement public-status/gemini.ts mirroring public-status/claude.ts's structure and defensive defaults
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Unit tests covering every acceptance criterion using hand-built fixture incident-feed responses
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that every ambiguous/unrecognized-shape path defaults to degraded, never up, matching claude.ts's existing defensive posture
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/core/signal-sources/public-status/claude.ts
+      purpose: "The exact structural pattern and defensive-default posture to mirror -- PublicStatusSignal shape, fragment-match filtering, indicator-to-severity ranking, unreachable/malformed -> degraded (never up)."
+
+files_to_modify:
+  - file: src/core/signal-sources/public-status/gemini.ts
+    change: "New file -- checkGeminiPublicStatus(fetchImpl?) implementing the incidents.json fragment-filter mapping described above."
+  - file: src/core/signal-sources/public-status/gemini.test.ts
+    change: "New file -- unit tests for every acceptance criterion, injecting a fake fetchImpl with fixture incident payloads."
+
+code_examples:
+  - title: The PublicStatusSignal contract every public-status adapter returns
+    file: src/core/signal-sources/public-status/claude.ts
+    snippet: |
+      export type PublicStatusValue = "up" | "degraded" | "down";
+      export interface PublicStatusSignal {
+        status: PublicStatusValue;
+        reason: string | null;
+      }
+
+  - title: The fragment-match filtering pattern to adapt
+    file: src/core/signal-sources/public-status/claude.ts
+    snippet: |
+      const RELEVANT_COMPONENT_NAME_FRAGMENTS = ["Claude Code", "API", "api.anthropic.com"];
+      const relevant = summary.components.filter((component) =>
+        RELEVANT_COMPONENT_NAME_FRAGMENTS.some((fragment) => component.name.includes(fragment)),
+      );
+
+design_decisions:
+  - decision: "No matching open incident -> up (absence of a reported problem), rather than treating the lack of a positive 'operational' component as ambiguous."
+    rationale: "incidents.json is fundamentally a problem-report feed, not a component-status snapshot -- there is no 'operational' entry to read even when everything is fine. Reading 'no open incident' as up is the correct interpretation of what this feed actually represents, matching how an operator reading the dashboard themselves would conclude health."
+  - decision: "Fragment list kept narrow and documented in-file: [\"Gemini\", \"Vertex AI\", \"Generative AI\"]."
+    rationale: "Same tradeoff claude.ts already accepts for its own fragment list -- narrow enough to avoid false-positives from unrelated GCP incidents (VMware, Bare Metal, NetApp, etc. dominate this feed), documented so a future contributor can tune it against real incident naming as more data comes in."
+
+risks:
+  - severity: medium
+    description: "status.cloud.google.com/incidents.json is not a formally documented, stable API contract the way Claude's StatusPage.io feed is -- schema or field-naming drift is plausible."
+    mitigation: "Defensive-default posture (unrecognized shape -> degraded, never up) bounds the blast radius of drift to false-degraded, not false-healthy. Revisit if the feed's shape changes."
+  - severity: low
+    description: "Fragment matching against affected_products[].title could under-match a real Gemini incident that's phrased differently than expected (e.g. a future product rename)."
+    mitigation: "Same accepted tradeoff as claude.ts's own fragment list; documented in-file for easy tuning, not a blocking concern for this epic's scope."
+
+references:
+  - path: .pHive/epics/hdl-gemini-signals/docs/research-brief.md
+    relevant_excerpt: |
+      Its affected_products[] list is infrastructure-wide ... real
+      Gemini-specific incidents do appear in it when they occur ... the
+      same fragment-filter approach Claude's adapter uses still works.

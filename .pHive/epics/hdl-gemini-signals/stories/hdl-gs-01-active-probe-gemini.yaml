@@ -1,0 +1,114 @@
+id: hdl-gs-01-active-probe-gemini
+epic: hdl-gemini-signals
+title: Gemini active-probe adapter (models.list, x-goog-api-key header, quota-vs-rate-limit distinction)
+status: pending
+complexity: medium
+methodology: classic
+depends_on: []
+
+description: |
+  Implements src/core/signal-sources/active-probe/gemini.ts, mirroring
+  active-probe/claude.ts's shape and error-handling posture exactly
+  (never-throws, injectable fetchImpl, same ProbeResult return type) but
+  adapted to Gemini's actually-documented behavior (research-brief.md):
+  GET generativelanguage.googleapis.com/v1beta/models, authenticated via
+  the x-goog-api-key header (not the ?key= query param -- avoids leaking
+  the credential into URLs/proxy logs, matching Claude's header-based
+  pattern). Gemini's 429 body is {error: {code, message, status}} where
+  status distinguishes a transient per-minute rate limit from a
+  longer-lived daily-quota-exceeded condition -- map the former to
+  "degraded" and the latter to "out_of_credit", same two-tier severity
+  Claude's 402-vs-429 split gives. reset_at is ALWAYS null for Gemini --
+  no documented reset-timestamp header/field exists for this API, unlike
+  Claude's anthropic-ratelimit-requests-reset. This is a confirmed gap,
+  not an oversight, and InProcessScheduler's existing reset_at-unknown
+  fallback (hdl-reason-aware-recovery) already handles null reset_at
+  correctly with zero new scheduler code.
+
+acceptance_criteria:
+  - "Given a 2xx response from models.list, when probeGeminiLane is called, then it returns { status: 'up', reset_at: null, reason: null }"
+  - "Given a 401 or 403 response, when probeGeminiLane is called, then it returns { status: 'down', reset_at: null, reason: 'auth failed (<code>)' }"
+  - "Given a 429 response whose body's error.status indicates a daily quota condition, when probeGeminiLane is called, then it returns { status: 'out_of_credit', reset_at: null, reason: <message> }"
+  - "Given a 429 response whose body's error.status indicates a transient per-minute rate limit, when probeGeminiLane is called, then it returns { status: 'degraded', reset_at: null, reason: <message> }"
+  - "Given a 5xx response, when probeGeminiLane is called, then it returns { status: 'down', reset_at: null, reason: 'server error (<code>)' }"
+  - "Given a network-level fetch failure, when probeGeminiLane is called, then it never throws -- it returns { status: 'down', reset_at: null, reason: 'probe request failed: <message>' }"
+  - "Given a successful call, when the request is inspected, then the API key appears in the x-goog-api-key header, never in the URL query string"
+
+steps:
+  - id: research
+    description: Confirm the exact request/response shapes already captured in research-brief.md before implementing (models.list URL, header name, 429 body shape)
+    agent: researcher
+  - id: implement
+    description: Implement active-probe/gemini.ts mirroring active-probe/claude.ts's structure (injectable fetchImpl, never-throws contract, ProbeResult return type)
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Unit tests covering every acceptance criterion above using hand-built fixture responses (no live Gemini account available -- documented as an accepted verification gap, same class as hdl-actuation's live-Multica gap)
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that reset_at is null on every path (not just some) and that the API key never appears in a logged URL
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/core/signal-sources/active-probe/claude.ts
+      purpose: "The exact structural pattern to mirror -- ProbeResult shape, injectable fetchImpl default, never-throws contract, status-code-to-verdict mapping."
+
+files_to_modify:
+  - file: src/core/signal-sources/active-probe/gemini.ts
+    change: "New file -- probeGeminiLane(apiKey, fetchImpl?) implementing the mapping described above."
+  - file: src/core/signal-sources/active-probe/gemini.test.ts
+    change: "New file -- unit tests for every acceptance criterion, injecting a fake fetchImpl."
+
+code_examples:
+  - title: The ProbeResult contract every probe adapter returns
+    file: src/core/signal-sources/active-probe/claude.ts
+    snippet: |
+      export type ProbeStatusValue = "up" | "down" | "out_of_credit" | "degraded";
+      export interface ProbeResult {
+        status: ProbeStatusValue;
+        reset_at: string | null;
+        reason: string | null;
+      }
+
+  - title: Never-throws network-failure handling to mirror
+    file: src/core/signal-sources/active-probe/claude.ts
+    snippet: |
+      try {
+        response = await fetchImpl(CLAUDE_MODELS_URL, { ... });
+      } catch (err) {
+        return {
+          status: "down",
+          reset_at: null,
+          reason: `probe request failed: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+
+design_decisions:
+  - decision: reset_at is unconditionally null for Gemini, documented in a file-header comment exactly like claude.ts documents its own sourcing.
+    rationale: "No live API confirms a reset-timestamp field exists on the Gemini Developer API's 429 responses (Vertex AI's RetryInfo/retryDelay is a different, unconfirmed-present API surface). Returning a fabricated or guessed reset_at would be worse than an honest null -- InProcessScheduler already degrades gracefully to its flat interval when reset_at is unknown."
+  - decision: quota_exceeded maps to out_of_credit, rate_limit_exceeded maps to degraded, both under HTTP 429.
+    rationale: "Mirrors the severity distinction Claude expresses via 402-vs-429 (a longer-lived billing/quota state vs a short transient rate limit), just read from the JSON body's error.status field instead of the HTTP status code, since Gemini collapses both cases onto 429."
+
+risks:
+  - severity: medium
+    description: The exact string value of error.status for the two 429 sub-cases was not confirmed against a live exhausted-quota account (only documented in Google's error-code reference pages, which use both explicit enum-like names and prose descriptions inconsistently across pages).
+    mitigation: "Match on the documented RESOURCE_EXHAUSTED status plus a message/reason substring check for quota-vs-rate-limit framing; default an unrecognized 429 body to 'degraded' (the less severe of the two) rather than guessing out_of_credit, so an unrecognized shape never over-triggers actuation. Revisit once a live 429 is observed in production."
+
+references:
+  - path: .pHive/epics/hdl-gemini-signals/docs/research-brief.md
+    relevant_excerpt: |
+      Two 429 sub-cases matter and are distinguished by `status`, not by
+      HTTP code alone ... Gap: no reset timestamp ... reset_at must be
+      null for every Gemini probe result.

@@ -40,3 +40,5 @@ npm-debug.log*
 !.pHive/epics/hdl-mcp-lane-tools/**
 !.pHive/epics/hdl-routing-strategies/
 !.pHive/epics/hdl-routing-strategies/**
+!.pHive/epics/hdl-gemini-signals/
+!.pHive/epics/hdl-gemini-signals/**
