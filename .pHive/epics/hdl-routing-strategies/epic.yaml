@@ -1,0 +1,54 @@
+name: hdl-routing-strategies
+title: Pluggable routing strategies — priority, round-robin, off — plus override-gated routing
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [backend, routing, state, ui, medium-scope]
+  roster: [researcher, technical-writer]
+  per_tag_reasoning:
+    backend: RoutingStrategy interface + 3 implementations are the correctness core.
+    routing: directly addresses the north_star's A/B-testable-routing avoid clause.
+    state: a new global settings table on StateStore.
+    ui: story 4 surfaces strategy selection on the dashboard.
+    medium-scope: comparable in shape to hdl-lane-management -- design discussion plus the operator's resolved decision is sufficient context.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (autonomous loop, decision resolved by operator against the routing-heuristics-design-options artifact)
+    hv_planning: not_applicable (medium scope, every story mirrors an established pattern)
+    structured_outline: not_applicable (medium scope)
+
+description: >
+  Resolves the north_star's "avoid" clause (don't hard-code routing
+  heuristics) per operator decision: three compartmentalized routing
+  strategies (priority — today's default, round-robin, off/pass-through)
+  behind a shared RoutingStrategy interface, plus the prerequisite fix that
+  manual_override actually gates /available-route candidacy (not just
+  Multica actuation) — "providing what is available and then being able to
+  block the usage and direct it around." Global settings persistence
+  (StateStore) and a simple dashboard settings panel select the active
+  strategy.
+
+stories:
+  - id: hdl-rs-01-override-gates-routing
+    title: manual_override gates /available-route candidacy (block usage, direct it around)
+    complexity: low
+    depends_on: []
+  - id: hdl-rs-02-routing-strategy-interface
+    title: Compartmentalized RoutingStrategy interface — priority, round-robin, off
+    complexity: medium
+    depends_on: [hdl-rs-01-override-gates-routing]
+  - id: hdl-rs-03-settings-persistence-http
+    title: Global settings table + GET/POST /routing-strategy
+    complexity: medium
+    depends_on: [hdl-rs-02-routing-strategy-interface]
+  - id: hdl-rs-04-dashboard-routing-settings-ui
+    title: Dashboard — simple routing-strategy settings panel
+    complexity: low
+    depends_on: [hdl-rs-03-settings-persistence-http]

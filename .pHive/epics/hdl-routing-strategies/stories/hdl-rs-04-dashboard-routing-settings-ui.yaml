@@ -1,0 +1,76 @@
+id: hdl-rs-04-dashboard-routing-settings-ui
+epic: hdl-routing-strategies
+title: Dashboard — simple routing-strategy settings panel
+status: pending
+complexity: low
+methodology: classic
+depends_on: [hdl-rs-03-settings-persistence-http]
+
+description: |
+  A new "Routing" panel on the dashboard (same structural pattern as the
+  existing "Add lane" panel): shows the currently active strategy and a
+  control to change it among the registered names (priority, round-robin,
+  off), calling hdl-rs-03's POST /routing-strategy. Simple settings, per
+  the operator's own framing -- one global control, not a strategy-specific
+  configuration UI per strategy.
+
+acceptance_criteria:
+  - "Given the dashboard is loaded, when it renders, then a Routing panel shows the currently active strategy, fetched from GET /routing-strategy"
+  - "Given the operator selects a different strategy and confirms, when the request completes, then POST /routing-strategy is called and the panel reflects the new active strategy without a manual page reload"
+  - "Given the 'off' strategy is selected, when the panel renders, then it's visually clear that Heimdall is not making routing picks right now (e.g. a note that GET /available-route will return no_available_route) -- never silent about this, matching the override/reset-at badges' established 'never silent' principle"
+  - "The panel only ever calls Heimdall's own GET/POST /routing-strategy endpoints (relative fetch, same-origin) -- no external network requests"
+
+steps:
+  - id: research
+    description: Confirm hdl-rs-03's exact GET/POST /routing-strategy request/response shapes before wiring the UI
+    agent: researcher
+  - id: implement
+    description: Add the Routing settings panel to src/api/ui/dashboard.ts
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Extend http-server.test.ts's GET / structural checks with cases covering the new panel's markup
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review for correctness and convention compliance (matches dashboard.ts's existing panel/event-delegation patterns, no new dependencies)
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/api/ui/dashboard.ts
+      purpose: "The existing 'Add lane' .panel structure and its form-submit handling (hdl-lane-management) -- the exact pattern the Routing panel follows"
+
+files_to_modify:
+  - file: src/api/ui/dashboard.ts
+    change: "Add a Routing settings .panel (structurally alongside the existing Add Lane panel) with a select control for the 3 strategy names, wired to GET/POST /routing-strategy."
+
+design_decisions:
+  - decision: A single global select control, not a per-task-type configuration surface.
+    rationale: "Matches the operator's explicit framing (\"the UI is simple settings\") and hdl-rs-03's global (not per-task-type) settings model -- no UI complexity beyond what the backend actually supports."
+
+cross_cutting:
+  - concern: documentation
+    action: "None beyond hdl-rs-03's README update -- this story is UI-only."
+
+risks:
+  - severity: low
+    description: An operator selects 'off' and forgets, wondering later why routing stopped recommending anything.
+    mitigation: Explicit acceptance criterion requires the panel to visibly flag the 'off' state's consequence, not just show a neutral dropdown value.
+
+references:
+  - path: .pHive/epics/hdl-routing-strategies/docs/design-discussion.md
+    relevant_excerpt: |
+      A new "Routing" panel (same visual/structural pattern as the
+      existing "Add lane" panel) showing the active strategy and a
+      control to change it among the three registered names.

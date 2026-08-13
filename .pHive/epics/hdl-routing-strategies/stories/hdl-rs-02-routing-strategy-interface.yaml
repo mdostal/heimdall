@@ -1,0 +1,110 @@
+id: hdl-rs-02-routing-strategy-interface
+epic: hdl-routing-strategies
+title: Compartmentalized RoutingStrategy interface — priority, round-robin, off
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [hdl-rs-01-override-gates-routing]
+
+description: |
+  Extracts today's inline RUNTIME_PRIORITY ranking into a PriorityStrategy
+  implementing a shared RoutingStrategy interface, and adds
+  RoundRobinStrategy and OffStrategy -- each its own file under
+  src/core/routing-strategies/, plus a registry module mapping name ->
+  implementation. getAvailableRoute delegates candidate ranking to
+  whichever strategy is passed in (still hardcoded to "priority" for this
+  story -- settings-driven selection is hdl-rs-03). PriorityStrategy must
+  be byte-identical in behavior to today's inline logic.
+
+acceptance_criteria:
+  - "Given the exact fixtures used by http-server.test.ts's /available-route tests, when PriorityStrategy.selectRoute() is called directly, then it returns the identical pick RUNTIME_PRIORITY produces today -- zero behavior change"
+  - "Given 3 available candidates for a task type, when RoundRobinStrategy.selectRoute() is called 3 times in sequence, then it returns a different lane each time, cycling back to the first on the 4th call"
+  - "Given RoundRobinStrategy's rotation state, when the process would restart (simulated by a fresh strategy instance), then rotation resets to the first candidate -- an accepted, documented tradeoff, not a bug"
+  - "OffStrategy.selectRoute() always returns null, regardless of how many candidates are passed in"
+  - "Every existing http-server.test.ts /available-route test passes with ZERO test changes -- getAvailableRoute wired to PriorityStrategy as the still-hardcoded default reproduces today's exact behavior"
+  - "The routing-strategies registry module exports exactly 3 named strategies (priority, round-robin, off) and a documented default (priority) -- a 4th strategy can be added by creating one new file and one new registry entry, touching no other file"
+
+steps:
+  - id: research
+    description: Confirm the exact current RUNTIME_PRIORITY table and tie-break logic, and hdl-rs-01's override-gated candidate-filter code, before extracting/adding strategies
+    agent: researcher
+  - id: implement
+    description: Create src/core/routing-strategies/{types,priority-strategy,round-robin-strategy,off-strategy,registry}.ts; wire getAvailableRoute to delegate to PriorityStrategy (still hardcoded)
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Add direct unit tests per strategy (src/core/routing-strategies/*.test.ts); confirm existing http-server.test.ts /available-route tests pass unmodified
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review for correctness and confirm PriorityStrategy is a verbatim extraction, not a reinterpretation
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/core/route-selector.ts
+      purpose: "RUNTIME_PRIORITY (lines 17-21) and runtimeRank() (lines 27-30) -- the exact logic PriorityStrategy extracts verbatim"
+    - path: src/core/lane-registry.ts
+      purpose: "Lane type -- what RoutingStrategy.selectRoute()'s candidates parameter is typed against"
+
+files_to_modify:
+  - file: src/core/routing-strategies/types.ts
+    change: "New file. RoutingStrategy interface: { readonly name: string; selectRoute(taskType: TaskType, candidates: readonly Lane[]): Lane | null }"
+  - file: src/core/routing-strategies/priority-strategy.ts
+    change: "New file. Extracts RUNTIME_PRIORITY + runtimeRank() + the sort/pick logic verbatim from route-selector.ts."
+  - file: src/core/routing-strategies/round-robin-strategy.ts
+    change: "New file. Cycles through candidates (sorted by lane_id for determinism) per task type, in-memory cursor per task type."
+  - file: src/core/routing-strategies/off-strategy.ts
+    change: "New file. selectRoute always returns null."
+  - file: src/core/routing-strategies/registry.ts
+    change: "New file. ROUTING_STRATEGIES: Record<string, RoutingStrategy>, DEFAULT_ROUTING_STRATEGY_NAME = 'priority'."
+  - file: src/core/route-selector.ts
+    change: "getAvailableRoute delegates the ranking/pick step to a RoutingStrategy instance (hardcoded to the priority strategy for this story) instead of its own inline RUNTIME_PRIORITY logic."
+
+code_examples:
+  - title: The exact logic PriorityStrategy extracts verbatim
+    file: src/core/route-selector.ts
+    snippet: |
+      const RUNTIME_PRIORITY: Record<TaskType, readonly string[]> = {
+        planning: ["claude", "gemini", "codex", "kimi"],
+        build: ["codex", "claude", "gemini", "kimi"],
+        review: ["claude", "codex", "gemini", "kimi"],
+      };
+      function runtimeRank(taskType: TaskType, runtime: string): number {
+        const rank = RUNTIME_PRIORITY[taskType].indexOf(runtime);
+        return rank === -1 ? RUNTIME_PRIORITY[taskType].length : rank;
+      }
+
+design_decisions:
+  - decision: RoundRobinStrategy's rotation state is in-memory per strategy instance, not persisted.
+    rationale: "Matches this codebase's existing accepted tradeoff for exactly this class of state (AgentState/corroboration maps in multica-control-adapter.ts, lane-pipeline.ts) -- documented and consistent, not a new pattern."
+  - decision: RoutingStrategy.selectRoute() receives already-filtered candidates (post hdl-rs-01's override gating), not the raw registry.
+    rationale: Keeps strategies simple and focused purely on ranking/picking among eligible lanes -- candidacy filtering (credential resolved, override-aware status) is a single shared concern that shouldn't be duplicated inside every strategy.
+
+cross_cutting:
+  - concern: documentation
+    action: "None yet -- the strategy interface itself isn't user-facing until hdl-rs-03/04 wire selection to it."
+
+risks:
+  - severity: medium
+    description: A subtle difference between the extracted PriorityStrategy and today's inline logic (e.g. a tie-break order change) would silently change which lane gets picked.
+    mitigation: The zero-test-change acceptance gate on existing /available-route tests is designed specifically to catch this.
+
+references:
+  - path: .pHive/epics/hdl-routing-strategies/docs/design-discussion.md
+    relevant_excerpt: |
+      Three implementations, each its own file under
+      src/core/routing-strategies/ ... A registry.ts exports the name ->
+      implementation map and the default name ("priority") -- the one
+      seam a fourth strategy plugs into later without touching
+      route-selector.ts again.
