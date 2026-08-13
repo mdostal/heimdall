@@ -25,6 +25,7 @@ import {
   geminiAdapters,
   kimiAdapters,
   openrouterAdapters,
+  ollamaAdapters,
   type ProviderAdapters,
 } from "./core/lane-pipeline.js";
 import { ArgusClient, startArgusSdk, type ArgusEmitter } from "./core/telemetry/argus-client.js";
@@ -43,6 +44,7 @@ const PROVIDER_ADAPTERS: Record<string, () => ProviderAdapters> = {
   gemini: geminiAdapters,
   kimi: kimiAdapters,
   openrouter: openrouterAdapters,
+  ollama: ollamaAdapters,
 };
 
 const DEFAULT_AUTOPILOT_CRON = "*/1 * * * *";

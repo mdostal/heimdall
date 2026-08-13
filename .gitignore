@@ -46,3 +46,5 @@ npm-debug.log*
 !.pHive/epics/hdl-kimi-signals/**
 !.pHive/epics/hdl-openrouter-signals/
 !.pHive/epics/hdl-openrouter-signals/**
+!.pHive/epics/hdl-ollama-signals/
+!.pHive/epics/hdl-ollama-signals/**

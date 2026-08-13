@@ -29,6 +29,7 @@ import { probeGeminiLane } from "./signal-sources/active-probe/gemini.js";
 import { checkKimiPublicStatus } from "./signal-sources/public-status/kimi.js";
 import { probeKimiLane } from "./signal-sources/active-probe/kimi.js";
 import { probeOpenRouterLane } from "./signal-sources/active-probe/openrouter.js";
+import { probeOllamaLane } from "./signal-sources/active-probe/ollama.js";
 import {
   decideSignalSource,
   resolveWithCorroboration,
@@ -88,6 +89,17 @@ async function alwaysUpOpenRouterPublicStatus(): Promise<{ status: "up"; reason:
 
 export function openrouterAdapters(): ProviderAdapters {
   return { checkPublicStatus: alwaysUpOpenRouterPublicStatus, probe: probeOpenRouterLane };
+}
+
+// No public-status/ollama.ts — it's local infra, not a hosted service, so no
+// status page exists to check. Same honest always-up stub pattern as
+// openrouterAdapters().
+async function alwaysUpOllamaPublicStatus(): Promise<{ status: "up"; reason: null }> {
+  return { status: "up", reason: null };
+}
+
+export function ollamaAdapters(): ProviderAdapters {
+  return { checkPublicStatus: alwaysUpOllamaPublicStatus, probe: probeOllamaLane };
 }
 
 /**

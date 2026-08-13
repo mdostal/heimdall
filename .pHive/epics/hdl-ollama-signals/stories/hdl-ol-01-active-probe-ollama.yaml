@@ -1,0 +1,87 @@
+id: hdl-ol-01-active-probe-ollama
+epic: hdl-ollama-signals
+title: Ollama liveness-only active-probe adapter (GET /api/tags, no auth, up/down only)
+status: completed
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  Implements src/core/signal-sources/active-probe/ollama.ts. GET
+  <baseUrl>/api/tags, no auth header — lists locally-installed models,
+  proving the actual Ollama API answers correctly rather than just that
+  something is listening on the port. baseUrl arrives via the same
+  `credential` parameter every probe() function already receives
+  (research-brief.md's design simplification: an operator points
+  HEIMDALL_LANE_<N>_CREDENTIAL_REF at an env var holding the instance's
+  base URL, e.g. OLLAMA_HOST=http://localhost:11434, instead of a secret).
+  If the value looks like a URL (http:// or https:// prefix), use it
+  directly; otherwise (including an empty string) default to
+  http://localhost:11434. Only up/down — no degraded, no out_of_credit,
+  no reset_at -- confirmed no other signal exists for local unauthenticated
+  inference (research-brief.md).
+
+acceptance_criteria:
+  - "Given a 2xx response with parseable JSON from <baseUrl>/api/tags, when probeOllamaLane is called, then it returns { status: 'up', reset_at: null, reason: null }"
+  - "Given a network-level fetch failure (connection refused — the daemon isn't running), when probeOllamaLane is called, then it never throws -- it returns { status: 'down', reset_at: null, reason: '<explanatory message>' }"
+  - "Given a non-2xx response, when probeOllamaLane is called, then it returns { status: 'down', reason: '<explanatory message>' }"
+  - "Given a 2xx response with unparseable JSON, when probeOllamaLane is called, then it returns { status: 'down' } rather than guessing up"
+  - "Given a credential value starting with http:// or https://, when probeOllamaLane is called, then it issues the request against exactly that base URL"
+  - "Given an empty or non-URL-shaped credential value, when probeOllamaLane is called, then it defaults to http://localhost:11434"
+  - "Given a successful probe, when the request is inspected, then no Authorization/x-api-key/x-goog-api-key header is sent — Ollama's local API is unauthenticated"
+
+steps:
+  - id: research
+    description: Confirm the /api/tags shape and no-auth confirmation already captured in research-brief.md
+    agent: researcher
+  - id: implement
+    description: Implement active-probe/ollama.ts with the URL-detection-and-default logic for the repurposed credential parameter
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Unit tests covering every acceptance criterion using hand-built fixture responses
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that no auth header is ever sent, and that unparseable/failed responses never resolve to up
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/core/signal-sources/active-probe/openrouter.ts
+      purpose: "ProbeResult contract and never-throws structure to mirror; unlike this adapter, openrouter.ts needs real auth — ollama.ts is the first adapter with zero auth headers."
+
+files_to_modify:
+  - file: src/core/signal-sources/active-probe/ollama.ts
+    change: "New file -- probeOllamaLane(baseUrlOrPlaceholder, fetchImpl?) implementing the mapping described above."
+  - file: src/core/signal-sources/active-probe/ollama.test.ts
+    change: "New file -- unit tests for every acceptance criterion."
+
+design_decisions:
+  - decision: The credential parameter carries a base URL instead of a secret, repurposing the existing indirection rather than adding a new declaration field.
+    rationale: "research-brief.md's design simplification -- credential_ref was always 'names an env var, resolved verbatim,' never intrinsically tied to secrecy. This lets multiple Ollama lanes on different hosts (north_star's 'scales as hardware/instances are added') work with zero schema changes."
+  - decision: Only up/down are possible outcomes -- no degraded, no out_of_credit, no reset_at.
+    rationale: "Confirmed by research: local, unauthenticated inference has no quota/rate-limit/billing concept to signal degraded or out_of_credit honestly. Fabricating those states would be worse than a clean binary."
+
+risks:
+  - severity: low
+    description: An operator could reuse a credential_ref env var that happens to look like a URL for a different purpose by accident.
+    mitigation: "Scoped entirely to the ollama provider's own adapter -- no other provider's probe function interprets its credential parameter as a URL."
+
+references:
+  - path: .pHive/epics/hdl-ollama-signals/docs/research-brief.md
+    relevant_excerpt: |
+      GET /api/tags ... lists locally-installed models, still
+      unauthenticated ... no credential, no quota, no rate limit, no
+      billing state ... confirmed no degraded or out_of_credit signal
+      exists.
