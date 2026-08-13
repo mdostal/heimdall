@@ -10,6 +10,7 @@ import { loadLaneDeclarations, LaneRegistry } from "../core/lane-registry.js";
 import { getAvailableRoute, parseTaskType } from "../core/route-selector.js";
 import { StateStore } from "../core/state-store.js";
 import type { LaneStatus } from "../core/status-model.js";
+import { renderDashboardHtml } from "./ui/dashboard.js";
 
 export function buildLaneRegistry(env: NodeJS.ProcessEnv = process.env): LaneRegistry {
   return new LaneRegistry(loadLaneDeclarations(env), new EnvCredentialSource(env));
@@ -51,6 +52,15 @@ export function createHttpServer(
     if (req.method === "GET" && req.url === "/healthz") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ status: "ok" }));
+      return;
+    }
+
+    // Read-only live-status dashboard (hdl-ui-01) — first vertical slice of
+    // the standalone-mode UI requirement (has_ui: true). Pure consumer of
+    // GET /lanes below; adds no new backend query logic.
+    if (req.method === "GET" && req.url === "/") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(renderDashboardHtml());
       return;
     }
 

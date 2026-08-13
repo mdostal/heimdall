@@ -1,7 +1,7 @@
 id: hdl-ui-01-readonly-status-view
 epic: hdl-lane-status-ui
 title: GET / serves a read-only live lane-status dashboard
-status: pending
+status: completed
 complexity: low
 methodology: classic
 depends_on: []

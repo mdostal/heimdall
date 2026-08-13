@@ -44,7 +44,7 @@ flowchart TB
         Model["status-model\n(4-state resolve +\ncorroboration)"]
         Store["State Store\n(node:sqlite)"]
         Ctrl["ControlAdapter\nMulticaControlAdapter | StubControlAdapter"]
-        API["Query surfaces\nHTTP · CLI · MCP"]
+        API["Query surfaces\nHTTP · CLI · MCP · Dashboard"]
     end
 
     Multica["Multica REST API\n(agents / runtimes)"]
@@ -135,7 +135,7 @@ advisory route backed by the same lane state. It only chooses lanes with an `up`
 status and a resolved credential, and returns the credential reference handle
 (`token-ref`) rather than the secret.
 
-## Query lane status — CLI
+## Query lane status — CLI, HTTP, MCP, and the dashboard
 
 ```bash
 # HTTP
@@ -150,6 +150,15 @@ npm run cli -- --format table   # human-readable table
 # MCP (stdio server exposing the heimdall.lanes.list tool)
 npm run mcp
 ```
+
+**Dashboard** — `GET /` (open `http://localhost:4870/` in a browser) serves a
+self-contained, read-only live lane-status view: no build step, no
+framework, no external network calls — it's a pure consumer of `GET /lanes`,
+polled every 5s. This is the first slice of Heimdall's standalone-mode UI
+requirement; manual disable/enable, add-lane, and MCP agent-tooling for the
+same operations are tracked as follow-up work (see
+[`docs/decisions/DEC-hdl-reason-aware-recovery.md`](docs/decisions/DEC-hdl-reason-aware-recovery.md)
+item 3).
 
 Other scripts: `npm test` (Node built-in test runner via `tsx`),
 `npm run build` (type-check + compile to `dist/`), `npm run sla-report`
