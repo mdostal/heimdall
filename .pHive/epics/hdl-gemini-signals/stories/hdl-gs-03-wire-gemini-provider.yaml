@@ -1,7 +1,7 @@
 id: hdl-gs-03-wire-gemini-provider
 epic: hdl-gemini-signals
 title: Wire Gemini into lane-pipeline + main.ts PROVIDER_ADAPTERS registry, end-to-end test
-status: pending
+status: completed
 complexity: low
 methodology: classic
 depends_on: [hdl-gs-01-active-probe-gemini, hdl-gs-02-public-status-gemini]

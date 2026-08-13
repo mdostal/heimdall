@@ -1,7 +1,7 @@
 id: hdl-gs-01-active-probe-gemini
 epic: hdl-gemini-signals
 title: Gemini active-probe adapter (models.list, x-goog-api-key header, quota-vs-rate-limit distinction)
-status: pending
+status: completed
 complexity: medium
 methodology: classic
 depends_on: []

@@ -1,7 +1,7 @@
 id: hdl-gs-02-public-status-gemini
 epic: hdl-gemini-signals
 title: Gemini public-status adapter (Google Cloud incidents feed, fragment-filtered)
-status: pending
+status: completed
 complexity: medium
 methodology: classic
 depends_on: []

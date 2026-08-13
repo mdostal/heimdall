@@ -24,6 +24,8 @@ import { checkClaudePublicStatus } from "./signal-sources/public-status/claude.j
 import { probeClaudeLane } from "./signal-sources/active-probe/claude.js";
 import { checkCodexPublicStatus } from "./signal-sources/public-status/codex.js";
 import { probeCodexLane } from "./signal-sources/active-probe/codex.js";
+import { checkGeminiPublicStatus } from "./signal-sources/public-status/gemini.js";
+import { probeGeminiLane } from "./signal-sources/active-probe/gemini.js";
 import {
   decideSignalSource,
   resolveWithCorroboration,
@@ -62,6 +64,10 @@ export function claudeAdapters(): ProviderAdapters {
 
 export function codexAdapters(): ProviderAdapters {
   return { checkPublicStatus: checkCodexPublicStatus, probe: probeCodexLane };
+}
+
+export function geminiAdapters(): ProviderAdapters {
+  return { checkPublicStatus: checkGeminiPublicStatus, probe: probeGeminiLane };
 }
 
 /**

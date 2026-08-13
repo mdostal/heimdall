@@ -41,10 +41,20 @@ function mockCommandRunner(): CommandRunner {
 
 function mockFetch(): typeof fetch {
   return (async (url: unknown) => {
+    if (typeof url === "string" && url.includes("incidents.json")) {
+      // Gemini's public-status feed is a flat incident array, not a
+      // StatusPage.io component snapshot — see signal-sources/public-status/gemini.ts.
+      return { ok: true, status: 200, json: async () => [] } as unknown as Response;
+    }
     if (typeof url === "string" && url.includes("status.")) {
       return { ok: true, status: 200, json: async () => ({ components: [] }) } as Response;
     }
-    return { ok: true, status: 200, headers: { get: () => null } } as unknown as Response;
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      json: async () => ({}),
+    } as unknown as Response;
   }) as typeof fetch;
 }
 
@@ -92,10 +102,50 @@ test("a lane seeded as degraded gets engaged by its InProcessScheduler end-to-en
   service.stopAll();
 });
 
+test("a gemini-provider lane gets a real pipeline + schedulers wired up, resolving end-to-end", async () => {
+  const env = testEnv();
+  env.HEIMDALL_LANE_3_ID = "gemini@mathew.dostal";
+  env.HEIMDALL_LANE_3_PROVIDER = "gemini";
+  env.HEIMDALL_LANE_3_CREDENTIAL_REF = "GEMINI_TOKEN";
+  env.GEMINI_TOKEN = "fake-gemini-key";
+
+  const service = composeService({
+    env,
+    commandRunner: mockCommandRunner(),
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port: 0,
+  });
+
+  // No "no ProviderAdapters registered" skip — gemini is a known provider now.
+  assert.equal(service.multicaSchedulers.length, 3);
+  assert.equal(service.inProcessSchedulers.length, 3);
+  assert.equal(service.pipelines.size, 3);
+
+  service.store.recordStatus({
+    lane_id: "gemini@mathew.dostal",
+    status: "degraded",
+    reset_at: null,
+    reason: "seeded for test",
+    signal_source: "active_probe",
+    observed_at: "2026-08-13T12:00:00.000Z",
+  });
+
+  const geminiSchedulerIndex = 2;
+  await service.inProcessSchedulers[geminiSchedulerIndex].poll();
+
+  // Fresh status recorded by the real refresh() call, driven through
+  // probeGeminiLane/checkGeminiPublicStatus — not a stub.
+  const current = service.store.getCurrentStatus("gemini@mathew.dostal");
+  assert.equal(current?.status, "up");
+
+  service.stopAll();
+});
+
 test("unknown provider is skipped gracefully — no pipeline/scheduler crash for the whole service", () => {
   const env = testEnv();
   env.HEIMDALL_LANE_3_ID = "some-new-provider-lane";
-  env.HEIMDALL_LANE_3_PROVIDER = "gemini"; // not registered in PROVIDER_ADAPTERS yet
+  env.HEIMDALL_LANE_3_PROVIDER = "some-fictional-llm-provider"; // not registered in PROVIDER_ADAPTERS
   env.HEIMDALL_LANE_3_CREDENTIAL_REF = "GEMINI_TOKEN";
   env.GEMINI_TOKEN = "fake";
 
