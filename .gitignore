@@ -30,3 +30,5 @@ npm-debug.log*
 !.pHive/epics/hdl-actuation/**
 !.pHive/epics/hdl-reason-aware-recovery/
 !.pHive/epics/hdl-reason-aware-recovery/**
+!.pHive/epics/hdl-lane-status-ui/
+!.pHive/epics/hdl-lane-status-ui/**
