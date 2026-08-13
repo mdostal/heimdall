@@ -1,0 +1,83 @@
+id: hdl-ol-02-wire-ollama-provider
+epic: hdl-ollama-signals
+title: Wire Ollama into lane-pipeline + main.ts, end-to-end liveness proof
+status: pending
+complexity: low
+methodology: classic
+depends_on: [hdl-ol-01-active-probe-ollama]
+
+description: |
+  Wires hdl-ol-01's adapter into the single real dispatch point
+  (ollamaAdapters() in lane-pipeline.ts, one PROVIDER_ADAPTERS line in
+  main.ts). checkPublicStatus is the same honest always-up stub
+  openrouterAdapters() already established (no public status page exists
+  for local infra). End-to-end test proves an Ollama lane, declared with
+  its credential_ref pointing at an env var holding a base URL (per
+  hdl-ol-01's convention), gets a real pipeline wired up and resolves to
+  up/down through the actual probe — not a stub, and with ZERO changes
+  needed to lane-registry.ts, route-selector.ts, or lane-pipeline.ts's
+  existing credential-gating logic (the epic's confirmed design
+  simplification).
+
+acceptance_criteria:
+  - "Given a lane declared with HEIMDALL_LANE_N_PROVIDER=ollama and HEIMDALL_LANE_N_CREDENTIAL_REF pointing at an env var holding a base URL, when composeService() runs, then that lane gets a real LanePipeline + schedulers wired up"
+  - "Given the same lane, when its InProcessScheduler.poll() is exercised against a mocked reachable Ollama endpoint, then the recorded status is 'up'"
+  - "Given the same lane, when its InProcessScheduler.poll() is exercised against a mocked unreachable endpoint, then the recorded status is 'down'"
+  - "Every existing main.test.ts case passes with ZERO test changes to prior cases"
+  - "npm run build (tsc) is clean and npm test passes in full after this story"
+
+steps:
+  - id: research
+    description: Confirm the PROVIDER_ADAPTERS registry shape and openrouterAdapters()'s always-up checkPublicStatus stub pattern
+    agent: researcher
+  - id: implement
+    description: Add ollamaAdapters() to lane-pipeline.ts and the ollama entry to PROVIDER_ADAPTERS in main.ts
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Add end-to-end tests for both the up and down cases
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that no changes were made to lane-registry.ts/route-selector.ts/lane-pipeline.ts's credential-gating logic — this story's diff should be additive-only, mirroring every prior provider epic
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch; run full local test suite + tsc build as final gate before PR
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/main.ts
+      purpose: "PROVIDER_ADAPTERS registry -- becomes a 6-entry map (claude, codex, gemini, kimi, openrouter, ollama), the sixth and last north-star provider."
+    - path: src/core/lane-pipeline.ts
+      purpose: "openrouterAdapters()'s always-up checkPublicStatus stub -- the exact pattern ollamaAdapters() mirrors."
+
+files_to_modify:
+  - file: src/core/lane-pipeline.ts
+    change: "Add ollamaAdapters(): ProviderAdapters, importing probeOllamaLane; checkPublicStatus is an inline always-up function, same as openrouterAdapters()."
+  - file: src/main.ts
+    change: "Add `ollama: ollamaAdapters` to PROVIDER_ADAPTERS."
+  - file: src/main.test.ts
+    change: "Add end-to-end tests for both the up and down Ollama liveness cases."
+
+design_decisions:
+  - decision: No new fields, tables, or gating logic — this story is purely additive, same as every prior provider epic in this loop.
+    rationale: "Confirmed in research-brief.md/design-discussion.md — the credential-parameter repurposing needs zero changes to shared code; this is the concrete proof that claim holds."
+
+risks:
+  - severity: low
+    description: A typo in the one-line registry addition would silently fall through to the existing 'unknown provider skipped' path.
+    mitigation: "The story's own end-to-end tests assert a real pipeline gets created and resolves through the actual probe."
+
+references:
+  - path: .pHive/epics/hdl-ollama-signals/docs/design-discussion.md
+    relevant_excerpt: |
+      Wiring: ollamaAdapters(): ProviderAdapters + one PROVIDER_ADAPTERS
+      line, identical shape to every prior provider epic.
