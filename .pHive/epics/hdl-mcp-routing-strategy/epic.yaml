@@ -1,0 +1,35 @@
+name: hdl-mcp-routing-strategy
+title: MCP tools for routing-strategy selection — the deferred hdl-routing-strategies follow-up
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [backend, mcp, small-scope]
+  roster: [technical-writer]
+  per_tag_reasoning:
+    backend: two new MCP tools wrapping already-shared, already-tested functions.
+    mcp: closes the one HTTP surface (routing-strategy) that never got MCP tools.
+    small-scope: mirrors hdl-mcp-lane-tools's established pattern exactly, zero new business logic.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (autonomous loop; small, explicitly-pre-scoped follow-up)
+    hv_planning: not_applicable (small scope)
+    structured_outline: not_applicable (small scope)
+
+description: >
+  Adds heimdall.routingStrategy.get and heimdall.routingStrategy.set MCP
+  tools, wrapping the exact shared functions GET/POST /routing-strategy
+  already call. Explicitly deferred when hdl-routing-strategies shipped;
+  closes that gap.
+
+stories:
+  - id: hdl-mrs-01-routing-strategy-mcp-tools
+    title: heimdall.routingStrategy.get + heimdall.routingStrategy.set MCP tools
+    complexity: low
+    depends_on: []

@@ -1,0 +1,88 @@
+id: hdl-mrs-01-routing-strategy-mcp-tools
+epic: hdl-mcp-routing-strategy
+title: heimdall.routingStrategy.get + heimdall.routingStrategy.set MCP tools
+status: pending
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  Adds heimdall.routingStrategy.get (no args, returns { active, available }
+  — identical shape to GET /routing-strategy) and
+  heimdall.routingStrategy.set ({ strategy: string }, calls the existing
+  setRoutingStrategy shared function, returns its discriminated result)
+  to mcp-server.ts, mirroring the exact structural pattern
+  heimdall.lanes.override/.setResetAt/.add already established in
+  hdl-mcp-lane-tools. Zero new business logic -- both tools call functions
+  that already exist and are already tested (getActiveRoutingStrategyName,
+  getRoutingStrategyNames, setRoutingStrategy).
+
+acceptance_criteria:
+  - "Given heimdall.routingStrategy.get is called with no arguments, when the tool handler runs, then it returns { active: <current strategy name>, available: <string[]> }, identical to GET /routing-strategy's response shape"
+  - "Given heimdall.routingStrategy.set is called with a valid strategy name, when the tool handler runs, then it persists the change (verifiable via a subsequent heimdall.routingStrategy.get call) and returns { active: <the new name> }"
+  - "Given heimdall.routingStrategy.set is called with an invalid/unrecognized strategy name, when the tool handler runs, then it returns a structured { error: 'invalid_strategy', allowed_strategies: [...] } result -- never throws"
+  - "Given an unknown tool name entirely, when dispatchToolCall is invoked, then it still throws (unchanged existing behavior) -- only this story's two new tool names are added to the dispatch table"
+  - "Every existing mcp-server.test.ts case passes with ZERO test changes to prior cases"
+
+steps:
+  - id: implement
+    description: Add the two tool descriptors, call*Tool functions, and dispatch-table entries to mcp-server.ts
+    agent: developer
+  - id: test
+    description: Add tests for every acceptance criterion, mirroring the existing override/setResetAt/add tool tests' structure
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that both tools call the exact same shared functions the HTTP routes use, with no duplicated validation logic
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch; run full local test suite + tsc build as final gate before PR
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/api/mcp-server.ts
+      purpose: "The file being extended -- listLaneToolsDescriptor, buildToolDispatch, and the call*Tool pattern (e.g. callLaneOverrideTool) this story's two new functions mirror exactly."
+    - path: src/core/route-selector.ts
+      purpose: "getRoutingStrategyNames/getActiveRoutingStrategyName -- the read-side shared functions."
+    - path: src/api/http-server.ts
+      purpose: "setRoutingStrategy (SetRoutingStrategyResult) -- the write-side shared function, and GET/POST /routing-strategy's exact response shape to mirror."
+
+files_to_modify:
+  - file: src/api/mcp-server.ts
+    change: "Add ROUTING_STRATEGY_GET_TOOL_NAME/ROUTING_STRATEGY_SET_TOOL_NAME constants, two descriptor entries, callRoutingStrategyGetTool/callRoutingStrategySetTool functions, and two buildToolDispatch entries."
+  - file: src/api/mcp-server.test.ts
+    change: "Add tests for every acceptance criterion above."
+
+code_examples:
+  - title: The call*Tool pattern to mirror
+    file: src/api/mcp-server.ts
+    snippet: |
+      export function callLaneOverrideTool(registry: LaneRegistry, store: StateStore, args: unknown) {
+        const input = (args ?? {}) as { lane_id?: unknown; state?: unknown };
+        const laneId = typeof input.lane_id === "string" ? input.lane_id : "";
+        return textResult(setLaneOverride(registry, store, laneId, input.state));
+      }
+
+design_decisions:
+  - decision: heimdall.routingStrategy.get takes no arguments, mirroring heimdall.lanes.list's shape.
+    rationale: "There is exactly one active strategy, global, not per-lane -- no filter/argument makes sense, same as lanes.list's own no-args shape."
+
+risks:
+  - severity: low
+    description: None beyond the standard MCP-tool-addition risk class already covered by hdl-mcp-lane-tools's precedent.
+    mitigation: "Direct mirror of an already-shipped, already-tested pattern."
+
+references:
+  - path: .pHive/epics/hdl-mcp-routing-strategy/docs/design-discussion.md
+    relevant_excerpt: |
+      Mirror mcp-server.ts's exact existing shape ... zero new business
+      logic, this is purely a new interface onto code that already exists
+      and is already tested.
