@@ -1,7 +1,7 @@
 id: hdl-or-01-active-probe-openrouter
 epic: hdl-openrouter-signals
 title: OpenRouter active-probe adapter (GET /api/v1/key, credit + rate-limit state in one call)
-status: pending
+status: completed
 complexity: medium
 methodology: classic
 depends_on: []

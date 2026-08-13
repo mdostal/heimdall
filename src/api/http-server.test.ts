@@ -995,6 +995,26 @@ test("hdl-lm-02: GET /lanes reports credential_configured: false for a lane with
   }
 });
 
+test("hdl-or-03: GET /lanes includes each lane's model and credential_ref (env-var name, not a secret)", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes`);
+    const rawBody = await res.text();
+    const body = JSON.parse(rawBody);
+    assert.equal(body[0].credential_ref, "CLAUDE_TOKEN");
+    assert.equal(body[0].model, "claude"); // no explicit model declared — falls back to provider
+    assert.doesNotMatch(rawBody, /"secret"/, "the resolved secret VALUE must never be serialized");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
 test("hdl-lm-03: GET /lanes includes each lane's manual_reset_at (null when unset)", async () => {
   const registry = registryWithOneConfiguredLane();
   const store = new StateStore(":memory:");

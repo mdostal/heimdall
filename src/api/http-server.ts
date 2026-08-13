@@ -43,12 +43,21 @@ function readJsonBody(req: import("node:http").IncomingMessage): Promise<{ ok: t
  * and hdl-lm-02's credential_configured, so a UI/API consumer never needs a
  * second request to know any of them. credential_configured is a boolean
  * ONLY — the raw secret is never serialized here or anywhere else in this
- * codebase (REQ-07 invariant).
+ * codebase (REQ-07 invariant). model and credential_ref (hdl-or-03) let a
+ * consumer group lanes that share a gateway credential (e.g. multiple
+ * OpenRouter routes) — credential_ref is the env-var NAME the secret lives
+ * under, not the secret itself, same non-sensitive category as
+ * credential_configured already established. priority (hdl-or-04) surfaces
+ * an active HEIMDALL_LANE_<N>_PRIORITY override so it's never a silent
+ * behavior change — null when unset.
  */
 export interface LaneStatusWithOverride extends LaneStatus {
   manual_override: ManualOverride;
   credential_configured: boolean;
   manual_reset_at: string | null;
+  model: string;
+  credential_ref: string;
+  priority: number | null;
 }
 
 const VALID_OVERRIDE_STATES = new Set(["enabled", "disabled", "auto"]);
@@ -190,12 +199,18 @@ export function getLaneStatuses(registry: LaneRegistry, store: StateStore): Lane
       credential_ref: lane.credential_ref,
     });
   }
-  return store.getAllCurrentStatuses().map((status) => ({
-    ...status,
-    manual_override: store.getManualOverride(status.lane_id),
-    credential_configured: registry.get(status.lane_id)?.credential != null,
-    manual_reset_at: store.getManualResetAt(status.lane_id),
-  }));
+  return store.getAllCurrentStatuses().map((status) => {
+    const declared = registry.get(status.lane_id);
+    return {
+      ...status,
+      manual_override: store.getManualOverride(status.lane_id),
+      credential_configured: declared?.credential != null,
+      manual_reset_at: store.getManualResetAt(status.lane_id),
+      model: declared?.model ?? status.provider,
+      credential_ref: declared?.credential_ref ?? "",
+      priority: declared?.priority ?? null,
+    };
+  });
 }
 
 /**

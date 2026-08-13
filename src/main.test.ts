@@ -181,6 +181,53 @@ test("a kimi-provider lane gets a real pipeline + schedulers wired up, resolving
   service.stopAll();
 });
 
+test("two openrouter lanes sharing one credential_ref nest independently — the gateway-with-routes proof", async () => {
+  const env = testEnv();
+  env.HEIMDALL_LANE_3_ID = "openrouter-kimi";
+  env.HEIMDALL_LANE_3_PROVIDER = "openrouter";
+  env.HEIMDALL_LANE_3_CREDENTIAL_REF = "OPENROUTER_TOKEN";
+  env.HEIMDALL_LANE_3_MODEL = "moonshotai/kimi-k3";
+  env.HEIMDALL_LANE_4_ID = "openrouter-grok";
+  env.HEIMDALL_LANE_4_PROVIDER = "openrouter";
+  env.HEIMDALL_LANE_4_CREDENTIAL_REF = "OPENROUTER_TOKEN"; // same credential — one gateway, two routes
+  env.HEIMDALL_LANE_4_MODEL = "x-ai/grok-4";
+  env.OPENROUTER_TOKEN = "fake-openrouter-key";
+
+  const service = composeService({
+    env,
+    commandRunner: mockCommandRunner(),
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port: 0,
+  });
+
+  // Both routes get fully independent pipelines/schedulers despite sharing one credential.
+  assert.equal(service.multicaSchedulers.length, 4);
+  assert.equal(service.inProcessSchedulers.length, 4);
+  assert.equal(service.pipelines.size, 4);
+  assert.ok(service.pipelines.has("openrouter-kimi"));
+  assert.ok(service.pipelines.has("openrouter-grok"));
+
+  // Disabling one route does not affect its sibling's override state.
+  service.store.setManualOverride("openrouter-kimi", "disabled");
+  assert.equal(service.store.getManualOverride("openrouter-kimi"), "disabled");
+  assert.equal(service.store.getManualOverride("openrouter-grok"), null);
+
+  // Each route's InProcessScheduler.poll() records its OWN status row —
+  // the shared credential does not cause the two routes' state to collide.
+  const kimiSchedulerIndex = 2;
+  const grokSchedulerIndex = 3;
+  await service.inProcessSchedulers[kimiSchedulerIndex].poll();
+  await service.inProcessSchedulers[grokSchedulerIndex].poll();
+
+  const kimiStatus = service.store.getCurrentStatus("openrouter-kimi");
+  const grokStatus = service.store.getCurrentStatus("openrouter-grok");
+  assert.equal(kimiStatus?.status, "up");
+  assert.equal(grokStatus?.status, "up");
+
+  service.stopAll();
+});
+
 test("unknown provider is skipped gracefully — no pipeline/scheduler crash for the whole service", () => {
   const env = testEnv();
   env.HEIMDALL_LANE_3_ID = "some-new-provider-lane";

@@ -1,7 +1,7 @@
 id: hdl-or-03-dashboard-gateway-grouping
 epic: hdl-openrouter-signals
 title: Dashboard groups lanes sharing a gateway credential, shows each route's model
-status: pending
+status: completed
 complexity: medium
 methodology: classic
 depends_on: [hdl-or-02-wire-openrouter-provider]

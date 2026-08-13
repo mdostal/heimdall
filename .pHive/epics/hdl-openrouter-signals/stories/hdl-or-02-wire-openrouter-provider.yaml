@@ -1,7 +1,7 @@
 id: hdl-or-02-wire-openrouter-provider
 epic: hdl-openrouter-signals
 title: Wire OpenRouter into lane-pipeline + main.ts, prove shared-credential nesting end-to-end
-status: pending
+status: completed
 complexity: low
 methodology: classic
 depends_on: [hdl-or-01-active-probe-openrouter]

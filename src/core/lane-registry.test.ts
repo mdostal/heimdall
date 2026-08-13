@@ -73,3 +73,49 @@ test("LaneRegistry.get returns null for an undeclared lane", () => {
   const registry = new LaneRegistry([], new EnvCredentialSource({}));
   assert.equal(registry.get("unknown"), null);
 });
+
+test("hdl-or-04: loadLaneDeclarations parses a valid HEIMDALL_LANE_N_PRIORITY into priority", () => {
+  const env = {
+    HEIMDALL_LANE_1_ID: "openrouter-kimi",
+    HEIMDALL_LANE_1_PROVIDER: "openrouter",
+    HEIMDALL_LANE_1_CREDENTIAL_REF: "OPENROUTER_TOKEN",
+    HEIMDALL_LANE_1_PRIORITY: "0",
+  };
+  const declarations = loadLaneDeclarations(env);
+  assert.equal(declarations[0].priority, 0);
+});
+
+test("hdl-or-04: an invalid HEIMDALL_LANE_N_PRIORITY (non-integer, negative) falls back to unset, not a crash", () => {
+  const nonInteger = loadLaneDeclarations({
+    HEIMDALL_LANE_1_ID: "a",
+    HEIMDALL_LANE_1_PROVIDER: "openrouter",
+    HEIMDALL_LANE_1_CREDENTIAL_REF: "T",
+    HEIMDALL_LANE_1_PRIORITY: "not-a-number",
+  });
+  assert.equal(nonInteger[0].priority, undefined);
+
+  const negative = loadLaneDeclarations({
+    HEIMDALL_LANE_1_ID: "a",
+    HEIMDALL_LANE_1_PROVIDER: "openrouter",
+    HEIMDALL_LANE_1_CREDENTIAL_REF: "T",
+    HEIMDALL_LANE_1_PRIORITY: "-1",
+  });
+  assert.equal(negative[0].priority, undefined);
+
+  const fractional = loadLaneDeclarations({
+    HEIMDALL_LANE_1_ID: "a",
+    HEIMDALL_LANE_1_PROVIDER: "openrouter",
+    HEIMDALL_LANE_1_CREDENTIAL_REF: "T",
+    HEIMDALL_LANE_1_PRIORITY: "1.5",
+  });
+  assert.equal(fractional[0].priority, undefined);
+});
+
+test("hdl-or-04: a lane with no HEIMDALL_LANE_N_PRIORITY declared has no priority field at all", () => {
+  const declarations = loadLaneDeclarations({
+    HEIMDALL_LANE_1_ID: "claude@mathew.dostal",
+    HEIMDALL_LANE_1_PROVIDER: "claude",
+    HEIMDALL_LANE_1_CREDENTIAL_REF: "CLAUDE_TOKEN",
+  });
+  assert.equal("priority" in declarations[0], false);
+});

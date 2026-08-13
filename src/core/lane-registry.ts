@@ -15,6 +15,8 @@ export interface LaneDeclaration {
   provider: string;
   credential_ref: string;
   model?: string;
+  /** Optional operator-set rank override (hdl-or-04) — see routing-strategies/priority-strategy.ts. */
+  priority?: number;
 }
 
 export interface Lane extends LaneDeclaration {
@@ -34,16 +36,26 @@ export function loadLaneDeclarations(
     const provider = env[`HEIMDALL_LANE_${i}_PROVIDER`];
     const credentialRef = env[`HEIMDALL_LANE_${i}_CREDENTIAL_REF`];
     const model = env[`HEIMDALL_LANE_${i}_MODEL`];
+    const rawPriority = env[`HEIMDALL_LANE_${i}_PRIORITY`];
     if (!provider || !credentialRef) {
       // Malformed declaration (missing a required field) — skip this lane
       // rather than crashing the whole service.
       continue;
     }
+    // hdl-or-04: an invalid priority value (non-numeric, negative, non-integer)
+    // falls back to unset rather than crashing lane loading for the whole
+    // service — same defensive posture as every other field in this loop.
+    const parsedPriority = rawPriority !== undefined ? Number(rawPriority) : undefined;
+    const priority =
+      parsedPriority !== undefined && Number.isInteger(parsedPriority) && parsedPriority >= 0
+        ? parsedPriority
+        : undefined;
     declarations.push({
       lane_id: laneId,
       provider,
       credential_ref: credentialRef,
       ...(model ? { model } : {}),
+      ...(priority !== undefined ? { priority } : {}),
     });
   }
   return declarations;

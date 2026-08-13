@@ -28,6 +28,7 @@ import { checkGeminiPublicStatus } from "./signal-sources/public-status/gemini.j
 import { probeGeminiLane } from "./signal-sources/active-probe/gemini.js";
 import { checkKimiPublicStatus } from "./signal-sources/public-status/kimi.js";
 import { probeKimiLane } from "./signal-sources/active-probe/kimi.js";
+import { probeOpenRouterLane } from "./signal-sources/active-probe/openrouter.js";
 import {
   decideSignalSource,
   resolveWithCorroboration,
@@ -74,6 +75,19 @@ export function geminiAdapters(): ProviderAdapters {
 
 export function kimiAdapters(): ProviderAdapters {
   return { checkPublicStatus: checkKimiPublicStatus, probe: probeKimiLane };
+}
+
+// No public-status/openrouter.ts exists — no confirmed machine-readable
+// status feed was found for OpenRouter (see hdl-or-01's research-brief.md).
+// An honest always-up stub, not an omitted field: ProviderAdapters requires
+// both functions, and this is truthful about there being no real feed to
+// check rather than fabricating one.
+async function alwaysUpOpenRouterPublicStatus(): Promise<{ status: "up"; reason: null }> {
+  return { status: "up", reason: null };
+}
+
+export function openrouterAdapters(): ProviderAdapters {
+  return { checkPublicStatus: alwaysUpOpenRouterPublicStatus, probe: probeOpenRouterLane };
 }
 
 /**

@@ -1,7 +1,7 @@
 id: hdl-or-04-lane-priority-override
 epic: hdl-openrouter-signals
 title: Optional per-lane priority override — operator-ranked routes, not lane_id-accident
-status: pending
+status: completed
 complexity: low
 methodology: classic
 depends_on: [hdl-or-02-wire-openrouter-provider]
