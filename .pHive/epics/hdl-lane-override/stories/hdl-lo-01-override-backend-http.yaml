@@ -1,0 +1,135 @@
+id: hdl-lo-01-override-backend-http
+epic: hdl-lane-override
+title: Manual lane override — durable state, ControlAdapter-aware, HTTP surface
+status: pending
+complexity: medium
+methodology: classic
+depends_on: []
+
+description: |
+  Add a durable per-lane manual override ("enabled" | "disabled" | null)
+  that participates in MulticaControlAdapter's existing desiredEnabled
+  decision — not a separate/parallel disable mechanism. When set, the
+  override wins outright over the sensed status until cleared back to
+  "auto" (null). Exposed via POST /lanes/:laneId/override and surfaced on
+  GET /lanes so slice 2 (dashboard UI) can render it.
+
+acceptance_criteria:
+  - "Given a lane with no override set (the default), when reconcile() runs, then desiredEnabled is computed exactly as before this story — purely from status (byte-identical behavior for the unset case)"
+  - "Given an operator sets a lane's override to 'disabled' while the lane's sensed status is 'up', when the next automatic reconcile tick runs, then the lane is blocked (max_concurrent_tasks: 0) despite the healthy status — the override wins"
+  - "Given an override is set to 'enabled' while the lane's sensed status is 'down', when reconcile() runs, then the lane is allowed through despite the down status — the override wins"
+  - "Given an override was set, when the operator sets it to 'auto' (POST .../override with state: auto), then subsequent reconcile ticks return to status-derived behavior (override cleared, not just set to a third value that happens to match automatic logic)"
+  - "POST /lanes/:laneId/override with an unknown lane_id returns 404 with an { error: 'unknown_lane', lane_id } body, matching the existing POST /lanes/:laneId/refresh route's error shape"
+  - "POST /lanes/:laneId/override with a body.state outside {enabled, disabled, auto} returns 400 with a structured error, not a silent no-op or a crash"
+  - "GET /lanes includes each lane's current override state (null when unset) so a UI consumer can render it without a second request"
+  - "MulticaControlAdapter's Argus emission (emitActuationResult) includes an overrideActive: true field when the block/allow decision for that tick was override-driven, and is absent/false when status-driven — distinguishable in telemetry"
+  - "A fresh (:memory: or newly-created file) StateStore has the manual_override column from CREATE TABLE; an already-existing persisted DB file (pre-dating this story) does not crash on open — the defensive ALTER TABLE path is exercised without error"
+  - "All previously-shipped routes and reconcile() behavior for the non-override case are unchanged — npm test passes with zero regressions in existing test files"
+
+steps:
+  - id: research
+    description: Confirm StateStore's lanes table schema, MulticaControlAdapter's reconcile()/desiredEnabled computation, ReconcileContext's shape, and the POST /lanes/:laneId/refresh route's exact error-handling pattern before implementing
+    agent: researcher
+  - id: implement
+    description: Add manual_override to StateStore (schema + get/set methods), extend ReconcileContext, make MulticaControlAdapter/StubControlAdapter override-aware, add the HTTP endpoint, extend GET /lanes's response, thread override through main.ts's tick-context build
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Extend state-store.test.ts, multica-control-adapter.test.ts, control-adapter.test.ts, and http-server.test.ts with cases per the acceptance criteria above
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review for correctness, convention compliance (matches existing route/adapter patterns exactly), and confirm the non-override path is byte-identical to pre-story behavior
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/core/state-store.ts
+      purpose: "lanes table schema (lines 14-18) and upsertLane's ON CONFLICT clause (lines 55-64) — manual_override column must survive re-upserts, not be clobbered"
+    - path: src/core/actuation/multica-control-adapter.ts
+      purpose: "reconcile() at line 58, desiredEnabled computed at line 60 (!SUSPECT_STATUSES.has(status)) — this is the exact line that becomes override-aware; emitResult at line 134+ gains overrideActive"
+    - path: src/core/actuation/control-adapter.ts
+      purpose: "ReconcileContext interface (reason, reset_at from hdl-reason-aware-recovery) gains manualOverride; StubControlAdapter.reconcile also becomes override-aware for consistency"
+    - path: src/main.ts
+      purpose: "Line ~176-177's statusWatcher tick loop already reads `current` from the store to build context.reason/context.reset_at — reads the override the same way"
+    - path: src/api/http-server.ts
+      purpose: "POST /lanes/:laneId/refresh (lines 95-118) is the exact pattern the new POST /lanes/:laneId/override route follows — regex URL match, 404 on unknown lane"
+
+files_to_modify:
+  - file: src/core/state-store.ts
+    change: "Add manual_override TEXT column to the lanes table CREATE statement (CHECK enabled/disabled/NULL); add a defensive try/caught ALTER TABLE for pre-existing DBs; add setManualOverride(laneId, value) and getManualOverride(laneId) methods; getCurrentStatus or a new method must surface it for GET /lanes to consume."
+  - file: src/core/actuation/control-adapter.ts
+    change: "Add manualOverride: 'enabled' | 'disabled' | null to ReconcileContext. Update StubControlAdapter.reconcile to compute an override-aware effective status for its logging (matching MulticaControlAdapter's logic, even though StubControlAdapter has no real block/allow action to take)."
+  - file: src/core/actuation/multica-control-adapter.ts
+    change: "desiredEnabled computation in reconcile() becomes override-aware per the formula in design-discussion.md. emitResult gains an overrideActive param, threaded into the Argus emitActuationResult payload."
+  - file: src/api/http-server.ts
+    change: "Add POST /lanes/:laneId/override (body: {state: 'enabled'|'disabled'|'auto'}) following the exact shape of the existing POST /lanes/:laneId/refresh route. Extend GET /lanes's response to include each lane's override state."
+  - file: src/main.ts
+    change: "statusWatcher's tick loop reads the override alongside reason/reset_at when building the ReconcileContext passed to adapter.reconcile()."
+
+code_examples:
+  - title: The exact desiredEnabled line that becomes override-aware
+    file: src/core/actuation/multica-control-adapter.ts
+    snippet: |
+      async reconcile(lane: Lane, status: LaneStatusValue, context?: ReconcileContext): Promise<void> {
+        const agentIds = this.opts.resolver.resolve(lane.lane_id);
+        const desiredEnabled = !SUSPECT_STATUSES.has(status);
+        // ^ becomes: context?.manualOverride
+        //     ? context.manualOverride === "enabled"
+        //     : !SUSPECT_STATUSES.has(status)
+
+  - title: The existing mutation-route pattern to follow exactly
+    file: src/api/http-server.ts
+    snippet: |
+      const refreshMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/refresh$/);
+      if (refreshMatch) {
+        const laneId = decodeURIComponent(refreshMatch[1]);
+        if (!registry.get(laneId)) {
+          res.writeHead(404, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "unknown_lane", lane_id: laneId }));
+          return;
+        }
+        // ...
+
+design_decisions:
+  - decision: Override lives on the `lanes` table (per-lane current state), not lane_status_history (append-only historical log) — a setting, not an observation.
+    rationale: lane_status_history's shape (one row per sensed status observation) doesn't fit a persistent operator setting; upsertLane's existing ON CONFLICT pattern already handles per-lane current-state columns correctly.
+  - decision: Override takes effect on the next tick (≤5s), not immediately via a forced reconcile call from the HTTP handler.
+    rationale: Keeps the HTTP handler's diff minimal and avoids threading the adapter map into the HTTP layer's closure; 5s latency matches the existing suspect-lane InProcessScheduler cadence and is not a meaningfully worse UX for a manual operator action.
+
+cross_cutting:
+  - concern: argus-otel-emit
+    action: "New overrideActive field on emitActuationResult — verify it conforms to whatever OTEL semantic conventions the argus-otel-emit concern specifies."
+  - concern: documentation
+    action: "Update README.md's HTTP section with the new POST /lanes/:laneId/override endpoint."
+
+risks:
+  - severity: medium
+    description: Schema migration on an already-persisted (non-:memory:) DB file predating this column could error if not handled defensively.
+    mitigation: Explicit acceptance criterion above (try/caught ALTER TABLE) — test must cover opening a pre-existing DB file without the column.
+  - severity: low
+    description: A stuck override (operator forgets it's set) silently changes routing behavior forever.
+    mitigation: Deferred to slice 2 (hdl-lo-02) for UI visibility — this story's job is correctness and API surface, not the visibility UX.
+
+references:
+  - path: docs/decisions/DEC-hdl-reason-aware-recovery.md
+    relevant_excerpt: |
+      Lanes are not supposed to just purely have an override to disable the
+      lane as a 429 or something -- it is turn on and off at a top level for
+      heimdall to DIRECT through -- heimdall directs traffic and lets it go
+      through or blocks it.
+  - path: .pHive/epics/hdl-lane-override/docs/design-discussion.md
+    relevant_excerpt: |
+      When no override is set (the default, null), behavior is byte-identical
+      to today ... When an override is set, it wins outright over the sensed
+      status until explicitly cleared.

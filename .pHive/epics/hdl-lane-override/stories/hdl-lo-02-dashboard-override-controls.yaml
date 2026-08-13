@@ -1,0 +1,80 @@
+id: hdl-lo-02-dashboard-override-controls
+epic: hdl-lane-override
+title: Dashboard gets manual enable/disable/auto controls per lane
+status: pending
+complexity: low
+methodology: classic
+depends_on: [hdl-lo-01-override-backend-http]
+
+description: |
+  Extend the read-only dashboard (hdl-lane-status-ui) with per-lane
+  controls to set the manual override (enabled/disabled/auto) added by
+  hdl-lo-01, calling its POST /lanes/:laneId/override endpoint. When an
+  override is active, the dashboard must clearly indicate it (distinct
+  from the sensed-status badge) so it's never ambiguous whether a lane's
+  current block/allow state came from sensing or an operator decision.
+
+acceptance_criteria:
+  - "Given the dashboard is loaded, when it renders each lane's row, then there are controls (buttons or a select) to set that lane's override to enabled, disabled, or auto"
+  - "Given an operator clicks a control, when the request completes, then the dashboard's next poll (within 5s, matching the existing poll interval) reflects the change without a manual page reload"
+  - "Given a lane has an active override (enabled or disabled), when its row renders, then a visible indicator (e.g. an '(manual override)' label or badge) distinguishes it from a purely status-derived state — never silent"
+  - "Given a lane has no override set (auto/null), when its row renders, then no override indicator is shown — only the sensed-status badge, matching hdl-lane-status-ui's existing behavior exactly"
+  - "The controls only ever call Heimdall's own POST /lanes/:laneId/override endpoint (relative fetch, same-origin) — no external network requests, consistent with the zero-external-dependency ethos already established"
+
+steps:
+  - id: research
+    description: Confirm hdl-lo-01's POST /lanes/:laneId/override request/response shape and GET /lanes's new override field before wiring the UI
+    agent: researcher
+  - id: implement
+    description: Add per-lane override controls and the override indicator to src/api/ui/dashboard.ts
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Extend src/api/http-server.test.ts's GET / structural checks with cases covering the new controls/indicator markup, following the same regex/structural-check pattern already used for the dashboard
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review for correctness and convention compliance (matches dashboard.ts's existing style, no new dependencies)
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/api/ui/dashboard.ts
+      purpose: "The dashboard module (hdl-lane-status-ui) — renderRow() is where the per-lane override controls and indicator get added"
+    - path: src/api/http-server.test.ts
+      purpose: "Existing GET / structural-check tests (regex against the served script/HTML) — the pattern to extend for the new controls"
+
+files_to_modify:
+  - file: src/api/ui/dashboard.ts
+    change: "Add override controls (enable/disable/auto) and an override-active indicator to renderRow(); wire control clicks to POST /lanes/:laneId/override."
+
+design_decisions:
+  - decision: Controls call the existing 5s poll to reflect state, rather than optimistically updating the DOM before the next poll confirms it.
+    rationale: Simpler, consistent with the rest of the dashboard's poll-driven rendering model (hdl-lane-status-ui already established this pattern for status itself); the 5s latency is not meaningfully worse UX for a manual operator action, matching hdl-lo-01's own latency decision.
+
+cross_cutting:
+  - concern: documentation
+    action: "None beyond hdl-lo-01's README update — this story is UI-only, already covered by the endpoint documentation."
+
+risks:
+  - severity: low
+    description: A control click racing the 5s poll could look like a no-op click if the operator expects instant feedback.
+    mitigation: Acceptance criterion above bounds the reflect-time at 5s (the existing poll interval) — acceptable per design_decisions.
+
+references:
+  - path: .pHive/epics/hdl-lane-override/docs/design-discussion.md
+    relevant_excerpt: |
+      Dashboard ... gets a per-lane control: buttons or a toggle to set
+      enabled/disabled/auto ... Displays current override state distinctly
+      from sensed status ... never ambiguous whether a lane's current
+      block/allow state came from sensing or an operator decision.
