@@ -1,7 +1,7 @@
 id: hdl-mcp-01-extract-shared-mutation-functions
 epic: hdl-mcp-lane-tools
 title: Extract override/reset-at/add-lane validation into shared functions
-status: pending
+status: completed
 complexity: medium
 methodology: classic
 depends_on: []

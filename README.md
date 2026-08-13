@@ -160,7 +160,7 @@ curl -X POST http://localhost:4870/lanes \
 npm run cli                     # JSON (default)
 npm run cli -- --format table   # human-readable table
 
-# MCP (stdio server exposing the heimdall.lanes.list tool)
+# MCP (stdio server — 4 tools, see below)
 npm run mcp
 ```
 
@@ -192,8 +192,28 @@ endpoints, polled every 5s.
   when deciding when to check again (scheduling-only — doesn't touch
   actuation). Shown with a "manual" badge whenever active.
 
-MCP agent-tooling for these same operations remains tracked as follow-up
-work.
+**MCP tools** — `npm run mcp` exposes all four HTTP operations above as MCP
+tools (an agent, not just a human at the dashboard, can exercise/test
+Heimdall — closing out
+[`docs/decisions/DEC-hdl-reason-aware-recovery.md`](docs/decisions/DEC-hdl-reason-aware-recovery.md)
+item 3). Every tool calls the exact same shared functions the HTTP routes
+do (`getLaneStatuses`/`setLaneOverride`/`setLaneResetAt`/`addLane` in
+`src/api/http-server.ts`) — no duplicated validation logic between the two
+surfaces:
+
+| Tool | Wraps | Input |
+|---|---|---|
+| `heimdall.lanes.list` | `GET /lanes` | *(none)* |
+| `heimdall.lanes.override` | `POST /lanes/:laneId/override` | `{lane_id, state: "enabled"\|"disabled"\|"auto"}` |
+| `heimdall.lanes.setResetAt` | `POST /lanes/:laneId/reset-at` | `{lane_id, reset_at: string \| null}` |
+| `heimdall.lanes.add` | `POST /lanes` | `{lane_id, provider, model, token}` |
+
+A validation failure (unknown lane, invalid state, a duplicate lane_id,
+etc.) returns structured `{ok: false, error, ...}` text content — the same
+never-throws-on-bad-input philosophy `heimdall.lanes.list` already has, and
+REQ-07's "down/unconfigured is data, not an exception" pattern applied to
+every tool. Only a genuinely unrecognized tool *name* throws a real MCP
+protocol error.
 
 Other scripts: `npm test` (Node built-in test runner via `tsx`),
 `npm run build` (type-check + compile to `dist/`), `npm run sla-report`

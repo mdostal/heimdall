@@ -1,7 +1,7 @@
 id: hdl-mcp-02-mcp-tools
 epic: hdl-mcp-lane-tools
 title: MCP tools for override, reset-at, and add-lane
-status: pending
+status: completed
 complexity: medium
 methodology: classic
 depends_on: [hdl-mcp-01-extract-shared-mutation-functions]
