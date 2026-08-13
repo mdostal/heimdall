@@ -1,7 +1,7 @@
 id: hdl-ol-01-active-probe-ollama
 epic: hdl-ollama-signals
 title: Ollama liveness-only active-probe adapter (GET /api/tags, no auth, up/down only)
-status: pending
+status: completed
 complexity: low
 methodology: classic
 depends_on: []

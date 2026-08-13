@@ -228,6 +228,78 @@ test("two openrouter lanes sharing one credential_ref nest independently — the
   service.stopAll();
 });
 
+test("an ollama-provider lane gets a real pipeline + schedulers wired up, resolving up end-to-end", async () => {
+  const env = testEnv();
+  env.HEIMDALL_LANE_3_ID = "ollama-local";
+  env.HEIMDALL_LANE_3_PROVIDER = "ollama";
+  env.HEIMDALL_LANE_3_CREDENTIAL_REF = "OLLAMA_HOST";
+  env.OLLAMA_HOST = "http://localhost:11434"; // credential_ref repurposed to carry a base URL
+
+  const service = composeService({
+    env,
+    commandRunner: mockCommandRunner(),
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port: 0,
+  });
+
+  assert.equal(service.multicaSchedulers.length, 3);
+  assert.equal(service.inProcessSchedulers.length, 3);
+  assert.equal(service.pipelines.size, 3);
+
+  service.store.recordStatus({
+    lane_id: "ollama-local",
+    status: "degraded",
+    reset_at: null,
+    reason: "seeded for test",
+    signal_source: "active_probe",
+    observed_at: "2026-08-13T15:00:00.000Z",
+  });
+
+  const ollamaSchedulerIndex = 2;
+  await service.inProcessSchedulers[ollamaSchedulerIndex].poll();
+
+  const current = service.store.getCurrentStatus("ollama-local");
+  assert.equal(current?.status, "up");
+
+  service.stopAll();
+});
+
+test("an ollama-provider lane resolves to down end-to-end when the local daemon is unreachable", async () => {
+  const env = testEnv();
+  env.HEIMDALL_LANE_3_ID = "ollama-local";
+  env.HEIMDALL_LANE_3_PROVIDER = "ollama";
+  env.HEIMDALL_LANE_3_CREDENTIAL_REF = "OLLAMA_HOST";
+  env.OLLAMA_HOST = "http://localhost:11434";
+
+  const unreachableFetch: typeof fetch = (async (url: unknown) => {
+    if (typeof url === "string" && url.includes("11434")) {
+      throw new Error("ECONNREFUSED");
+    }
+    return mockFetch()(url as string, {});
+  }) as typeof fetch;
+
+  const service = composeService({
+    env,
+    commandRunner: mockCommandRunner(),
+    fetchImpl: unreachableFetch,
+    skipHttpListen: true,
+    port: 0,
+  });
+
+  const ollamaSchedulerIndex = 2;
+  // Corroboration (hdl-429-corroboration) requires two consecutive matching
+  // severe verdicts before trusting "down" — a single probe resolves to
+  // "degraded" instead, by design.
+  await service.inProcessSchedulers[ollamaSchedulerIndex].poll();
+  await service.inProcessSchedulers[ollamaSchedulerIndex].poll();
+
+  const current = service.store.getCurrentStatus("ollama-local");
+  assert.equal(current?.status, "down");
+
+  service.stopAll();
+});
+
 test("unknown provider is skipped gracefully — no pipeline/scheduler crash for the whole service", () => {
   const env = testEnv();
   env.HEIMDALL_LANE_3_ID = "some-new-provider-lane";

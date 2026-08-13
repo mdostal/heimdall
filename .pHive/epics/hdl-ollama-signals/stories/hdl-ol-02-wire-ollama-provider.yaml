@@ -1,7 +1,7 @@
 id: hdl-ol-02-wire-ollama-provider
 epic: hdl-ollama-signals
 title: Wire Ollama into lane-pipeline + main.ts, end-to-end liveness proof
-status: pending
+status: completed
 complexity: low
 methodology: classic
 depends_on: [hdl-ol-01-active-probe-ollama]
