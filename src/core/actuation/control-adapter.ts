@@ -21,6 +21,14 @@ import { ActuationStub, type StubbedAction } from "../scheduler/actuation-stub.j
 export interface ReconcileContext {
   reason: string | null;
   reset_at: string | null;
+  /**
+   * hdl-lo-01: a top-level operator directive that wins outright over the
+   * sensed status in the block/allow decision when set. null (the default)
+   * means "automatic" — status alone decides, unchanged from pre-hdl-lo-01
+   * behavior. Optional so every existing caller passing just
+   * {reason, reset_at} keeps compiling and behaving identically.
+   */
+  manualOverride?: "enabled" | "disabled" | null;
 }
 
 export interface ControlAdapter {

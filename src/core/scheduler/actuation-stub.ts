@@ -16,6 +16,8 @@ export interface StubbedAction {
   /** Why the lane is now in `to` — threaded through from the status signal, not derived here. */
   reason: string | null;
   reset_at: string | null;
+  /** hdl-lo-01: the manual override in effect when this transition was recorded, if any. */
+  manualOverride: "enabled" | "disabled" | null;
 }
 
 const SUSPECT_STATUSES = new Set(["down", "degraded", "out_of_credit"]);
@@ -50,7 +52,11 @@ export class ActuationStub {
   onStatusChange(
     lane: { lane_id: string; provider: string },
     newStatus: string,
-    context?: { reason: string | null; reset_at: string | null },
+    context?: {
+      reason: string | null;
+      reset_at: string | null;
+      manualOverride?: "enabled" | "disabled" | null;
+    },
   ): void {
     const previous = this.lastKnownStatus.get(lane.lane_id);
     this.lastKnownStatus.set(lane.lane_id, newStatus);
@@ -66,10 +72,12 @@ export class ActuationStub {
       recordedAt: this.now(),
       reason: context?.reason ?? null,
       reset_at: context?.reset_at ?? null,
+      manualOverride: context?.manualOverride ?? null,
     };
     this.recorded.push(action);
-    const suffix = action.reason ? ` (${action.reason}${action.reset_at ? `, reset_at=${action.reset_at}` : ""})` : "";
-    this.log(`[actuation-stub] lane=${action.laneId}: ${action.intendedAction}${suffix}`);
+    const overrideSuffix = action.manualOverride ? ` [manual override: ${action.manualOverride}]` : "";
+    const reasonSuffix = action.reason ? ` (${action.reason}${action.reset_at ? `, reset_at=${action.reset_at}` : ""})` : "";
+    this.log(`[actuation-stub] lane=${action.laneId}: ${action.intendedAction}${reasonSuffix}${overrideSuffix}`);
   }
 
   getRecordedActions(): readonly StubbedAction[] {

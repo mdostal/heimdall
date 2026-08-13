@@ -1,7 +1,7 @@
 id: hdl-lo-02-dashboard-override-controls
 epic: hdl-lane-override
 title: Dashboard gets manual enable/disable/auto controls per lane
-status: pending
+status: completed
 complexity: low
 methodology: classic
 depends_on: [hdl-lo-01-override-backend-http]

@@ -1,7 +1,7 @@
 id: hdl-lo-01-override-backend-http
 epic: hdl-lane-override
 title: Manual lane override — durable state, ControlAdapter-aware, HTTP surface
-status: pending
+status: completed
 complexity: medium
 methodology: classic
 depends_on: []

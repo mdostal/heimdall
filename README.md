@@ -142,6 +142,8 @@ status and a resolved credential, and returns the credential reference handle
 curl http://localhost:4870/lanes
 curl -X POST http://localhost:4870/lanes/<laneId>/refresh   # force a refresh
 curl http://localhost:4870/healthz                          # liveness only, no lane data
+curl -X POST http://localhost:4870/lanes/<laneId>/override \
+  -H "content-type: application/json" -d '{"state":"disabled"}'   # manual override: enabled | disabled | auto
 
 # CLI
 npm run cli                     # JSON (default)
@@ -152,13 +154,17 @@ npm run mcp
 ```
 
 **Dashboard** — `GET /` (open `http://localhost:4870/` in a browser) serves a
-self-contained, read-only live lane-status view: no build step, no
-framework, no external network calls — it's a pure consumer of `GET /lanes`,
-polled every 5s. This is the first slice of Heimdall's standalone-mode UI
-requirement; manual disable/enable, add-lane, and MCP agent-tooling for the
-same operations are tracked as follow-up work (see
+self-contained live lane-status view: no build step, no framework, no
+external network calls — it's a pure consumer of `GET /lanes`, polled every
+5s. Includes manual enable/disable/auto controls per lane, backed by
+`POST /lanes/:laneId/override` — the override wins outright over the sensed
+status until cleared back to `auto`, routed through the same
+`ControlAdapter.reconcile()` decision automatic status-driven actuation
+already uses (not a separate mechanism — see
 [`docs/decisions/DEC-hdl-reason-aware-recovery.md`](docs/decisions/DEC-hdl-reason-aware-recovery.md)
-item 3).
+item 3). An active override is always shown as a distinct "manual: …" badge,
+never silent. Add-lane and MCP agent-tooling for the same operations remain
+tracked as follow-up work.
 
 Other scripts: `npm test` (Node built-in test runner via `tsx`),
 `npm run build` (type-check + compile to `dist/`), `npm run sla-report`

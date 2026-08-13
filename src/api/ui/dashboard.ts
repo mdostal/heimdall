@@ -5,9 +5,14 @@
 // GET /lanes JSON endpoint. See docs/decisions/DEC-hdl-reason-aware-recovery.md
 // item 3 and .pHive/epics/hdl-lane-status-ui/docs/design-discussion.md.
 //
-// Manual disable/enable, add-lane, and MCP agent-tooling are explicitly
-// deferred to follow-up epics — this page only renders what GET /lanes
-// already returns.
+// hdl-lo-02 (slice 2 of the has_ui: true UI work) adds manual
+// enable/disable/auto controls per lane, calling the hdl-lo-01
+// POST /lanes/:laneId/override endpoint — which itself routes through the
+// SAME ControlAdapter.reconcile() decision as automatic status-driven
+// actuation, not a separate mechanism (see
+// docs/decisions/DEC-hdl-reason-aware-recovery.md item 3 and
+// .pHive/epics/hdl-lane-override/docs/design-discussion.md). Add-lane and
+// MCP agent-tooling remain deferred to follow-up epics.
 
 export function renderDashboardHtml(): string {
   return `<!doctype html>
@@ -21,7 +26,7 @@ export function renderDashboardHtml(): string {
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     margin: 2rem;
-    max-width: 960px;
+    max-width: 1080px;
   }
   h1 { font-size: 1.25rem; margin-bottom: 0.25rem; }
   .subtitle { color: #888; font-size: 0.85rem; margin-bottom: 1.5rem; }
@@ -31,6 +36,7 @@ export function renderDashboardHtml(): string {
     padding: 0.5rem 0.75rem;
     border-bottom: 1px solid rgba(128, 128, 128, 0.3);
     font-size: 0.9rem;
+    vertical-align: middle;
   }
   th { font-weight: 600; color: #888; }
   .badge {
@@ -45,13 +51,36 @@ export function renderDashboardHtml(): string {
   .badge-degraded { background: #bf8700; }
   .badge-down { background: #cf222e; }
   .badge-out_of_credit { background: #6639ba; }
+  .override-badge {
+    display: inline-block;
+    margin-left: 0.4rem;
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #fff;
+    background: #b35900;
+  }
   .empty-state { color: #888; padding: 2rem 0; }
   .reason { color: #888; font-size: 0.85rem; }
+  .override-controls button {
+    font-size: 0.75rem;
+    padding: 0.2rem 0.5rem;
+    margin-right: 0.25rem;
+    border: 1px solid rgba(128, 128, 128, 0.4);
+    border-radius: 4px;
+    background: transparent;
+    cursor: pointer;
+  }
+  .override-controls button.active {
+    border-color: currentColor;
+    font-weight: 600;
+  }
 </style>
 </head>
 <body>
   <h1>Heimdall — Lane Status</h1>
-  <div class="subtitle">Read-only live view · polls <code>GET /lanes</code> every 5s</div>
+  <div class="subtitle">Polls <code>GET /lanes</code> every 5s · manual overrides route through the same ControlAdapter Heimdall already uses for automatic sensing</div>
   <div id="root">Loading…</div>
 
 <script>
@@ -76,6 +105,28 @@ export function renderDashboardHtml(): string {
     });
   }
 
+  function overrideBadge(manualOverride) {
+    if (!manualOverride) return "";
+    return "<span class=\\"override-badge\\">manual: " + escapeHtml(manualOverride) + "</span>";
+  }
+
+  function overrideControls(lane) {
+    var current = lane.manual_override || "auto";
+    var laneAttr = escapeHtml(lane.lane_id);
+    function btn(state, label) {
+      var activeClass = current === state ? " active" : "";
+      return (
+        "<button type=\\"button\\" class=\\"" + activeClass.trim() + "\\" data-lane=\\"" + laneAttr +
+        "\\" data-state=\\"" + state + "\\">" + label + "</button>"
+      );
+    }
+    return (
+      "<span class=\\"override-controls\\">" +
+      btn("enabled", "Enable") + btn("disabled", "Disable") + btn("auto", "Auto") +
+      "</span>"
+    );
+  }
+
   function renderRow(lane) {
     var badgeClass = "badge badge-" + escapeHtml(lane.status);
     var label = BADGE_LABEL[lane.status] || lane.status;
@@ -83,11 +134,12 @@ export function renderDashboardHtml(): string {
       "<tr>" +
       "<td>" + escapeHtml(lane.lane_id) + "</td>" +
       "<td>" + escapeHtml(lane.provider) + "</td>" +
-      "<td><span class=\\"" + badgeClass + "\\">" + escapeHtml(label) + "</span></td>" +
+      "<td><span class=\\"" + badgeClass + "\\">" + escapeHtml(label) + "</span>" + overrideBadge(lane.manual_override) + "</td>" +
       "<td class=\\"reason\\">" + escapeHtml(lane.reason) + "</td>" +
       "<td>" + escapeHtml(formatResetAt(lane.reset_at)) + "</td>" +
       "<td>" + escapeHtml(lane.last_updated) + "</td>" +
       "<td>" + escapeHtml(lane.signal_source) + "</td>" +
+      "<td>" + overrideControls(lane) + "</td>" +
       "</tr>"
     );
   }
@@ -103,7 +155,7 @@ export function renderDashboardHtml(): string {
       "<table>" +
       "<thead><tr>" +
       "<th>Lane</th><th>Provider</th><th>Status</th><th>Reason</th>" +
-      "<th>Reset at</th><th>Last updated</th><th>Signal source</th>" +
+      "<th>Reset at</th><th>Last updated</th><th>Signal source</th><th>Override</th>" +
       "</tr></thead>" +
       "<tbody>" + rows + "</tbody>" +
       "</table>";
@@ -118,6 +170,26 @@ export function renderDashboardHtml(): string {
         root.innerHTML = "<div class=\\"empty-state\\">Failed to load lane status: " + escapeHtml(err) + "</div>";
       });
   }
+
+  // Event delegation on #root — a single listener survives every re-render
+  // (innerHTML replacement destroys any listeners attached directly to the
+  // buttons themselves), matching this file's no-framework constraint.
+  document.getElementById("root").addEventListener("click", function (event) {
+    var btn = event.target.closest("button[data-state]");
+    if (!btn) return;
+    var laneId = btn.getAttribute("data-lane");
+    var state = btn.getAttribute("data-state");
+    btn.disabled = true;
+    fetch("/lanes/" + encodeURIComponent(laneId) + "/override", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ state: state })
+    })
+      .then(poll)
+      .catch(function () {
+        btn.disabled = false;
+      });
+  });
 
   poll();
   setInterval(poll, 5000);

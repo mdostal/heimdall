@@ -483,6 +483,181 @@ test("GET / (hdl-ui-01) — the served script guards against a null reset_at (st
   }
 });
 
+test("hdl-lo-01: GET /lanes includes each lane's manual_override state (null when unset)", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes`);
+    const body = await res.json();
+    assert.equal(body.length, 1);
+    assert.equal(body[0].manual_override, null);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-lo-01: POST /lanes/:laneId/override sets the override and GET /lanes reflects it", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const overrideRes = await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/override`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ state: "disabled" }),
+    });
+    assert.equal(overrideRes.status, 200);
+    const overrideBody = await overrideRes.json();
+    assert.equal(overrideBody.manual_override, "disabled");
+
+    const lanesRes = await fetch(`http://localhost:${port}/lanes`);
+    const lanes = await lanesRes.json();
+    assert.equal(lanes[0].manual_override, "disabled");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-lo-01: POST /lanes/:laneId/override with state: auto clears a previously-set override", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/override`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ state: "enabled" }),
+    });
+    const clearRes = await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/override`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ state: "auto" }),
+    });
+    assert.equal(clearRes.status, 200);
+    const clearBody = await clearRes.json();
+    assert.equal(clearBody.manual_override, null);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-lo-01: POST /lanes/:laneId/override for an unknown lane returns 404", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes/never-declared/override`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ state: "disabled" }),
+    });
+    assert.equal(res.status, 404);
+    const body = await res.json();
+    assert.equal(body.error, "unknown_lane");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-lo-01: POST /lanes/:laneId/override with an invalid state returns 400", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/override`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ state: "not-a-real-state" }),
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.error, "invalid_override_state");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-lo-01: POST /lanes/:laneId/override with malformed JSON returns 400, not a crash", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/override`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{not valid json",
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.error, "invalid_json");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-lo-02: GET / (dashboard) includes override controls calling POST /lanes/:laneId/override", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /data-lane=/, "override controls must be data-lane-tagged for the click-delegation handler to read");
+    assert.match(body, /data-state=/, "override controls must be data-state-tagged (enabled/disabled/auto)");
+    assert.match(body, /"\/override"/, "the click handler must POST to the lane's /override endpoint");
+    assert.match(body, /addEventListener\("click"/, "must use event delegation, not per-button listeners lost on re-render");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-lo-02: GET / (dashboard) renders an override indicator distinct from the status badge", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /overrideBadge/, "must render a distinct override indicator, not fold override state into the status badge");
+    assert.match(body, /if \(!manualOverride\) return ""/, "the override badge must render nothing when no override is set (not 'null' or an empty badge)");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
 test("GET / does not change existing routes' behavior", async () => {
   const registry = registryWithOneConfiguredLane();
   const store = new StateStore(":memory:");

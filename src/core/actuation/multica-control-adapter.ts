@@ -57,7 +57,15 @@ export class MulticaControlAdapter implements ControlAdapter {
 
   async reconcile(lane: Lane, status: LaneStatusValue, context?: ReconcileContext): Promise<void> {
     const agentIds = this.opts.resolver.resolve(lane.lane_id);
-    const desiredEnabled = !SUSPECT_STATUSES.has(status);
+    // hdl-lo-01: a manual override, when set, wins outright over the sensed
+    // status — this is the SAME top-level gate the operator directed
+    // traffic through before, not a second/parallel mechanism. Unset
+    // (null/undefined, the default) is byte-identical to pre-hdl-lo-01
+    // behavior: status alone decides.
+    const desiredEnabled =
+      context?.manualOverride != null
+        ? context.manualOverride === "enabled"
+        : !SUSPECT_STATUSES.has(status);
 
     for (const agentId of agentIds) {
       await this.reconcileAgent(lane, agentId, desiredEnabled, context);
@@ -164,6 +172,7 @@ export class MulticaControlAdapter implements ControlAdapter {
       reason: outcomeReason,
       laneReason: context?.reason ?? undefined,
       laneResetAt: context?.reset_at ?? undefined,
+      overrideActive: context?.manualOverride != null,
     });
   }
 }
