@@ -39,8 +39,10 @@ import {
   setLaneOverride,
   setLaneResetAt,
   addLane,
+  setRoutingStrategy,
   type AddLaneInput,
 } from "./http-server.js";
+import { getActiveRoutingStrategyName, getRoutingStrategyNames } from "../core/route-selector.js";
 import { StateStore } from "../core/state-store.js";
 import type { LaneRegistry } from "../core/lane-registry.js";
 
@@ -48,6 +50,8 @@ export const LANES_LIST_TOOL_NAME = "heimdall.lanes.list";
 export const LANES_OVERRIDE_TOOL_NAME = "heimdall.lanes.override";
 export const LANES_SET_RESET_AT_TOOL_NAME = "heimdall.lanes.setResetAt";
 export const LANES_ADD_TOOL_NAME = "heimdall.lanes.add";
+export const ROUTING_STRATEGY_GET_TOOL_NAME = "heimdall.routingStrategy.get";
+export const ROUTING_STRATEGY_SET_TOOL_NAME = "heimdall.routingStrategy.set";
 
 const DEFAULT_ENV_FILE_PATH = ".env";
 
@@ -108,6 +112,24 @@ export function listLaneToolsDescriptor() {
         required: ["lane_id", "provider", "model", "token"],
       },
     },
+    {
+      name: ROUTING_STRATEGY_GET_TOOL_NAME,
+      description:
+        "Get the active routing strategy (priority | round-robin | off) and the full list of available strategies. There is exactly one active strategy, global across all lanes.",
+      inputSchema: { type: "object" as const, properties: {} },
+    },
+    {
+      name: ROUTING_STRATEGY_SET_TOOL_NAME,
+      description:
+        "Set the active routing strategy. 'off' means /available-route never picks a lane — callers fall back to GET /lanes to decide manually.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          strategy: { type: "string" as const, description: "One of the names returned by heimdall.routingStrategy.get's 'available' list." },
+        },
+        required: ["strategy"],
+      },
+    },
   ];
 }
 
@@ -135,6 +157,20 @@ export function callAddLaneTool(registry: LaneRegistry, envFilePath: string, arg
   return textResult(addLane(registry, envFilePath, (args ?? {}) as AddLaneInput));
 }
 
+export function callRoutingStrategyGetTool(store: StateStore) {
+  return textResult({
+    active: getActiveRoutingStrategyName(store),
+    available: getRoutingStrategyNames(),
+  });
+}
+
+export function callRoutingStrategySetTool(store: StateStore, args: unknown) {
+  const input = (args ?? {}) as { strategy?: unknown };
+  const result = setRoutingStrategy(store, input.strategy);
+  const { ok: _ok, ...wire } = result;
+  return textResult(wire);
+}
+
 /**
  * Builds the tool-name -> handler dispatch table. Exported separately from
  * createMcpServer so the dispatch behavior (in particular: throws for a
@@ -152,6 +188,8 @@ export function buildToolDispatch(
     [LANES_OVERRIDE_TOOL_NAME]: (args) => callLaneOverrideTool(registry, store, args),
     [LANES_SET_RESET_AT_TOOL_NAME]: (args) => callLaneSetResetAtTool(registry, store, args),
     [LANES_ADD_TOOL_NAME]: (args) => callAddLaneTool(registry, envFilePath, args),
+    [ROUTING_STRATEGY_GET_TOOL_NAME]: () => callRoutingStrategyGetTool(store),
+    [ROUTING_STRATEGY_SET_TOOL_NAME]: (args) => callRoutingStrategySetTool(store, args),
   };
 }
 

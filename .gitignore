@@ -48,3 +48,5 @@ npm-debug.log*
 !.pHive/epics/hdl-openrouter-signals/**
 !.pHive/epics/hdl-ollama-signals/
 !.pHive/epics/hdl-ollama-signals/**
+!.pHive/epics/hdl-mcp-routing-strategy/
+!.pHive/epics/hdl-mcp-routing-strategy/**

@@ -10,12 +10,16 @@ import {
   callLaneOverrideTool,
   callLaneSetResetAtTool,
   callAddLaneTool,
+  callRoutingStrategyGetTool,
+  callRoutingStrategySetTool,
   buildToolDispatch,
   dispatchToolCall,
   LANES_LIST_TOOL_NAME,
   LANES_OVERRIDE_TOOL_NAME,
   LANES_SET_RESET_AT_TOOL_NAME,
   LANES_ADD_TOOL_NAME,
+  ROUTING_STRATEGY_GET_TOOL_NAME,
+  ROUTING_STRATEGY_SET_TOOL_NAME,
 } from "./mcp-server.js";
 import { getLaneStatuses } from "./http-server.js";
 import { LaneRegistry } from "../core/lane-registry.js";
@@ -34,18 +38,27 @@ function tmpEnvPath(): string {
   return path.join(os.tmpdir(), `heimdall-mcp-server-test-${Date.now()}-${Math.random().toString(36).slice(2)}.env`);
 }
 
-test("listLaneToolsDescriptor exposes 4 tools: list, override, setResetAt, add (hdl-mcp-02)", () => {
+test("listLaneToolsDescriptor exposes 6 tools: list, override, setResetAt, add, routingStrategy.get, routingStrategy.set (hdl-mrs-01)", () => {
   const tools = listLaneToolsDescriptor();
-  assert.equal(tools.length, 4);
+  assert.equal(tools.length, 6);
   const names = tools.map((t) => t.name);
   assert.deepEqual(
     names.sort(),
-    [LANES_ADD_TOOL_NAME, LANES_LIST_TOOL_NAME, LANES_OVERRIDE_TOOL_NAME, LANES_SET_RESET_AT_TOOL_NAME].sort(),
+    [
+      LANES_ADD_TOOL_NAME,
+      LANES_LIST_TOOL_NAME,
+      LANES_OVERRIDE_TOOL_NAME,
+      LANES_SET_RESET_AT_TOOL_NAME,
+      ROUTING_STRATEGY_GET_TOOL_NAME,
+      ROUTING_STRATEGY_SET_TOOL_NAME,
+    ].sort(),
   );
   assert.equal(LANES_LIST_TOOL_NAME, "heimdall.lanes.list");
   assert.equal(LANES_OVERRIDE_TOOL_NAME, "heimdall.lanes.override");
   assert.equal(LANES_SET_RESET_AT_TOOL_NAME, "heimdall.lanes.setResetAt");
   assert.equal(LANES_ADD_TOOL_NAME, "heimdall.lanes.add");
+  assert.equal(ROUTING_STRATEGY_GET_TOOL_NAME, "heimdall.routingStrategy.get");
+  assert.equal(ROUTING_STRATEGY_SET_TOOL_NAME, "heimdall.routingStrategy.set");
 });
 
 test("hdl-mcp-02: every tool's inputSchema requires lane_id where applicable, and every field the shared function needs", () => {
@@ -191,6 +204,46 @@ test("hdl-mcp-02: callAddLaneTool does NOT throw on a duplicate lane_id — retu
   }
 });
 
+test("hdl-mrs-01: callRoutingStrategyGetTool returns the same shape GET /routing-strategy does", () => {
+  const store = new StateStore(":memory:");
+  try {
+    const result = callRoutingStrategyGetTool(store);
+    const parsed = JSON.parse(result.content[0].text);
+    assert.equal(parsed.active, "priority");
+    assert.ok(Array.isArray(parsed.available));
+    assert.ok(parsed.available.includes("priority"));
+    assert.ok(parsed.available.includes("round-robin"));
+    assert.ok(parsed.available.includes("off"));
+  } finally {
+    store.close();
+  }
+});
+
+test("hdl-mrs-01: callRoutingStrategySetTool persists a valid strategy change, verifiable via a subsequent get", () => {
+  const store = new StateStore(":memory:");
+  try {
+    const setResult = callRoutingStrategySetTool(store, { strategy: "round-robin" });
+    assert.deepEqual(JSON.parse(setResult.content[0].text), { active: "round-robin" });
+
+    const getResult = callRoutingStrategyGetTool(store);
+    assert.equal(JSON.parse(getResult.content[0].text).active, "round-robin");
+  } finally {
+    store.close();
+  }
+});
+
+test("hdl-mrs-01: callRoutingStrategySetTool does NOT throw on an invalid strategy name — returns structured {error} content instead", () => {
+  const store = new StateStore(":memory:");
+  try {
+    const result = callRoutingStrategySetTool(store, { strategy: "not-a-real-strategy" });
+    const parsed = JSON.parse(result.content[0].text);
+    assert.equal(parsed.error, "invalid_strategy");
+    assert.ok(Array.isArray(parsed.allowed_strategies));
+  } finally {
+    store.close();
+  }
+});
+
 test("hdl-mcp-02: dispatchToolCall throws for a genuinely unknown tool name", () => {
   const registry = registryWithOneConfiguredLane();
   const store = new StateStore(":memory:");
@@ -202,7 +255,7 @@ test("hdl-mcp-02: dispatchToolCall throws for a genuinely unknown tool name", ()
   }
 });
 
-test("hdl-mcp-02: dispatchToolCall does NOT throw for any of the 4 known tools, even on their own validation failures", () => {
+test("hdl-mcp-02: dispatchToolCall does NOT throw for any of the 6 known tools, even on their own validation failures", () => {
   const registry = registryWithOneConfiguredLane();
   const store = new StateStore(":memory:");
   const envPath = tmpEnvPath();
@@ -212,13 +265,15 @@ test("hdl-mcp-02: dispatchToolCall does NOT throw for any of the 4 known tools, 
     assert.doesNotThrow(() => dispatchToolCall(dispatch, LANES_OVERRIDE_TOOL_NAME, { lane_id: "never-declared", state: "disabled" }));
     assert.doesNotThrow(() => dispatchToolCall(dispatch, LANES_SET_RESET_AT_TOOL_NAME, { lane_id: "never-declared", reset_at: null }));
     assert.doesNotThrow(() => dispatchToolCall(dispatch, LANES_ADD_TOOL_NAME, { lane_id: "claude@mathew.dostal", provider: "x", model: "y", token: "z" }));
+    assert.doesNotThrow(() => dispatchToolCall(dispatch, ROUTING_STRATEGY_GET_TOOL_NAME, {}));
+    assert.doesNotThrow(() => dispatchToolCall(dispatch, ROUTING_STRATEGY_SET_TOOL_NAME, { strategy: "not-a-real-strategy" }));
   } finally {
     store.close();
     fs.rmSync(envPath, { force: true });
   }
 });
 
-test("hdl-mcp-02: createMcpServer still constructs a connectable Server instance with all 4 tools wired", () => {
+test("hdl-mcp-02: createMcpServer still constructs a connectable Server instance with all 6 tools wired", () => {
   const registry = registryWithOneConfiguredLane();
   const store = new StateStore(":memory:");
   try {
