@@ -1,7 +1,7 @@
 id: hdl-rar-02-actuation-reason-context
 epic: hdl-reason-aware-recovery
 title: ControlAdapter.reconcile carries reason/reset_at so actuation logging can say why
-status: pending
+status: completed
 complexity: low
 methodology: classic
 depends_on: []

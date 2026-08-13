@@ -1,6 +1,6 @@
 # DEC-hdl-reason-aware-recovery
 
-**Status:** Proposed — direction confirmed by operator (2026-08-12), not yet implemented.
+**Status:** Accepted (2026-08-12) — items 1+2 implemented directly (small, isolated, testable per the recommendation below) as epic `hdl-reason-aware-recovery` (stories `hdl-rar-01-scheduler-reset-at`, `hdl-rar-02-actuation-reason-context`). Item 3 (UI + agent tooling) remains a separate future planning pass, unchanged.
 **Supersedes:** [`DEC-hdl-429-corroboration.md`](DEC-hdl-429-corroboration.md)'s narrower "what should a Claude 429 resolve to" framing — generalized per operator feedback: this isn't a Claude-specific or 429-specific problem, it's a structural gap in how `reason`/`reset_at` are (not) consumed downstream of signal capture, across every provider and every suspect status.
 
 ## The operator's direction (verbatim intent, 2026-08-12)

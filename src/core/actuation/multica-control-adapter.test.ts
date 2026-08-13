@@ -194,6 +194,76 @@ test("every reconcile attempt (success or failure) emits an Argus actuation resu
   assert.ok(argus.results.length >= 1);
 });
 
+test("threads lane reason/reset_at through to the Argus actuation-result emission (out_of_credit with known reset_at)", async () => {
+  const argus = fakeArgus();
+  const restClient = fakeRestClient({
+    listAgents: async () => ({
+      status: "ok",
+      data: [{ id: "agent-a", workspace_id: "w", max_concurrent_tasks: 5, status: "idle", visibility: "private" }],
+    }),
+  });
+  const adapter = new MulticaControlAdapter({
+    restClient,
+    circuitBreaker: new CircuitBreaker(),
+    resolver: fakeResolver({ [LANE.lane_id]: ["agent-a"] }),
+    argus,
+  });
+
+  await adapter.reconcile(LANE, "out_of_credit", {
+    reason: "billing error (402)",
+    reset_at: "2026-08-13T00:00:00.000Z",
+  });
+
+  const disableResult = argus.results.find((r) => (r as { action: string }).action === "disable") as {
+    laneReason?: string;
+    laneResetAt?: string;
+  };
+  assert.equal(disableResult.laneReason, "billing error (402)");
+  assert.equal(disableResult.laneResetAt, "2026-08-13T00:00:00.000Z");
+});
+
+test("threads a null-reset_at lane reason through distinctly (down for unknown reason)", async () => {
+  const argus = fakeArgus();
+  const restClient = fakeRestClient({
+    listAgents: async () => ({
+      status: "ok",
+      data: [{ id: "agent-a", workspace_id: "w", max_concurrent_tasks: 5, status: "idle", visibility: "private" }],
+    }),
+  });
+  const adapter = new MulticaControlAdapter({
+    restClient,
+    circuitBreaker: new CircuitBreaker(),
+    resolver: fakeResolver({ [LANE.lane_id]: ["agent-a"] }),
+    argus,
+  });
+
+  await adapter.reconcile(LANE, "down", { reason: "provider unreachable", reset_at: null });
+
+  const disableResult = argus.results.find((r) => (r as { action: string }).action === "disable") as {
+    laneReason?: string;
+    laneResetAt?: string;
+  };
+  assert.equal(disableResult.laneReason, "provider unreachable");
+  assert.equal(disableResult.laneResetAt, undefined, "null reset_at must not be forwarded as a defined value");
+});
+
+test("reconcile() without a context argument still works (back-compat, existing callers unaffected)", async () => {
+  const restClient = fakeRestClient({
+    listAgents: async () => ({
+      status: "ok",
+      data: [{ id: "agent-a", workspace_id: "w", max_concurrent_tasks: 5, status: "idle", visibility: "private" }],
+    }),
+  });
+  const adapter = new MulticaControlAdapter({
+    restClient,
+    circuitBreaker: new CircuitBreaker(),
+    resolver: fakeResolver({ [LANE.lane_id]: ["agent-a"] }),
+    argus: fakeArgus(),
+  });
+
+  await assert.doesNotReject(() => adapter.reconcile(LANE, "down"));
+});
+
 test("an unmapped lane (empty resolver result) reconciles as a no-op — no API calls, no crash", async () => {
   let called = false;
   const restClient = fakeRestClient({

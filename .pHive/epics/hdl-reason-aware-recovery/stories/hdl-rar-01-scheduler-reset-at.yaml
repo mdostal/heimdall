@@ -1,7 +1,7 @@
 id: hdl-rar-01-scheduler-reset-at
 epic: hdl-reason-aware-recovery
 title: InProcessScheduler retries at reset_at instead of a flat 5s interval when known
-status: pending
+status: completed
 complexity: low
 methodology: classic
 depends_on: []
