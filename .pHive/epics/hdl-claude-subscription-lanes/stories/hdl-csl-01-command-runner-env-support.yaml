@@ -1,0 +1,88 @@
+id: hdl-csl-01-command-runner-env-support
+epic: hdl-claude-subscription-lanes
+title: CommandRunner supports per-call environment variable overrides
+status: pending
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  Extends CommandRunner.run() with an optional third parameter:
+  run(command, args, options?: { env?: Record<string, string> }). When
+  provided, NodeCommandRunner passes { ...process.env, ...options.env } to
+  execFile; when omitted, behavior is byte-identical to today (execFile
+  inherits process.env as-is, matching the current implementation exactly).
+  Needed by hdl-csl-02 to scope CLAUDE_CODE_OAUTH_TOKEN to a single
+  subprocess call without touching Heimdall's own process.env or leaking
+  the token to unrelated subprocess calls (e.g. MulticaAutopilotScheduler's
+  own multica CLI invocations).
+
+acceptance_criteria:
+  - "Given CommandRunner.run(command, args) is called with no third argument, when NodeCommandRunner executes it, then behavior is byte-identical to pre-this-story -- ZERO test changes to any existing MulticaAutopilotScheduler test that calls run() with 2 args"
+  - "Given CommandRunner.run(command, args, { env: { FOO: 'bar' } }) is called, when NodeCommandRunner executes it, then the spawned subprocess sees FOO=bar in its environment, in addition to (not instead of) the parent process's existing environment variables"
+  - "Given a custom env override is passed, when the subprocess runs, then Heimdall's own process.env is provably unmodified -- the override is scoped to that one execFile call only"
+
+steps:
+  - id: implement
+    description: Add the optional third parameter to CommandRunner's interface and NodeCommandRunner's implementation
+    agent: developer
+  - id: test
+    description: Add tests for every acceptance criterion, confirming zero behavior change for the 2-arg call shape
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that this is a pure additive extension -- no existing call site's behavior changes
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/core/scheduler/command-runner.ts
+      purpose: "The file being extended -- CommandRunner interface + NodeCommandRunner's execFileAsync wrapper."
+    - path: src/core/scheduler/multica-autopilot-scheduler.ts
+      purpose: "The existing 2-arg call site that must remain unaffected -- proves the extension is backward compatible."
+
+files_to_modify:
+  - file: src/core/scheduler/command-runner.ts
+    change: "Add options?: { env?: Record<string, string> } as CommandRunner.run's third parameter; NodeCommandRunner merges it into execFile's options.env when present."
+  - file: src/core/scheduler/command-runner.test.ts
+    change: "Add tests for the new env-override behavior and the zero-change 2-arg case (create this file if it doesn't already exist -- check first)."
+
+code_examples:
+  - title: The interface and implementation being extended
+    file: src/core/scheduler/command-runner.ts
+    snippet: |
+      export interface CommandRunner {
+        run(command: string, args: string[]): Promise<CommandResult>;
+      }
+      export class NodeCommandRunner implements CommandRunner {
+        async run(command: string, args: string[]): Promise<CommandResult> {
+          const { stdout, stderr } = await execFileAsync(command, args);
+          return { stdout, stderr };
+        }
+      }
+
+design_decisions:
+  - decision: The env override is ADDITIVE (merged with process.env), not a full replacement.
+    rationale: "A full replacement would require every caller to re-specify PATH and every other variable the subprocess needs to function at all -- additive matches how execFile's own options.env behaves when you want to add one variable, and matches the principle of least surprise for the one real caller (hdl-csl-02) that needs exactly one extra variable set."
+
+risks:
+  - severity: low
+    description: None beyond the standard low-risk additive-extension class already established by manual_override/manual_reset_at/priority's precedent in this codebase.
+    mitigation: "Optional parameter, default-omitted behavior unchanged, direct test coverage for both shapes."
+
+references:
+  - path: .pHive/epics/hdl-claude-subscription-lanes/docs/design-discussion.md
+    relevant_excerpt: |
+      extend CommandRunner.run() with an optional third parameter ...
+      NodeCommandRunner passes { ...process.env, ...options.env } to
+      execFile when provided, else unchanged.

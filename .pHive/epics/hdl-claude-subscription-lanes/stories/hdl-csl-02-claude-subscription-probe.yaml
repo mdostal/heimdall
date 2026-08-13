@@ -1,0 +1,100 @@
+id: hdl-csl-02-claude-subscription-probe
+epic: hdl-claude-subscription-lanes
+title: probeClaudeLane auto-detects and dispatches to a CLI-based subscription-token check
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [hdl-csl-01-command-runner-env-support]
+
+description: |
+  Splits active-probe/claude.ts's probeClaudeLane into a credential-shape
+  dispatcher. Credentials starting with "sk-ant-oat01-" (Claude Code
+  long-lived OAuth tokens, from `claude setup-token`) route to a new
+  probeClaudeSubscriptionLane, which shells out to `claude auth status
+  --json` with CLAUDE_CODE_OAUTH_TOKEN set to the credential for that one
+  call (via hdl-csl-01's env-override support), parses { loggedIn,
+  authMethod }, and maps loggedIn:true -> up, loggedIn:false -> down, any
+  exec/parse failure -> down (never throws). Everything else (existing raw
+  API keys) routes to today's unchanged HTTP-based logic, renamed
+  probeClaudeApiKeyLane internally. No degraded/out_of_credit path for
+  subscription lanes -- auth status reveals login validity only, not
+  usage/rate-limit state; an honest, documented gap.
+
+acceptance_criteria:
+  - "Given a credential starting with 'sk-ant-oat01-', when probeClaudeLane is called, then it dispatches to the CLI-based subscription check, never the HTTP path"
+  - "Given any other credential shape (including today's existing raw API key format), when probeClaudeLane is called, then it dispatches to the unchanged HTTP path -- ZERO test changes to any existing active-probe/claude.test.ts case covering the API-key path"
+  - "Given a CommandRunner whose run() resolves with stdout containing { \"loggedIn\": true, \"authMethod\": \"oauth_token\" }, when the subscription probe runs, then it returns { status: 'up', reset_at: null, reason: null }"
+  - "Given a CommandRunner whose run() resolves with stdout containing { \"loggedIn\": false }, when the subscription probe runs, then it returns { status: 'down', reason: <mentions not logged in> }"
+  - "Given a CommandRunner whose run() rejects (CLI not found, non-zero exit), when the subscription probe runs, then it never throws -- returns { status: 'down', reason: <explanatory message> }"
+  - "Given a CommandRunner whose run() resolves with malformed/non-JSON stdout, when the subscription probe runs, then it returns { status: 'down' }, never guesses 'up'"
+  - "Given the real claude CLI and a real (test-only, injected via env at test time, never hardcoded/committed) long-lived token, when probeClaudeSubscriptionLane is exercised as a manual smoke test, then it correctly reports 'up' -- documented as a manual verification step, not a committed automated test (no real credential belongs in the test suite)"
+
+steps:
+  - id: research
+    description: Confirm the exact claude auth status --json output shape and CommandRunner's new env-override API from hdl-csl-01
+    agent: researcher
+  - id: implement
+    description: Split probeClaudeLane into the dispatcher + probeClaudeApiKeyLane (renamed, unchanged logic) + new probeClaudeSubscriptionLane
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Unit tests covering every acceptance criterion using a fake CommandRunner; confirm zero changes to existing API-key-path tests
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that no real credential ever appears in committed test fixtures, and that the dispatcher's shape-detection is the ONLY branch point (no duplicated logic between the two paths)
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch; run full local test suite + tsc build as final gate before PR
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/core/signal-sources/active-probe/claude.ts
+      purpose: "The file being split -- today's single probeClaudeLane becomes a dispatcher plus two named implementations."
+    - path: src/core/scheduler/command-runner.ts
+      purpose: "CommandRunner interface (post hdl-csl-01) -- the injectable dependency probeClaudeSubscriptionLane uses instead of node:child_process directly."
+    - path: src/core/scheduler/multica-autopilot-scheduler.ts
+      purpose: "The existing precedent for CommandRunner-based subprocess signal sourcing, including its never-throws-on-exec-failure handling."
+
+files_to_modify:
+  - file: src/core/signal-sources/active-probe/claude.ts
+    change: "Split into probeClaudeLane (dispatcher), probeClaudeApiKeyLane (renamed existing logic, unchanged), probeClaudeSubscriptionLane (new, CLI-based)."
+  - file: src/core/signal-sources/active-probe/claude.test.ts
+    change: "Add tests for the dispatcher and the new subscription-token path using a fake CommandRunner; existing API-key-path tests unchanged."
+
+code_examples:
+  - title: The never-throws exec-failure handling pattern to mirror
+    file: src/core/scheduler/multica-autopilot-scheduler.ts
+    snippet: |
+      try {
+        multicaScheduler.start();
+      } catch (err) {
+        console.error(`[multica-autopilot-scheduler] failed to register autopilot for lane ${lane.lane_id}: ${err}`);
+        // per-lane failure isolation -- one lane's bad config never crashes the whole service
+      }
+
+design_decisions:
+  - decision: "sk-ant-oat01- prefix is the sole detection signal -- no separate config flag."
+    rationale: "The token format itself is the ground truth of which auth mechanism applies; a separate flag would be redundant config that could drift out of sync with the actual credential value."
+  - decision: No real credential is ever committed to the test suite, even as a fixture.
+    rationale: "The manual smoke-test acceptance criterion is explicitly NOT a committed automated test -- matches this session's established practice of testing live systems via ad-hoc verification (isolated temp .env, SSH-fetched values never displayed) rather than embedding secrets in the repo."
+
+risks:
+  - severity: low
+    description: claude auth status --json's exact field names/shape could change across CLI versions.
+    mitigation: "Malformed/unrecognized JSON maps to down, never a silent up -- same accepted-drift posture as every external CLI/API dependency in this codebase."
+
+references:
+  - path: .pHive/epics/hdl-claude-subscription-lanes/docs/research-brief.md
+    relevant_excerpt: |
+      claude auth status --json ... {"loggedIn":true,"authMethod":"oauth_token",
+      "apiProvider":"firstParty"} ... tested locally, 2026-08-13, against the
+      hive's actual long-lived token.
