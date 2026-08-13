@@ -30,16 +30,38 @@ Promise<CommandResult>`. `NodeCommandRunner` passes `{ ...process.env, ...option
 if (credential.startsWith("sk-ant-oat01-")) return probeClaudeSubscriptionLane(credential, commandRunner);
 return probeClaudeApiKeyLane(credential, fetchImpl); // today's existing logic, renamed, unchanged
 ```
-`probeClaudeSubscriptionLane` shells out to `claude auth status --json` with
-`CLAUDE_CODE_OAUTH_TOKEN` set to the credential for that one call
-(`{ env: { CLAUDE_CODE_OAUTH_TOKEN: credential } }`), parses `{ loggedIn, authMethod }`:
-- `loggedIn: true` → `up`, `reason: null`.
-- `loggedIn: false` → `down`, `reason: "not logged in (<authMethod>)"`.
-- Exec failure (non-zero exit, `claude` CLI not found, malformed JSON) → `down`, never
-  throws — same never-throws contract every adapter in this codebase already follows.
-- No `degraded`/`out_of_credit` path — `auth status` reveals login validity only, not
-  usage/rate-limit state. Honest gap, documented, same class as Ollama's liveness-only
-  adapter.
+`probeClaudeSubscriptionLane` shells out to `claude -p "reply with the single word OK"
+--max-turns 1` with `CLAUDE_CODE_OAUTH_TOKEN` set to the credential for that one call
+(`{ env: { CLAUDE_CODE_OAUTH_TOKEN: credential } }`). The CLI's own exit code is the
+liveness signal (`execFile` already rejects on non-zero exit — no stdout parsing needed):
+- Exit 0 (a real completion succeeded) → `up`, `reason: null`.
+- Non-zero exit (auth failure, network error, anything) → `down`, `reason` carries the
+  CLI's own error text.
+
+**CORRECTION, found via live adversarial testing during implementation** (not assumed —
+verified): the originally-planned `claude auth status --json` subcommand is **not** a real
+liveness check. It reported `loggedIn: true` for an entirely fabricated, syntactically-shaped
+token, even in a fully isolated `HOME` with no keychain/cache to fall back to — it only
+inspects the token's local shape, never validates it against Anthropic's servers. A real
+minimal completion call (`claude -p ... --max-turns 1`) was verified instead: correctly
+rejects a fabricated token with a real 401 (`"Failed to authenticate. API Error: 401 OAuth
+access token is invalid."`, non-zero exit) and correctly succeeds for a genuine token —
+tested against both a fabricated token and the operator's real long-lived token, in both an
+isolated environment and a normal one with a separate real login already present (ruling out
+keychain fallback masking the result either way).
+
+**Real cost, unlike every other adapter's free check.** This is the one active-probe in the
+whole codebase that spends genuine inference — there is no free equivalent for validating a
+Claude Code OAuth token's liveness against Anthropic's servers. Kept to the smallest
+reasonable prompt and `--max-turns 1` (no tool use, no multi-turn loop) to minimize it, but
+it is not zero. Follow-up worth considering later (not built in this epic, scope
+discipline): tuning `InProcessScheduler`'s staleness thresholds specifically for
+subscription-token lanes so this real-cost check runs only as often as genuinely needed, not
+on every fine-grained suspect-lane poll tick.
+
+No `degraded`/`out_of_credit` path — a completion success/failure only reveals login
+validity, not fine-grained usage/rate-limit state. Honest gap, documented, same class as
+Ollama's liveness-only adapter.
 
 **No changes needed** to `LanePipeline`, `ProviderAdapters`, `main.ts`'s `PROVIDER_ADAPTERS`,
 or any HTTP/MCP/UI surface — `probeClaudeLane`'s signature stays
@@ -77,7 +99,8 @@ functions directly, not through the full pipeline).
 | Risk | Mitigation |
 |---|---|
 | `claude` CLI not installed/on `PATH` wherever Heimdall runs (containers, CI) | Exec failure (`ENOENT`) is caught and mapped to `down`, never a crash — same defensive posture as every network failure in every other adapter. Documented as a real, accepted runtime dependency specific to subscription-token lanes only. |
-| `claude auth status --json`'s output shape could change across CLI versions | Same accepted-drift risk class as any external CLI/API this codebase already depends on (`multica`, every provider's HTTP API); malformed/unrecognized JSON maps to `down`, never a silent `up`. |
+| The check spends real inference on every call, unlike every other adapter's free check | Kept to the smallest reasonable prompt + `--max-turns 1`; accepted as a real, documented tradeoff — there is no free way to validate this credential type against Anthropic's servers. Probe-frequency tuning flagged as a real follow-up, not built here. |
+| `claude` CLI's exact error text/exit-code behavior could change across versions | Exit code (not stdout content) is the signal — the least version-fragile part of the CLI's contract; a change here would need to be a genuine breaking change to the CLI's own error-handling convention, not a cosmetic one. |
 | Setting `CLAUDE_CODE_OAUTH_TOKEN` via subprocess env could leak into a shared process env if implemented wrong | `execFile`'s `options.env` fully scopes the variable to that one child process — never touches Heimdall's own `process.env`. Verified via `NodeCommandRunner`'s existing `execFileAsync` usage. |
 
 ## 5. Scale assessment

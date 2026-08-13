@@ -1,7 +1,7 @@
 id: hdl-csl-01-command-runner-env-support
 epic: hdl-claude-subscription-lanes
 title: CommandRunner supports per-call environment variable overrides
-status: pending
+status: completed
 complexity: low
 methodology: classic
 depends_on: []

@@ -22,38 +22,45 @@ supported") when called the way `active-probe/claude.ts` calls the raw API today
 (`x-api-key` header against `api.anthropic.com/v1/models`). This is a deliberate scoping
 by Anthropic, not a bug to route around by spoofing headers.
 
-## What actually works — confirmed live against the real token on the hive
+## What actually works — and what looked like it worked but didn't
 
-The `claude` CLI ships a dedicated, lightweight, non-interactive auth-check subcommand:
+**First candidate, REJECTED after adversarial testing**: `claude auth status --json` looked
+like exactly the right tool — a dedicated, lightweight, non-interactive auth-check
+subcommand, zero inference cost. It correctly reflected the hive's real token
+(`{"loggedIn":true,"authMethod":"oauth_token","apiProvider":"firstParty"}`) — but a
+follow-up adversarial test (an entirely fabricated, syntactically-shaped token, run in a
+fully isolated `HOME` with no keychain/cache reachable) **also** returned
+`loggedIn: true`. This subcommand only inspects the token's local shape — it never actually
+validates it against Anthropic's servers. Would have shipped a probe that always reports
+"up" regardless of whether the credential is real, expired, or revoked — worse than no
+check at all. Caught before merge by deliberately testing the failure case, not just the
+success case.
 
+**What actually validates the token — confirmed live, both directions**: a real minimal
+completion call.
 ```
-claude auth status --json
+claude -p "reply with the single word OK" --max-turns 1
 ```
+- Fabricated token, isolated environment: `Failed to authenticate. API Error: 401 OAuth
+  access token is invalid.` (exit 1).
+- Fabricated token, normal environment (a separate real `claude.ai` login present, ruling
+  out silent fallback): same 401, same exit 1 — the explicit `CLAUDE_CODE_OAUTH_TOKEN`
+  override correctly takes precedence.
+- The hive's real long-lived token, and the operator's own real token supplied directly:
+  both returned a genuine completion (`OK`, exit 0) in every environment tested.
 
-Tested locally (2026-08-13) two ways:
-1. **This machine's own logged-in session** (`claude.ai` OAuth, no token override):
-   ```
-   {"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"...",
-    "orgId":"...","orgName":"...","subscriptionType":"max"}
-   ```
-2. **The hive's actual `CLAUDE_CODE_OAUTH_TOKEN`**, passed via env override in an isolated
-   subprocess (`env -i ... CLAUDE_CODE_OAUTH_TOKEN=<token> claude auth status --json`):
-   ```
-   {"loggedIn":true,"authMethod":"oauth_token","apiProvider":"firstParty"}
-   ```
+The CLI's exit code is the liveness signal — `execFile` (via `CommandRunner`) already
+rejects on non-zero exit, so no stdout parsing is needed for either outcome.
 
-Confirms: `claude auth status --json` correctly reflects the SPECIFIC token passed via env
-var (not just whatever's locally logged in), returns clean structured JSON, costs zero
-inference tokens — exactly the "minimal-cost real call" principle every other active-probe
-adapter in this codebase already follows, just via CLI subprocess instead of HTTP.
-`authMethod` distinguishes `"claude.ai"` (interactive session) from `"oauth_token"`
-(a `CLAUDE_CODE_OAUTH_TOKEN`-style long-lived token) — useful for the `reason` field on a
-resolved probe result.
+**Real cost, not zero**: unlike `auth status`, this call spends genuine inference (a tiny
+amount — one short reply, `--max-turns 1`, no tool use). There is no free way to validate
+a Claude Code OAuth token's liveness against Anthropic's servers; this is the one
+active-probe in the codebase where "minimal-cost" means "small but non-zero," not "free."
 
-**Gap, honestly accepted**: `auth status` reveals login validity only, not usage/rate-limit
-state — no `degraded`/`out_of_credit` signal is available from this check alone. Same
-"no path" honesty already established for Ollama's liveness-only adapter — up/down only for
-this credential type, not a full severity ladder.
+**Gap, honestly accepted**: a completion success/failure reveals login validity only, not
+fine-grained usage/rate-limit state — no `degraded`/`out_of_credit` signal available from
+this check alone. Same "no path" honesty already established for Ollama's liveness-only
+adapter — up/down only for this credential type, not a full severity ladder.
 
 **New runtime dependency, worth noting**: subscription-token lanes require the `claude` CLI
 binary to be present and on `PATH` wherever Heimdall runs. Pure API-key lanes have no such
@@ -86,5 +93,5 @@ configuration — an operator just pastes whichever kind of token they have into
 ## Sources
 
 - [claude-code-action setup docs](https://github.com/anthropics/claude-code-action/blob/main/docs/setup.md) — `CLAUDE_CODE_OAUTH_TOKEN` / `claude setup-token` confirmation.
-- Live local testing, 2026-08-13: `claude auth status --json` against both a real interactive session and the hive's actual long-lived token (fetched over SSH, never displayed in full — only prefix/length checked).
+- Live local testing, 2026-08-13: `claude auth status --json` (rejected — false positive on a fabricated token) and `claude -p "..." --max-turns 1` (confirmed correct) against a fabricated token, the hive's actual long-lived token (fetched over SSH, never displayed in full — only prefix/length checked), and the operator's own real token (supplied directly, never echoed back).
 - `src/core/scheduler/command-runner.ts` / `src/core/scheduler/multica-autopilot-scheduler.ts` — the existing subprocess-injection pattern this epic extends.

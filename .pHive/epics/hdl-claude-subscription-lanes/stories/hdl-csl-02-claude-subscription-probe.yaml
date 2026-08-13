@@ -1,7 +1,7 @@
 id: hdl-csl-02-claude-subscription-probe
 epic: hdl-claude-subscription-lanes
 title: probeClaudeLane auto-detects and dispatches to a CLI-based subscription-token check
-status: pending
+status: completed
 complexity: medium
 methodology: classic
 depends_on: [hdl-csl-01-command-runner-env-support]
@@ -10,24 +10,34 @@ description: |
   Splits active-probe/claude.ts's probeClaudeLane into a credential-shape
   dispatcher. Credentials starting with "sk-ant-oat01-" (Claude Code
   long-lived OAuth tokens, from `claude setup-token`) route to a new
-  probeClaudeSubscriptionLane, which shells out to `claude auth status
-  --json` with CLAUDE_CODE_OAUTH_TOKEN set to the credential for that one
-  call (via hdl-csl-01's env-override support), parses { loggedIn,
-  authMethod }, and maps loggedIn:true -> up, loggedIn:false -> down, any
-  exec/parse failure -> down (never throws). Everything else (existing raw
-  API keys) routes to today's unchanged HTTP-based logic, renamed
+  probeClaudeSubscriptionLane, which shells out to `claude -p "reply with
+  the single word OK" --max-turns 1` with CLAUDE_CODE_OAUTH_TOKEN set to
+  the credential for that one call (via hdl-csl-01's env-override support).
+  The CLI's own exit code IS the liveness signal (execFile already rejects
+  on non-zero exit) -- no stdout parsing needed. Everything else (existing
+  raw API keys) routes to today's unchanged HTTP-based logic, renamed
   probeClaudeApiKeyLane internally. No degraded/out_of_credit path for
-  subscription lanes -- auth status reveals login validity only, not
-  usage/rate-limit state; an honest, documented gap.
+  subscription lanes -- a completion success/failure reveals login validity
+  only, not usage/rate-limit state; an honest, documented gap.
+
+  CORRECTION during implementation (live adversarial testing, not assumed):
+  the originally-planned `claude auth status --json` subcommand was
+  REJECTED after testing -- it reported loggedIn:true for an entirely
+  fabricated token even in a fully isolated environment with no
+  keychain/cache to fall back to. It only inspects the token's local shape,
+  never validates it against Anthropic's servers. The real completion-based
+  check above was verified instead: correctly rejects a fabricated token
+  with a genuine 401 and correctly succeeds for a real token, in both
+  isolated and normal environments. See research-brief.md's correction
+  note. This IS the one active-probe in the codebase that spends real,
+  non-zero inference -- accepted, documented tradeoff, not an oversight.
 
 acceptance_criteria:
   - "Given a credential starting with 'sk-ant-oat01-', when probeClaudeLane is called, then it dispatches to the CLI-based subscription check, never the HTTP path"
   - "Given any other credential shape (including today's existing raw API key format), when probeClaudeLane is called, then it dispatches to the unchanged HTTP path -- ZERO test changes to any existing active-probe/claude.test.ts case covering the API-key path"
-  - "Given a CommandRunner whose run() resolves with stdout containing { \"loggedIn\": true, \"authMethod\": \"oauth_token\" }, when the subscription probe runs, then it returns { status: 'up', reset_at: null, reason: null }"
-  - "Given a CommandRunner whose run() resolves with stdout containing { \"loggedIn\": false }, when the subscription probe runs, then it returns { status: 'down', reason: <mentions not logged in> }"
-  - "Given a CommandRunner whose run() rejects (CLI not found, non-zero exit), when the subscription probe runs, then it never throws -- returns { status: 'down', reason: <explanatory message> }"
-  - "Given a CommandRunner whose run() resolves with malformed/non-JSON stdout, when the subscription probe runs, then it returns { status: 'down' }, never guesses 'up'"
-  - "Given the real claude CLI and a real (test-only, injected via env at test time, never hardcoded/committed) long-lived token, when probeClaudeSubscriptionLane is exercised as a manual smoke test, then it correctly reports 'up' -- documented as a manual verification step, not a committed automated test (no real credential belongs in the test suite)"
+  - "Given a CommandRunner whose run() resolves (the CLI exited 0, a real completion succeeded), when the subscription probe runs, then it returns { status: 'up', reset_at: null, reason: null }"
+  - "Given a CommandRunner whose run() rejects (invalid token -> real non-zero exit, or CLI not found), when the subscription probe runs, then it never throws -- returns { status: 'down', reason: <the CLI's own error text> }"
+  - "Given the real claude CLI and a real (test-only, injected via env at verification time, never hardcoded/committed) long-lived token, when probeClaudeSubscriptionLane is exercised as a manual smoke test, then it correctly reports 'up' for a genuine token and 'down' for a fabricated one -- documented as a manual verification step, not a committed automated test (no real credential belongs in the test suite)"
 
 steps:
   - id: research
@@ -89,12 +99,12 @@ design_decisions:
 
 risks:
   - severity: low
-    description: claude auth status --json's exact field names/shape could change across CLI versions.
-    mitigation: "Malformed/unrecognized JSON maps to down, never a silent up -- same accepted-drift posture as every external CLI/API dependency in this codebase."
+    description: The check spends real, non-zero inference on every call, unlike every other adapter's free check.
+    mitigation: "Smallest reasonable prompt + --max-turns 1 (no tool use, no multi-turn loop); accepted as a real, documented tradeoff -- there is no free way to validate this credential type against Anthropic's servers. Probe-frequency tuning for subscription lanes specifically is flagged as a real follow-up, not built in this story."
 
 references:
   - path: .pHive/epics/hdl-claude-subscription-lanes/docs/research-brief.md
     relevant_excerpt: |
-      claude auth status --json ... {"loggedIn":true,"authMethod":"oauth_token",
-      "apiProvider":"firstParty"} ... tested locally, 2026-08-13, against the
-      hive's actual long-lived token.
+      claude auth status --json ... REJECTED after adversarial testing ...
+      claude -p "reply with the single word OK" --max-turns 1 ... confirmed
+      live, both directions, 2026-08-13.
