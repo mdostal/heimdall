@@ -1,0 +1,93 @@
+id: hdl-or-04-lane-priority-override
+epic: hdl-openrouter-signals
+title: Optional per-lane priority override — operator-ranked routes, not lane_id-accident
+status: pending
+complexity: low
+methodology: classic
+depends_on: [hdl-or-02-wire-openrouter-provider]
+
+description: |
+  Closes the one confirmed "judging" gap from research-brief.md:
+  priority-strategy.ts's RUNTIME_PRIORITY is keyed by provider only, so
+  every OpenRouter route ties for rank within a task type and falls back to
+  lane_id-alphabetical -- an accident of naming, not operator intent. Adds
+  an optional HEIMDALL_LANE_<N>_PRIORITY=<int> declaration (lane-registry.ts:
+  parsed alongside the existing HEIMDALL_LANE_<N>_* fields, optional
+  `priority?: number` on LaneDeclaration/Lane). When set, priority-strategy.ts
+  uses it directly as the lane's sort key INSTEAD of runtimeRank's
+  table-driven value for that lane -- mirrors manual_override's
+  override-wins-outright shape exactly: unset is byte-identical to today,
+  set replaces the sensed/table-driven value outright rather than blending
+  with it. Lower number = higher priority (rank 0 already means
+  "first choice" in the existing runtimeRank scale, so this stays
+  consistent rather than inverting the direction).
+
+acceptance_criteria:
+  - "Given two lanes with provider 'openrouter' and no HEIMDALL_LANE_<N>_PRIORITY set on either, when getAvailableRoute ranks them, then behavior is byte-identical to pre-this-story (tie, lane_id-alphabetical tie-break) -- ZERO test changes to any existing priority-strategy test"
+  - "Given two openrouter lanes, one with HEIMDALL_LANE_<N>_PRIORITY=1 and the other with no priority set, when getAvailableRoute ranks them, then the explicit-priority lane is preferred over the unset one for every task type"
+  - "Given two lanes both with explicit HEIMDALL_LANE_<N>_PRIORITY set, when getAvailableRoute ranks them, then the lower numeric value wins, with lane_id-alphabetical as the final tie-break if the values are equal"
+  - "Given a lane with an explicit priority LOWER than a ranked provider's table value (e.g. priority=0 competing against claude's own rank-0 entry for 'planning'), when getAvailableRoute ranks them, then the explicit priority is compared directly against the table-driven rank on the same numeric scale, with lane_id as the tie-break on equal values -- documented as an accepted, intentional cross-scale comparison, not a bug"
+  - "Given HEIMDALL_LANE_<N>_PRIORITY is present but not a valid non-negative integer, when the lane is loaded, then it is treated as unset (falls back to table-driven ranking) rather than crashing lane loading for the whole service"
+  - "Given a lane has an active priority override, when the dashboard renders it, then the override is visibly indicated -- never a silent behavior change an operator can't see"
+
+steps:
+  - id: research
+    description: Confirm loadLaneDeclarations's exact parsing loop and priority-strategy.ts's runtimeRank/sort implementation before implementing
+    agent: researcher
+  - id: implement
+    description: Add optional priority parsing to lane-registry.ts and consume it in priority-strategy.ts's ranking; surface it on the dashboard
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Add tests for every acceptance criterion; confirm all existing priority-strategy/route-selector tests pass with zero changes for the unset case
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review specifically that the unset-priority path is provably unchanged (the zero-test-change acceptance gate), matching the discipline already established for manual_override and manual_reset_at
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch; run full local test suite + tsc build as final gate before PR
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/core/lane-registry.ts
+      purpose: "loadLaneDeclarations's HEIMDALL_LANE_<N>_* parsing loop -- gains an optional priority field, same defensive-parse posture as the rest of the loop."
+    - path: src/core/routing-strategies/priority-strategy.ts
+      purpose: "runtimeRank + the sort comparator -- gains the override-wins-outright check for lane.priority before falling back to the table-driven rank."
+    - path: src/core/actuation/multica-control-adapter.ts
+      purpose: "The override-wins-outright precedence formula this story's semantics mirror (an explicit value replaces the computed one outright, rather than blending)."
+
+files_to_modify:
+  - file: src/core/lane-registry.ts
+    change: "Parse optional HEIMDALL_LANE_<N>_PRIORITY into LaneDeclaration/Lane's new optional priority?: number field; invalid values fall back to unset rather than throwing."
+  - file: src/core/routing-strategies/priority-strategy.ts
+    change: "runtimeRank (or a new small wrapper) checks lane.priority first, using it directly as the sort key when present, before falling back to the table-driven RUNTIME_PRIORITY lookup."
+  - file: src/api/ui/dashboard.ts
+    change: "Show a small priority badge/indicator on any lane with an explicit priority override set."
+
+design_decisions:
+  - decision: An explicit lane priority applies across ALL task types uniformly, not per-task-type.
+    rationale: "Per-task-type override would need a new declaration shape (one value per task type) for a need that hasn't been demonstrated yet -- a single override value is the minimal change that satisfies 'control what routes it gets', consistent with this codebase's repeated preference for the smallest change that closes a confirmed gap."
+  - decision: Priority is compared on the SAME numeric scale runtimeRank already produces (0..table-length), not a separate namespace.
+    rationale: "Avoids introducing a second ranking scale and a normalization step between them -- an operator setting priority=0 is knowingly competing directly with the highest table-ranked providers, which is exactly the intent of 'control what routes it gets'."
+
+risks:
+  - severity: low
+    description: An operator could set priority values that produce confusing results if they don't understand the underlying 0..N table scale.
+    mitigation: "Dashboard badge makes any active override visible; documented in-file with the exact scale semantics."
+
+references:
+  - path: .pHive/epics/hdl-openrouter-signals/docs/design-discussion.md
+    relevant_excerpt: |
+      Adds an optional HEIMDALL_LANE_<N>_PRIORITY=<int> declaration (mirrors
+      manual_override's override-wins-outright shape): when set, it replaces
+      runtimeRank's output for that lane entirely; when unset, ranking is
+      byte-identical to today.

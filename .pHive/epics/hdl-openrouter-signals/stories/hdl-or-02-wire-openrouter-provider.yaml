@@ -1,0 +1,86 @@
+id: hdl-or-02-wire-openrouter-provider
+epic: hdl-openrouter-signals
+title: Wire OpenRouter into lane-pipeline + main.ts, prove shared-credential nesting end-to-end
+status: pending
+complexity: low
+methodology: classic
+depends_on: [hdl-or-01-active-probe-openrouter]
+
+description: |
+  Wires hdl-or-01's adapter into the single real dispatch point
+  (openrouterAdapters() in lane-pipeline.ts, one PROVIDER_ADAPTERS line in
+  main.ts). Since public-status/openrouter.ts doesn't exist (hdl-or-01's
+  documented scope decision), checkPublicStatus is a trivial function
+  returning { status: "up", reason: null } unconditionally -- honest about
+  there being no real public-status signal to check, rather than omitting
+  the field or fabricating a check. This story's real payload is the
+  end-to-end test: TWO lanes declared with the SAME credential_ref and
+  different model values must each get fully independent pipelines,
+  schedulers, status rows, and override state -- the concrete proof that
+  "gateway with nested routes" already works with the existing lane_id-keyed
+  architecture, not just a claim in the design doc.
+
+acceptance_criteria:
+  - "Given two lanes declared with HEIMDALL_LANE_N_PROVIDER=openrouter sharing the same HEIMDALL_LANE_N_CREDENTIAL_REF but different HEIMDALL_LANE_N_MODEL, when composeService() runs, then BOTH get independent LanePipeline + MulticaAutopilotScheduler + InProcessScheduler instances"
+  - "Given the same two lanes, when one lane's manual_override is set to disabled and the other's is left unset, then GET /available-route candidacy reflects each lane's OWN override state independently -- disabling one openrouter route does not affect its sibling"
+  - "Given the same two lanes, when each InProcessScheduler.poll() is exercised, then each records its OWN status row in the state store keyed by its own lane_id -- proves the shared credential does not cause the two routes' state to collide"
+  - "Every existing main.test.ts case passes with ZERO test changes to prior cases"
+  - "npm run build (tsc) is clean and npm test passes in full after this story"
+
+steps:
+  - id: research
+    description: Confirm the PROVIDER_ADAPTERS registry shape and the exact two-lanes-one-credential test pattern needed
+    agent: researcher
+  - id: implement
+    description: Add openrouterAdapters() to lane-pipeline.ts (with a stub always-up checkPublicStatus) and the openrouter entry to PROVIDER_ADAPTERS in main.ts
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Add the two-lanes-one-credential end-to-end test to main.test.ts, covering independent pipelines, independent override, and independent status recording
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that this story's test is the real proof of the "nesting already works" claim in the design doc, not just a copy of the single-lane wiring tests from prior provider epics
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch; run full local test suite + tsc build as final gate before PR
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/main.ts
+      purpose: "PROVIDER_ADAPTERS registry -- becomes a 5-entry map (claude, codex, gemini, kimi, openrouter)."
+    - path: src/core/lane-pipeline.ts
+      purpose: "claudeAdapters/codexAdapters/geminiAdapters/kimiAdapters -- the exact factory shape openrouterAdapters() mirrors, except checkPublicStatus is a trivial always-up stub."
+
+files_to_modify:
+  - file: src/core/lane-pipeline.ts
+    change: "Add openrouterAdapters(): ProviderAdapters, importing probeOpenRouterLane; checkPublicStatus is an inline always-up function, documented as intentional (no real feed exists)."
+  - file: src/main.ts
+    change: "Add `openrouter: openrouterAdapters` to PROVIDER_ADAPTERS."
+  - file: src/main.test.ts
+    change: "Add the two-lanes-one-credential end-to-end nesting test."
+
+design_decisions:
+  - decision: checkPublicStatus for OpenRouter is a trivial always-up stub, not omitted from ProviderAdapters.
+    rationale: "ProviderAdapters requires both functions (route-selector.ts's resolution pipeline calls checkPublicStatus unconditionally) -- an honest always-up stub, clearly commented as 'no real feed exists', is more truthful than making the field optional and adding a special-case branch elsewhere just for this one provider."
+
+risks:
+  - severity: low
+    description: A typo in the one-line registry addition would silently fall through to the existing 'unknown provider skipped' path.
+    mitigation: "The story's own end-to-end test asserts real pipelines get created for both lanes."
+
+references:
+  - path: .pHive/epics/hdl-openrouter-signals/docs/design-discussion.md
+    relevant_excerpt: |
+      proven with an end-to-end test that's the actual "nesting" proof: two
+      lanes declared with the same credential_ref, different model, each
+      independently getting a real pipeline/scheduler and independently
+      recording status/override.
