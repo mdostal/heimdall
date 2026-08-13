@@ -1,5 +1,6 @@
 import type { LaneRegistry } from "./lane-registry.js";
 import type { StateStore } from "./state-store.js";
+import { createRoutingStrategyRegistry, DEFAULT_ROUTING_STRATEGY_NAME } from "./routing-strategies/registry.js";
 
 export const TASK_TYPES = ["planning", "build", "review"] as const;
 
@@ -14,19 +15,31 @@ export interface AvailableRoute {
   headroom: true;
 }
 
-const RUNTIME_PRIORITY: Record<TaskType, readonly string[]> = {
-  planning: ["claude", "gemini", "codex", "kimi"],
-  build: ["codex", "claude", "gemini", "kimi"],
-  review: ["claude", "codex", "gemini", "kimi"],
-};
+// hdl-rs-02: one module-level registry, created once for the process
+// lifetime — matters specifically for RoundRobinStrategy, whose rotation
+// state must persist ACROSS requests to actually rotate (a fresh registry
+// per call would reset the cursor every time). Mirrors RUNTIME_PRIORITY's
+// own pre-hdl-rs-02 module-level-const lifetime.
+const routingStrategies = createRoutingStrategyRegistry();
+
+// hdl-rs-03: the settings key the active strategy is persisted under, and
+// the read-side resolution (default when unset) — the write side
+// (validating + persisting an operator-chosen name) lives in
+// http-server.ts's setRoutingStrategy, alongside the other shared mutation
+// functions (setLaneOverride/setLaneResetAt/addLane).
+export const ROUTING_STRATEGY_SETTING_KEY = "routing_strategy";
+
+export function getRoutingStrategyNames(): string[] {
+  return Object.keys(routingStrategies);
+}
+
+export function getActiveRoutingStrategyName(store: StateStore): string {
+  const stored = store.getSetting(ROUTING_STRATEGY_SETTING_KEY);
+  return stored && routingStrategies[stored] ? stored : DEFAULT_ROUTING_STRATEGY_NAME;
+}
 
 export function parseTaskType(value: string | null): TaskType | null {
   return TASK_TYPES.find((taskType) => taskType === value) ?? null;
-}
-
-function runtimeRank(taskType: TaskType, runtime: string): number {
-  const rank = RUNTIME_PRIORITY[taskType].indexOf(runtime);
-  return rank === -1 ? RUNTIME_PRIORITY[taskType].length : rank;
 }
 
 export function getAvailableRoute(
@@ -46,13 +59,20 @@ export function getAvailableRoute(
   const candidates = registry
     .list()
     .filter((lane) => lane.credential !== null)
-    .filter((lane) => statuses.get(lane.lane_id)?.status === "up")
-    .sort((a, b) => {
-      const runtimeDelta = runtimeRank(taskType, a.provider) - runtimeRank(taskType, b.provider);
-      return runtimeDelta === 0 ? a.lane_id.localeCompare(b.lane_id) : runtimeDelta;
+    .filter((lane) => {
+      // hdl-rs-01: manual_override gates routing candidacy the SAME way it
+      // already gates Multica actuation (MulticaControlAdapter.reconcile) —
+      // "disabled" blocks a lane from being routed to no matter its sensed
+      // status; "enabled" forces it in even if sensed status isn't "up";
+      // unset (null) is byte-identical to pre-hdl-rs-01 behavior.
+      const override = store.getManualOverride(lane.lane_id);
+      if (override === "disabled") return false;
+      if (override === "enabled") return true;
+      return statuses.get(lane.lane_id)?.status === "up";
     });
 
-  const lane = candidates[0];
+  const strategy = routingStrategies[getActiveRoutingStrategyName(store)];
+  const lane = strategy.selectRoute(taskType, candidates);
   if (!lane) return null;
 
   return {

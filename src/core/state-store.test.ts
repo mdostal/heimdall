@@ -322,3 +322,29 @@ test("a StateStore opened against a DB file created before manual_reset_at exist
     fs.rmSync(dbPath, { force: true });
   }
 });
+
+test("hdl-rs-03: getSetting returns null for a key that was never set", () => {
+  const store = new StateStore(":memory:");
+  assert.equal(store.getSetting("routing_strategy"), null);
+  store.close();
+});
+
+test("hdl-rs-03: setSetting persists and getSetting reads it back, including overwriting an existing value", () => {
+  const store = new StateStore(":memory:");
+  store.setSetting("routing_strategy", "round-robin");
+  assert.equal(store.getSetting("routing_strategy"), "round-robin");
+
+  store.setSetting("routing_strategy", "off");
+  assert.equal(store.getSetting("routing_strategy"), "off");
+  store.close();
+});
+
+test("hdl-rs-03: settings is a generic table — independent keys don't collide", () => {
+  const store = new StateStore(":memory:");
+  store.setSetting("routing_strategy", "priority");
+  store.setSetting("some_other_future_setting", "value-x");
+
+  assert.equal(store.getSetting("routing_strategy"), "priority");
+  assert.equal(store.getSetting("some_other_future_setting"), "value-x");
+  store.close();
+});

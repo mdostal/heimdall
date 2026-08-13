@@ -1,7 +1,7 @@
 id: hdl-rs-01-override-gates-routing
 epic: hdl-routing-strategies
 title: manual_override gates /available-route candidacy (block usage, direct it around)
-status: pending
+status: completed
 complexity: low
 methodology: classic
 depends_on: []

@@ -1,7 +1,7 @@
 id: hdl-rs-02-routing-strategy-interface
 epic: hdl-routing-strategies
 title: Compartmentalized RoutingStrategy interface — priority, round-robin, off
-status: pending
+status: completed
 complexity: medium
 methodology: classic
 depends_on: [hdl-rs-01-override-gates-routing]

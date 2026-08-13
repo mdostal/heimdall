@@ -7,7 +7,13 @@
 import { createServer, type Server } from "node:http";
 import { EnvCredentialSource } from "../core/credential-source.js";
 import { loadLaneDeclarations, LaneRegistry } from "../core/lane-registry.js";
-import { getAvailableRoute, parseTaskType } from "../core/route-selector.js";
+import {
+  getAvailableRoute,
+  parseTaskType,
+  getActiveRoutingStrategyName,
+  getRoutingStrategyNames,
+  ROUTING_STRATEGY_SETTING_KEY,
+} from "../core/route-selector.js";
 import { StateStore, type ManualOverride } from "../core/state-store.js";
 import type { LaneStatus } from "../core/status-model.js";
 import { renderDashboardHtml } from "./ui/dashboard.js";
@@ -156,6 +162,19 @@ export function addLane(
   };
 }
 
+export type SetRoutingStrategyResult =
+  | { ok: true; active: string }
+  | { ok: false; error: "invalid_strategy"; allowed_strategies: string[] };
+
+export function setRoutingStrategy(store: StateStore, rawName: unknown): SetRoutingStrategyResult {
+  const allowedStrategies = getRoutingStrategyNames();
+  if (typeof rawName !== "string" || !allowedStrategies.includes(rawName)) {
+    return { ok: false, error: "invalid_strategy", allowed_strategies: allowedStrategies };
+  }
+  store.setSetting(ROUTING_STRATEGY_SETTING_KEY, rawName);
+  return { ok: true, active: rawName };
+}
+
 export function buildLaneRegistry(env: NodeJS.ProcessEnv = process.env): LaneRegistry {
   return new LaneRegistry(loadLaneDeclarations(env), new EnvCredentialSource(env));
 }
@@ -275,6 +294,42 @@ export function createHttpServer(
 
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(route));
+      return;
+    }
+
+    // hdl-rs-03: which strategy /available-route delegates ranking/picking
+    // to (priority | round-robin | off — see src/core/routing-strategies/).
+    // A global setting, not per-lane — unset defaults to "priority",
+    // byte-identical to every caller that never touches this route.
+    if (req.method === "GET" && req.url === "/routing-strategy") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          active: getActiveRoutingStrategyName(store),
+          available: getRoutingStrategyNames(),
+        }),
+      );
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/routing-strategy") {
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+        const result = setRoutingStrategy(store, (body.data as { strategy?: unknown }).strategy);
+        if (!result.ok) {
+          const { ok: _ok, ...wire } = result;
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify(wire));
+          return;
+        }
+        const { ok: _ok, ...wire } = result;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(wire));
+      });
       return;
     }
 

@@ -1,7 +1,7 @@
 id: hdl-rs-03-settings-persistence-http
 epic: hdl-routing-strategies
 title: Global settings table + GET/POST /routing-strategy
-status: pending
+status: completed
 complexity: medium
 methodology: classic
 depends_on: [hdl-rs-02-routing-strategy-interface]

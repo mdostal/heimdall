@@ -111,7 +111,7 @@ export function renderDashboardHtml(): string {
     margin-bottom: 0.5rem;
     flex-wrap: wrap;
   }
-  .panel input {
+  .panel input, .panel select {
     flex: 1 1 140px;
     padding: 0.4rem 0.5rem;
     font-size: 0.85rem;
@@ -120,7 +120,10 @@ export function renderDashboardHtml(): string {
     background: transparent;
     color: inherit;
   }
-  .panel button[type="submit"] {
+  .panel select {
+    flex: 0 1 220px;
+  }
+  .panel button[type="submit"], .panel button[type="button"] {
     padding: 0.4rem 1rem;
     font-size: 0.85rem;
     border: 1px solid currentColor;
@@ -128,7 +131,9 @@ export function renderDashboardHtml(): string {
     background: transparent;
     color: inherit;
     cursor: pointer;
+    flex: 0 0 auto;
   }
+  .strategy-status { font-size: 0.85rem; color: #888; margin-bottom: 0.6rem; }
   .banner {
     margin-top: 0.75rem;
     padding: 0.6rem 0.8rem;
@@ -148,6 +153,16 @@ export function renderDashboardHtml(): string {
 <body>
   <h1>Heimdall — Lane Status</h1>
   <div class="subtitle">Polls <code>GET /lanes</code> every 5s · manual overrides route through the same ControlAdapter Heimdall already uses for automatic sensing</div>
+
+  <div class="panel">
+    <h2>Routing strategy</h2>
+    <div id="routing-strategy-status">Loading…</div>
+    <div class="row">
+      <select id="routing-strategy-select"></select>
+      <button type="button" id="routing-strategy-save">Save</button>
+    </div>
+    <div id="routing-strategy-banner"></div>
+  </div>
 
   <div class="panel">
     <h2>Add lane</h2>
@@ -381,6 +396,60 @@ export function renderDashboardHtml(): string {
       });
   });
 
+  // Routing strategy settings panel — loaded once on page load and again
+  // after a save, not on the 5s lane-status poll: this is a config control,
+  // not a live status row, and re-rendering the <select> under an
+  // operator's cursor every 5s would be actively annoying.
+  function renderRoutingStrategyStatus(active) {
+    var status = document.getElementById("routing-strategy-status");
+    if (active === "off") {
+      status.innerHTML =
+        "<div class=\\"strategy-status\\">Active: <strong>off</strong> — GET /available-route will return no_available_route for every request. Heimdall reports lane status; the caller decides.</div>";
+    } else {
+      status.innerHTML = "<div class=\\"strategy-status\\">Active: <strong>" + escapeHtml(active) + "</strong></div>";
+    }
+  }
+
+  function loadRoutingStrategy() {
+    fetch("/routing-strategy")
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        renderRoutingStrategyStatus(data.active);
+        var select = document.getElementById("routing-strategy-select");
+        select.innerHTML = data.available
+          .map(function (name) {
+            var selected = name === data.active ? " selected" : "";
+            return "<option value=\\"" + escapeHtml(name) + "\\"" + selected + ">" + escapeHtml(name) + "</option>";
+          })
+          .join("");
+      });
+  }
+
+  document.getElementById("routing-strategy-save").addEventListener("click", function () {
+    var select = document.getElementById("routing-strategy-select");
+    var banner = document.getElementById("routing-strategy-banner");
+    banner.innerHTML = "";
+    fetch("/routing-strategy", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ strategy: select.value })
+    })
+      .then(function (res) {
+        return res.json().then(function (body) { return { status: res.status, body: body }; });
+      })
+      .then(function (result) {
+        if (result.status === 200) {
+          renderRoutingStrategyStatus(result.body.active);
+        } else {
+          banner.innerHTML = "<div class=\\"banner banner-error\\">" + escapeHtml(result.body.error || "set_routing_strategy_failed") + "</div>";
+        }
+      })
+      .catch(function (err) {
+        banner.innerHTML = "<div class=\\"banner banner-error\\">" + escapeHtml(err) + "</div>";
+      });
+  });
+
+  loadRoutingStrategy();
   poll();
   setInterval(poll, 5000);
 })();

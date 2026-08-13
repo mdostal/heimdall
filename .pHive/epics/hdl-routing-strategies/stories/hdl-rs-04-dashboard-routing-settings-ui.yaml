@@ -1,7 +1,7 @@
 id: hdl-rs-04-dashboard-routing-settings-ui
 epic: hdl-routing-strategies
 title: Dashboard — simple routing-strategy settings panel
-status: pending
+status: completed
 complexity: low
 methodology: classic
 depends_on: [hdl-rs-03-settings-persistence-http]
