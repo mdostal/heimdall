@@ -26,6 +26,8 @@ import { checkCodexPublicStatus } from "./signal-sources/public-status/codex.js"
 import { probeCodexLane } from "./signal-sources/active-probe/codex.js";
 import { checkGeminiPublicStatus } from "./signal-sources/public-status/gemini.js";
 import { probeGeminiLane } from "./signal-sources/active-probe/gemini.js";
+import { checkKimiPublicStatus } from "./signal-sources/public-status/kimi.js";
+import { probeKimiLane } from "./signal-sources/active-probe/kimi.js";
 import {
   decideSignalSource,
   resolveWithCorroboration,
@@ -68,6 +70,10 @@ export function codexAdapters(): ProviderAdapters {
 
 export function geminiAdapters(): ProviderAdapters {
   return { checkPublicStatus: checkGeminiPublicStatus, probe: probeGeminiLane };
+}
+
+export function kimiAdapters(): ProviderAdapters {
+  return { checkPublicStatus: checkKimiPublicStatus, probe: probeKimiLane };
 }
 
 /**

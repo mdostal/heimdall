@@ -142,6 +142,45 @@ test("a gemini-provider lane gets a real pipeline + schedulers wired up, resolvi
   service.stopAll();
 });
 
+test("a kimi-provider lane gets a real pipeline + schedulers wired up, resolving end-to-end", async () => {
+  const env = testEnv();
+  env.HEIMDALL_LANE_3_ID = "kimi@mathew.dostal";
+  env.HEIMDALL_LANE_3_PROVIDER = "kimi";
+  env.HEIMDALL_LANE_3_CREDENTIAL_REF = "KIMI_TOKEN";
+  env.KIMI_TOKEN = "fake-kimi-key";
+
+  const service = composeService({
+    env,
+    commandRunner: mockCommandRunner(),
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port: 0,
+  });
+
+  assert.equal(service.multicaSchedulers.length, 3);
+  assert.equal(service.inProcessSchedulers.length, 3);
+  assert.equal(service.pipelines.size, 3);
+
+  service.store.recordStatus({
+    lane_id: "kimi@mathew.dostal",
+    status: "degraded",
+    reset_at: null,
+    reason: "seeded for test",
+    signal_source: "active_probe",
+    observed_at: "2026-08-13T14:00:00.000Z",
+  });
+
+  const kimiSchedulerIndex = 2;
+  await service.inProcessSchedulers[kimiSchedulerIndex].poll();
+
+  // Fresh status recorded by the real refresh() call, driven through
+  // probeKimiLane/checkKimiPublicStatus — not a stub.
+  const current = service.store.getCurrentStatus("kimi@mathew.dostal");
+  assert.equal(current?.status, "up");
+
+  service.stopAll();
+});
+
 test("unknown provider is skipped gracefully — no pipeline/scheduler crash for the whole service", () => {
   const env = testEnv();
   env.HEIMDALL_LANE_3_ID = "some-new-provider-lane";
