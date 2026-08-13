@@ -37,6 +37,8 @@ export interface ArgusEmitter {
     laneReason?: string;
     /** When the lane is expected to recover, if known — hdl-rar-02. */
     laneResetAt?: string;
+    /** True when this action's block/allow decision was driven by a manual override rather than the sensed status — hdl-lo-01. */
+    overrideActive?: boolean;
   }): void;
 }
 
@@ -91,6 +93,7 @@ export class ArgusClient implements ArgusEmitter {
     reason?: string;
     laneReason?: string;
     laneResetAt?: string;
+    overrideActive?: boolean;
   }): void {
     this.safeEmit("heimdall.actuation.result", {
       "lane.id": params.laneId,
@@ -101,6 +104,7 @@ export class ArgusClient implements ArgusEmitter {
       ...(params.reason !== undefined ? { reason: params.reason } : {}),
       ...(params.laneReason !== undefined ? { "lane.reason": params.laneReason } : {}),
       ...(params.laneResetAt !== undefined ? { "lane.reset_at": params.laneResetAt } : {}),
+      ...(params.overrideActive !== undefined ? { "override.active": String(params.overrideActive) } : {}),
     });
   }
 

@@ -63,6 +63,24 @@ test("reconcile() without a context argument still works — reason/reset_at def
   assert.equal(action.reset_at, null);
 });
 
+test("hdl-lo-01: threads manualOverride context through to the recorded action when provided", async () => {
+  const adapter = new StubControlAdapter();
+  await adapter.reconcile(LANE, "up");
+  await adapter.reconcile(LANE, "down", { reason: null, reset_at: null, manualOverride: "disabled" });
+
+  const action = adapter.getRecordedActions()[0];
+  assert.equal(action.manualOverride, "disabled");
+});
+
+test("hdl-lo-01: manualOverride defaults to null when no context (or an unset override) is provided", async () => {
+  const adapter = new StubControlAdapter();
+  await adapter.reconcile(LANE, "up");
+  await adapter.reconcile(LANE, "down");
+
+  const action = adapter.getRecordedActions()[0];
+  assert.equal(action.manualOverride, null);
+});
+
 test("logs loudly (console.warn) by default, not a quiet debug line", async () => {
   const originalWarn = console.warn;
   let warned = false;

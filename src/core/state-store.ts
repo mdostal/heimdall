@@ -14,7 +14,8 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS lanes (
   lane_id TEXT PRIMARY KEY,
   provider TEXT NOT NULL,
-  credential_ref TEXT NOT NULL
+  credential_ref TEXT NOT NULL,
+  manual_override TEXT CHECK (manual_override IN ('enabled','disabled') OR manual_override IS NULL)
 );
 CREATE TABLE IF NOT EXISTS lane_status_history (
   lane_id TEXT NOT NULL REFERENCES lanes(lane_id),
@@ -26,6 +27,8 @@ CREATE TABLE IF NOT EXISTS lane_status_history (
 );
 CREATE INDEX IF NOT EXISTS idx_lane_status_latest ON lane_status_history(lane_id, observed_at DESC);
 `;
+
+export type ManualOverride = "enabled" | "disabled" | null;
 
 interface LaneRow {
   lane_id: string;
@@ -50,6 +53,19 @@ export class StateStore {
     // pinned explicitly so behavior is deterministic across environments.
     this.db = new DatabaseSync(path, { enableForeignKeyConstraints: true });
     this.db.exec(SCHEMA);
+    // Defensive migration (hdl-lo-01): CREATE TABLE IF NOT EXISTS only
+    // affects fresh databases — a pre-existing persisted DB file created
+    // before this column existed needs it added explicitly. No formal
+    // migration system in this repo; ignore "duplicate column" on DBs
+    // that already have it (fresh DBs get it via SCHEMA above already).
+    try {
+      this.db.exec(
+        `ALTER TABLE lanes ADD COLUMN manual_override TEXT CHECK (manual_override IN ('enabled','disabled') OR manual_override IS NULL)`,
+      );
+    } catch {
+      // Column already exists — expected on every fresh DB (added via
+      // SCHEMA) and on any DB this migration already ran against.
+    }
   }
 
   upsertLane(lane: LaneRow): void {
@@ -164,6 +180,32 @@ export class StateStore {
     return this.listLanes()
       .map((lane) => this.getCurrentStatus(lane.lane_id))
       .filter((status): status is LaneStatus => status !== null);
+  }
+
+  /**
+   * Manual override (hdl-lo-01) — a top-level operator directive that, when
+   * set, wins outright over the sensed status in ControlAdapter.reconcile's
+   * desiredEnabled decision. null (the default) means "automatic" — status
+   * alone decides, unchanged from pre-hdl-lo-01 behavior.
+   */
+  setManualOverride(laneId: string, value: ManualOverride): void {
+    // Guard the row's existence regardless of call order (same pattern as
+    // recordStatus) — a no-op via ON CONFLICT DO NOTHING when the lane was
+    // already upserted, but never silently affects 0 rows if it wasn't.
+    this.db
+      .prepare(
+        `INSERT INTO lanes (lane_id, provider, credential_ref) VALUES (?, '', '')
+         ON CONFLICT(lane_id) DO NOTHING`,
+      )
+      .run(laneId);
+    this.db.prepare(`UPDATE lanes SET manual_override = ? WHERE lane_id = ?`).run(value, laneId);
+  }
+
+  getManualOverride(laneId: string): ManualOverride {
+    const row = this.db
+      .prepare(`SELECT manual_override FROM lanes WHERE lane_id = ?`)
+      .get(laneId) as unknown as { manual_override: ManualOverride } | undefined;
+    return row?.manual_override ?? null;
   }
 
   close(): void {

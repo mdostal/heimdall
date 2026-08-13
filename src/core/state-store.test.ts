@@ -1,5 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { StateStore } from "./state-store.js";
 
 test("a declared lane with no recorded status reports down/unconfigured (REQ-07)", () => {
@@ -163,4 +167,87 @@ test("getAllCurrentStatuses returns one entry per declared lane", () => {
   const statuses = store.getAllCurrentStatuses();
   assert.equal(statuses.length, 2);
   store.close();
+});
+
+test("getManualOverride defaults to null for a lane with no override set (hdl-lo-01)", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+
+  assert.equal(store.getManualOverride("claude@mathew.dostal"), null);
+  store.close();
+});
+
+test("setManualOverride persists and getManualOverride reads it back (hdl-lo-01)", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+
+  store.setManualOverride("claude@mathew.dostal", "disabled");
+  assert.equal(store.getManualOverride("claude@mathew.dostal"), "disabled");
+
+  store.setManualOverride("claude@mathew.dostal", "enabled");
+  assert.equal(store.getManualOverride("claude@mathew.dostal"), "enabled");
+
+  store.setManualOverride("claude@mathew.dostal", null);
+  assert.equal(store.getManualOverride("claude@mathew.dostal"), null);
+  store.close();
+});
+
+test("setManualOverride works even when the lane was never upserted first (guards row existence like recordStatus)", () => {
+  const store = new StateStore(":memory:");
+
+  assert.doesNotThrow(() => store.setManualOverride("never-upserted", "disabled"));
+  assert.equal(store.getManualOverride("never-upserted"), "disabled");
+  store.close();
+});
+
+test("setManualOverride does not clobber a lane's provider/credential_ref already on file", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+
+  store.setManualOverride("claude@mathew.dostal", "enabled");
+
+  const lanes = store.listLanes().map((lane) => ({ ...lane }));
+  assert.deepEqual(lanes, [
+    { lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" },
+  ]);
+  store.close();
+});
+
+test("upsertLane does not clobber a previously-set manual_override (re-upserts happen on every GET /lanes call)", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+  store.setManualOverride("claude@mathew.dostal", "disabled");
+
+  // Simulate a second GET /lanes call re-upserting the same lane.
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+
+  assert.equal(store.getManualOverride("claude@mathew.dostal"), "disabled");
+  store.close();
+});
+
+test("a StateStore opened against a DB file created before manual_override existed does not crash (defensive migration, hdl-lo-01)", () => {
+  // Simulate a pre-hdl-lo-01 database by hand-rolling the OLD schema (no
+  // manual_override column) directly, bypassing StateStore's constructor.
+  const dbPath = path.join(os.tmpdir(), `heimdall-migration-test-${Date.now()}.sqlite`);
+  const legacyDb = new DatabaseSync(dbPath);
+  legacyDb.exec(`
+    CREATE TABLE lanes (
+      lane_id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      credential_ref TEXT NOT NULL
+    );
+  `);
+  legacyDb.close();
+
+  try {
+    assert.doesNotThrow(() => {
+      const store = new StateStore(dbPath);
+      store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+      store.setManualOverride("claude@mathew.dostal", "disabled");
+      assert.equal(store.getManualOverride("claude@mathew.dostal"), "disabled");
+      store.close();
+    });
+  } finally {
+    fs.rmSync(dbPath, { force: true });
+  }
 });

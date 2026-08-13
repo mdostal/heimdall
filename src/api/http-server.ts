@@ -8,15 +8,22 @@ import { createServer, type Server } from "node:http";
 import { EnvCredentialSource } from "../core/credential-source.js";
 import { loadLaneDeclarations, LaneRegistry } from "../core/lane-registry.js";
 import { getAvailableRoute, parseTaskType } from "../core/route-selector.js";
-import { StateStore } from "../core/state-store.js";
+import { StateStore, type ManualOverride } from "../core/state-store.js";
 import type { LaneStatus } from "../core/status-model.js";
 import { renderDashboardHtml } from "./ui/dashboard.js";
+
+/** GET /lanes' response shape — LaneStatus plus the hdl-lo-01 manual override, so a UI/API consumer never needs a second request to know both. */
+export interface LaneStatusWithOverride extends LaneStatus {
+  manual_override: ManualOverride;
+}
+
+const VALID_OVERRIDE_STATES = new Set(["enabled", "disabled", "auto"]);
 
 export function buildLaneRegistry(env: NodeJS.ProcessEnv = process.env): LaneRegistry {
   return new LaneRegistry(loadLaneDeclarations(env), new EnvCredentialSource(env));
 }
 
-export function getLaneStatuses(registry: LaneRegistry, store: StateStore): LaneStatus[] {
+export function getLaneStatuses(registry: LaneRegistry, store: StateStore): LaneStatusWithOverride[] {
   // Ensure every declared lane is present in the store (REQ-07: a lane with a
   // missing/invalid credential is still known — it just resolves to
   // down/unconfigured via StateStore's "no status row yet" fallback).
@@ -27,7 +34,10 @@ export function getLaneStatuses(registry: LaneRegistry, store: StateStore): Lane
       credential_ref: lane.credential_ref,
     });
   }
-  return store.getAllCurrentStatuses();
+  return store.getAllCurrentStatuses().map((status) => ({
+    ...status,
+    manual_override: store.getManualOverride(status.lane_id),
+  }));
 }
 
 /**
@@ -124,6 +134,54 @@ export function createHttpServer(
           res.writeHead(500, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "refresh_failed", message: String(err) }));
         });
+      return;
+    }
+
+    // hdl-lo-01: manual lane override — routes through the SAME
+    // ControlAdapter.reconcile() decision as automatic status-driven
+    // actuation (see MulticaControlAdapter's desiredEnabled computation),
+    // not a separate mechanism. Takes effect on the next reconcile tick
+    // (<=5s, same latency as the existing suspect-lane cadence).
+    const overrideMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/override$/);
+    if (overrideMatch) {
+      const laneId = decodeURIComponent(overrideMatch[1]);
+      if (!registry.get(laneId)) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "unknown_lane", lane_id: laneId }));
+        return;
+      }
+
+      let rawBody = "";
+      req.on("data", (chunk) => {
+        rawBody += chunk;
+      });
+      req.on("end", () => {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(rawBody || "{}");
+        } catch {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+
+        const state = (parsed as { state?: unknown }).state;
+        if (typeof state !== "string" || !VALID_OVERRIDE_STATES.has(state)) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: "invalid_override_state",
+              allowed_states: [...VALID_OVERRIDE_STATES],
+            }),
+          );
+          return;
+        }
+
+        const value: ManualOverride = state === "auto" ? null : (state as "enabled" | "disabled");
+        store.setManualOverride(laneId, value);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ lane_id: laneId, manual_override: value }));
+      });
       return;
     }
 

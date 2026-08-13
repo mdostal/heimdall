@@ -1,0 +1,44 @@
+name: hdl-lane-override
+title: Manual lane override — enable/disable through the existing ControlAdapter path
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [backend, actuation, ui, small-scope]
+  roster: [researcher, technical-writer]
+  per_tag_reasoning:
+    backend: StateStore + ControlAdapter changes are the correctness core.
+    actuation: Override participates in the existing reconcile()/desiredEnabled decision.
+    ui: Slice 2 surfaces the control + indicator on the dashboard.
+    small-scope: Well-isolated diffs across files already touched by the two prior epics — design discussion alone is sufficient per the plan skill's Small-scope routing rule.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (--skip-sign-off)
+    hv_planning: not_applicable (small scope)
+    structured_outline: not_applicable (small scope)
+
+description: >
+  Manual lane disable/enable, routed through the existing ControlAdapter
+  path per explicit operator direction (not a separate/parallel disable
+  mechanism). A per-lane override ('enabled' | 'disabled' | null) wins
+  outright over the sensed status in MulticaControlAdapter's desiredEnabled
+  computation when set; behavior is byte-identical to today when unset.
+  Slice 1: durable state + HTTP surface. Slice 2: dashboard controls +
+  visibility indicator. See docs/decisions/DEC-hdl-reason-aware-recovery.md
+  item 3 and this epic's design-discussion.md.
+
+stories:
+  - id: hdl-lo-01-override-backend-http
+    title: Manual lane override — durable state, ControlAdapter-aware, HTTP surface
+    complexity: medium
+    depends_on: []
+  - id: hdl-lo-02-dashboard-override-controls
+    title: Dashboard gets manual enable/disable/auto controls per lane
+    complexity: low
+    depends_on: [hdl-lo-01-override-backend-http]
