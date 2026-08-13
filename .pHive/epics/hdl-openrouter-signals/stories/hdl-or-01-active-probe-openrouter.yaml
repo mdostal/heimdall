@@ -1,0 +1,89 @@
+id: hdl-or-01-active-probe-openrouter
+epic: hdl-openrouter-signals
+title: OpenRouter active-probe adapter (GET /api/v1/key, credit + rate-limit state in one call)
+status: completed
+complexity: medium
+methodology: classic
+depends_on: []
+
+description: |
+  Implements src/core/signal-sources/active-probe/openrouter.ts. GET
+  https://openrouter.ai/api/v1/key, Authorization: Bearer <key> — richer
+  than every other adapter's "list models" liveness check, since this one
+  endpoint returns both credit balance (limit_remaining) and rate-limit
+  state in a single call (research-brief.md). Handles both confirmed
+  out-of-credit signals: an explicit 402 response, AND a 200 response whose
+  body reports limit_remaining <= 0 (the docs don't confirm which shape the
+  API actually uses at zero balance, so both are handled explicitly rather
+  than guessing). 429 responses carry X-RateLimit-Reset; passed through raw
+  as reset_at with no format conversion -- UNCONFIRMED format, same
+  accepted-gap posture as kimi.ts's retry-after handling. No
+  public-status/openrouter.ts in this story -- no confirmed machine-readable
+  status feed exists for OpenRouter (research-brief.md); see hdl-or-01's
+  sibling stories for how passive + this adapter alone are already a richer
+  signal than most providers get from public-status.
+
+acceptance_criteria:
+  - "Given a 2xx response with limit_remaining > 0 (or null, meaning unlimited), when probeOpenRouterLane is called, then it returns { status: 'up', reset_at: null, reason: null }"
+  - "Given a 2xx response with limit_remaining <= 0, when probeOpenRouterLane is called, then it returns { status: 'out_of_credit', reset_at: null, reason: <explanatory text> } even though the HTTP status was 200"
+  - "Given a 402 response, when probeOpenRouterLane is called, then it returns { status: 'out_of_credit' } regardless of body shape"
+  - "Given a 429 response, when probeOpenRouterLane is called, then it returns { status: 'degraded' }, with reset_at carrying the raw X-RateLimit-Reset header value when present, else null"
+  - "Given a 401/403 response, when probeOpenRouterLane is called, then it returns { status: 'down', reason: 'auth failed (<code>)' }"
+  - "Given a 5xx response, when probeOpenRouterLane is called, then it returns { status: 'down', reason: 'server error (<code>)' }"
+  - "Given a network-level fetch failure, when probeOpenRouterLane is called, then it never throws -- it returns { status: 'down', reason: 'probe request failed: <message>' }"
+
+steps:
+  - id: research
+    description: Confirm the /api/v1/key response shape and 402/429 semantics captured in research-brief.md
+    agent: researcher
+  - id: implement
+    description: Implement active-probe/openrouter.ts, handling both the 402 branch and the 200-with-zero-remaining branch explicitly
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Unit tests covering every acceptance criterion using hand-built fixture responses
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that both out_of_credit paths (402 and 200-with-zero-remaining) are covered, and that no path silently reports up when limit_remaining is unconfirmed/malformed
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/core/signal-sources/active-probe/claude.ts
+      purpose: "ProbeResult contract, never-throws structure, and the general shape every active-probe adapter follows."
+    - path: src/core/signal-sources/active-probe/kimi.ts
+      purpose: "Precedent for raw retry-after/reset-header passthrough with an unconfirmed format — the same posture this story takes for X-RateLimit-Reset."
+
+files_to_modify:
+  - file: src/core/signal-sources/active-probe/openrouter.ts
+    change: "New file -- probeOpenRouterLane(apiKey, fetchImpl?) implementing the mapping described above."
+  - file: src/core/signal-sources/active-probe/openrouter.test.ts
+    change: "New file -- unit tests for every acceptance criterion."
+
+design_decisions:
+  - decision: "Check limit_remaining <= 0 on a 200 response in addition to handling an explicit 402, rather than assuming only one shape is real."
+    rationale: "The docs fetched for this epic don't confirm whether GET /api/v1/key itself ever 402s at zero balance, or always returns 200 with limit_remaining: 0 -- handling both defensively costs nothing and avoids silently missing a real out-of-credit lane."
+
+risks:
+  - severity: medium
+    description: The exact X-RateLimit-Reset header format (unix seconds, ms, ISO) is unconfirmed.
+    mitigation: "Raw passthrough, documented in-file, same accepted-gap class as kimi.ts's identical situation. Revisit once a live 429 is observed."
+
+references:
+  - path: .pHive/epics/hdl-openrouter-signals/docs/research-brief.md
+    relevant_excerpt: |
+      GET https://openrouter.ai/api/v1/key ... { data: { limit, limit_reset,
+      limit_remaining, usage, ... } } ... 402 = insufficient credits ...
+      whether GET /api/v1/key itself can 402 at zero balance ... is
+      unconfirmed.

@@ -75,6 +75,15 @@ export function renderDashboardHtml(): string {
   .chip-missing { color: #cf222e; border-color: #cf222e; }
   .empty-state { color: #888; padding: 2rem 0; }
   .reason { color: #888; font-size: 0.85rem; }
+  .gateway-header td {
+    background: rgba(128, 128, 128, 0.08);
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: #666;
+    padding-top: 0.75rem;
+  }
   .override-controls button, .reset-at-controls button {
     font-size: 0.75rem;
     padding: 0.2rem 0.5rem;
@@ -220,6 +229,11 @@ export function renderDashboardHtml(): string {
     return "<span class=\\"override-badge\\">manual: " + escapeHtml(manualOverride) + "</span>";
   }
 
+  function priorityBadge(priority) {
+    if (priority === null || priority === undefined) return "";
+    return "<span class=\\"override-badge\\">priority: " + escapeHtml(String(priority)) + "</span>";
+  }
+
   function overrideControls(lane) {
     var current = lane.manual_override || "auto";
     var laneAttr = escapeHtml(lane.lane_id);
@@ -270,6 +284,7 @@ export function renderDashboardHtml(): string {
       "<tr>" +
       "<td>" + escapeHtml(lane.lane_id) + "</td>" +
       "<td>" + escapeHtml(lane.provider) + "</td>" +
+      "<td>" + escapeHtml(lane.model || "") + priorityBadge(lane.priority) + "</td>" +
       "<td><span class=\\"" + badgeClass + "\\">" + escapeHtml(label) + "</span>" + overrideBadge(lane.manual_override) + "</td>" +
       "<td>" + tokenChip(lane) + "</td>" +
       "<td class=\\"reason\\">" + escapeHtml(lane.reason) + "</td>" +
@@ -281,17 +296,48 @@ export function renderDashboardHtml(): string {
     );
   }
 
+  // hdl-or-03: group lanes sharing a gateway credential_ref (e.g. multiple
+  // OpenRouter routes) under one header row. A credential_ref used by
+  // exactly one lane is NOT a gateway — that lane renders in its natural
+  // position with no header inserted, same flat list as every other
+  // single-credential provider.
+  function groupLanesByCredential(lanes) {
+    var countByCredential = {};
+    lanes.forEach(function (lane) {
+      var key = lane.credential_ref || "";
+      if (!key) return;
+      countByCredential[key] = (countByCredential[key] || 0) + 1;
+    });
+
+    var seenGroupHeader = {};
+    var htmlParts = [];
+    lanes.forEach(function (lane) {
+      var key = lane.credential_ref || "";
+      var isGrouped = key && countByCredential[key] > 1;
+      if (isGrouped && !seenGroupHeader[key]) {
+        seenGroupHeader[key] = true;
+        htmlParts.push(
+          "<tr class=\\"gateway-header\\">" +
+          "<td colspan=\\"10\\">" + escapeHtml(lane.provider) + " gateway — credential: " + escapeHtml(key) + "</td>" +
+          "</tr>",
+        );
+      }
+      htmlParts.push(renderRow(lane));
+    });
+    return htmlParts.join("");
+  }
+
   function render(lanes) {
     var root = document.getElementById("root");
     if (!lanes || lanes.length === 0) {
       root.innerHTML = "<div class=\\"empty-state\\">No lanes declared.</div>";
       return;
     }
-    var rows = lanes.map(renderRow).join("");
+    var rows = groupLanesByCredential(lanes);
     root.innerHTML =
       "<table>" +
       "<thead><tr>" +
-      "<th>Lane</th><th>Provider</th><th>Status</th><th>Token</th><th>Reason</th>" +
+      "<th>Lane</th><th>Provider</th><th>Model</th><th>Status</th><th>Token</th><th>Reason</th>" +
       "<th>Reset at</th><th>Last updated</th><th>Signal source</th><th>Override</th>" +
       "</tr></thead>" +
       "<tbody>" + rows + "</tbody>" +

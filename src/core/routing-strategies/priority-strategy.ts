@@ -18,13 +18,23 @@ function runtimeRank(taskType: TaskType, runtime: string): number {
   return rank === -1 ? RUNTIME_PRIORITY[taskType].length : rank;
 }
 
+// hdl-or-04: an explicit lane.priority replaces the table-driven rank
+// OUTRIGHT (override-wins-outright, mirroring manual_override's precedence
+// shape) rather than blending with it — a lane with no priority set is
+// ranked byte-identically to pre-hdl-or-04 behavior. Comparable directly on
+// the same 0..N scale runtimeRank produces (documented, intentional — see
+// hdl-openrouter-signals/docs/design-discussion.md).
+function effectiveRank(taskType: TaskType, lane: Lane): number {
+  return lane.priority ?? runtimeRank(taskType, lane.provider);
+}
+
 export class PriorityStrategy implements RoutingStrategy {
   readonly name = "priority";
 
   selectRoute(taskType: TaskType, candidates: readonly Lane[]): Lane | null {
     const sorted = [...candidates].sort((a, b) => {
-      const runtimeDelta = runtimeRank(taskType, a.provider) - runtimeRank(taskType, b.provider);
-      return runtimeDelta === 0 ? a.lane_id.localeCompare(b.lane_id) : runtimeDelta;
+      const rankDelta = effectiveRank(taskType, a) - effectiveRank(taskType, b);
+      return rankDelta === 0 ? a.lane_id.localeCompare(b.lane_id) : rankDelta;
     });
     return sorted[0] ?? null;
   }
