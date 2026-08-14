@@ -1,7 +1,7 @@
 id: hdl-mc-03-recency-heuristic
 epic: hdl-model-catalog
 title: Per-provider "newest models" default-enable heuristic
-status: pending
+status: completed
 complexity: medium
 methodology: classic
 depends_on: []

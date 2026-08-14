@@ -1,7 +1,7 @@
 id: hdl-mc-01-model-catalog-state-store
 epic: hdl-model-catalog
 title: model_catalog StateStore table + CRUD functions
-status: pending
+status: completed
 complexity: low
 methodology: classic
 depends_on: []

@@ -31,6 +31,15 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS model_catalog (
+  provider TEXT NOT NULL,
+  model_id TEXT NOT NULL,
+  enabled INTEGER NOT NULL,
+  provider_created_at TEXT,
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  PRIMARY KEY (provider, model_id)
+);
 `;
 
 export type ManualOverride = "enabled" | "disabled" | null;
@@ -47,6 +56,24 @@ interface StatusRow {
   reason: string | null;
   signal_source: SignalSource;
   observed_at: string;
+}
+
+interface ModelCatalogRow {
+  provider: string;
+  model_id: string;
+  enabled: 0 | 1;
+  provider_created_at: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+}
+
+export interface ModelCatalogEntry {
+  provider: string;
+  model_id: string;
+  enabled: boolean;
+  provider_created_at: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
 }
 
 export class StateStore {
@@ -264,6 +291,70 @@ export class StateStore {
       .prepare(`SELECT value FROM settings WHERE key = ?`)
       .get(key) as unknown as { value: string } | undefined;
     return row?.value ?? null;
+  }
+
+  /**
+   * hdl-mc-01 — records a model as seen for a provider. On a genuinely NEW
+   * (provider, model_id) pair, `enabled` is set to `defaultEnabled` (the
+   * caller's recency-heuristic decision, model-catalog.ts). On an
+   * ALREADY-KNOWN pair, `enabled` is deliberately left untouched — only
+   * `provider_created_at`/`last_seen_at` refresh. This is the single most
+   * important correctness property of the whole model-catalog epic: an
+   * operator's explicit setModelEnabled choice must survive every future
+   * refresh, never get silently reset by the recency default recomputing.
+   */
+  upsertModelSeen(entry: {
+    provider: string;
+    model_id: string;
+    default_enabled: boolean;
+    provider_created_at: string | null;
+    seen_at: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO model_catalog (provider, model_id, enabled, provider_created_at, first_seen_at, last_seen_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(provider, model_id) DO UPDATE SET
+           provider_created_at = excluded.provider_created_at,
+           last_seen_at = excluded.last_seen_at`,
+      )
+      .run(
+        entry.provider,
+        entry.model_id,
+        entry.default_enabled ? 1 : 0,
+        entry.provider_created_at,
+        entry.seen_at,
+        entry.seen_at,
+      );
+  }
+
+  /** Explicit operator override. Returns false (no-op) if the (provider,
+   * model_id) pair has never been seen — the caller (model-catalog.ts)
+   * uses this to report an "unknown_model" error rather than silently
+   * doing nothing. */
+  setModelEnabled(provider: string, modelId: string, enabled: boolean): boolean {
+    const result = this.db
+      .prepare(`UPDATE model_catalog SET enabled = ? WHERE provider = ? AND model_id = ?`)
+      .run(enabled ? 1 : 0, provider, modelId);
+    return result.changes > 0;
+  }
+
+  getModelCatalog(provider?: string): ModelCatalogEntry[] {
+    const rows = (
+      provider
+        ? this.db
+            .prepare(`SELECT * FROM model_catalog WHERE provider = ? ORDER BY provider, model_id`)
+            .all(provider)
+        : this.db.prepare(`SELECT * FROM model_catalog ORDER BY provider, model_id`).all()
+    ) as unknown as ModelCatalogRow[];
+    return rows.map((row) => ({
+      provider: row.provider,
+      model_id: row.model_id,
+      enabled: row.enabled === 1,
+      provider_created_at: row.provider_created_at,
+      first_seen_at: row.first_seen_at,
+      last_seen_at: row.last_seen_at,
+    }));
   }
 
   close(): void {

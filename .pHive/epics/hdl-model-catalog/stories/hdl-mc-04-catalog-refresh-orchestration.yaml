@@ -1,7 +1,7 @@
 id: hdl-mc-04-catalog-refresh-orchestration
 epic: hdl-model-catalog
 title: refreshModelCatalog orchestration — fetch, diff, apply defaults, preserve operator choices
-status: pending
+status: completed
 complexity: medium
 methodology: classic
 depends_on: [hdl-mc-01-model-catalog-state-store, hdl-mc-02-provider-list-models, hdl-mc-03-recency-heuristic]

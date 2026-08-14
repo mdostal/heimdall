@@ -1,7 +1,7 @@
 id: hdl-mc-05-http-mcp-query-surface
 epic: hdl-model-catalog
 title: GET/POST /models HTTP routes + heimdall.models.* MCP tools
-status: pending
+status: completed
 complexity: low
 methodology: classic
 depends_on: [hdl-mc-04-catalog-refresh-orchestration]

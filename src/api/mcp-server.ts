@@ -43,6 +43,7 @@ import {
   type AddLaneInput,
 } from "./http-server.js";
 import { getActiveRoutingStrategyName, getRoutingStrategyNames } from "../core/route-selector.js";
+import { refreshModelCatalog, getModelCatalog, setModelEnabled } from "../core/model-catalog.js";
 import { StateStore } from "../core/state-store.js";
 import type { LaneRegistry } from "../core/lane-registry.js";
 
@@ -52,6 +53,9 @@ export const LANES_SET_RESET_AT_TOOL_NAME = "heimdall.lanes.setResetAt";
 export const LANES_ADD_TOOL_NAME = "heimdall.lanes.add";
 export const ROUTING_STRATEGY_GET_TOOL_NAME = "heimdall.routingStrategy.get";
 export const ROUTING_STRATEGY_SET_TOOL_NAME = "heimdall.routingStrategy.set";
+export const MODELS_LIST_TOOL_NAME = "heimdall.models.list";
+export const MODELS_REFRESH_TOOL_NAME = "heimdall.models.refresh";
+export const MODELS_SET_ENABLED_TOOL_NAME = "heimdall.models.setEnabled";
 
 const DEFAULT_ENV_FILE_PATH = ".env";
 
@@ -130,6 +134,37 @@ export function listLaneToolsDescriptor() {
         required: ["strategy"],
       },
     },
+    {
+      name: MODELS_LIST_TOOL_NAME,
+      description:
+        "List the live, per-installation model catalog — what models can actually be called right now, per provider, and whether each is enabled. Answers 'what are my available models to call' directly, instead of guessing/hardcoding a model name that may be deprecated.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          provider: { type: "string" as const, description: "Optional — filter to one provider (e.g. 'gemini'). Omit for the full catalog." },
+        },
+      },
+    },
+    {
+      name: MODELS_REFRESH_TOOL_NAME,
+      description:
+        "Fetch each configured lane's provider's live model list and update the local catalog. Newly-seen models get a default enabled/disabled state (recency heuristic); previously-seen models' enabled state is never touched by a refresh.",
+      inputSchema: { type: "object" as const, properties: {} },
+    },
+    {
+      name: MODELS_SET_ENABLED_TOOL_NAME,
+      description:
+        "Enable or disable one model for a provider. Overrides the recency-heuristic default; survives future refreshes.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          provider: { type: "string" as const },
+          model_id: { type: "string" as const },
+          enabled: { type: "boolean" as const },
+        },
+        required: ["provider", "model_id", "enabled"],
+      },
+    },
   ];
 }
 
@@ -171,6 +206,26 @@ export function callRoutingStrategySetTool(store: StateStore, args: unknown) {
   return textResult(wire);
 }
 
+export function callModelsListTool(store: StateStore, args: unknown) {
+  const input = (args ?? {}) as { provider?: unknown };
+  const provider = typeof input.provider === "string" ? input.provider : undefined;
+  return textResult(getModelCatalog(store, provider));
+}
+
+export function callModelsRefreshTool(store: StateStore, registry: LaneRegistry, fetchImpl?: typeof fetch) {
+  return refreshModelCatalog(store, registry, fetchImpl).then((result) => textResult(result));
+}
+
+export function callModelsSetEnabledTool(store: StateStore, args: unknown) {
+  const input = (args ?? {}) as { provider?: unknown; model_id?: unknown; enabled?: unknown };
+  const provider = typeof input.provider === "string" ? input.provider : "";
+  const modelId = typeof input.model_id === "string" ? input.model_id : "";
+  const enabled = input.enabled === true;
+  const result = setModelEnabled(store, provider, modelId, enabled);
+  const { ok: _ok, ...wire } = result;
+  return textResult(wire);
+}
+
 /**
  * Builds the tool-name -> handler dispatch table. Exported separately from
  * createMcpServer so the dispatch behavior (in particular: throws for a
@@ -178,11 +233,14 @@ export function callRoutingStrategySetTool(store: StateStore, args: unknown) {
  * failure) is directly unit-testable without spinning up the SDK's Server/
  * transport machinery.
  */
+type ToolResult = ReturnType<typeof callLanesListTool>;
+
 export function buildToolDispatch(
   registry: LaneRegistry,
   store: StateStore,
   envFilePath: string = DEFAULT_ENV_FILE_PATH,
-): Record<string, (args: unknown) => ReturnType<typeof callLanesListTool>> {
+  fetchImpl?: typeof fetch,
+): Record<string, (args: unknown) => ToolResult | Promise<ToolResult>> {
   return {
     [LANES_LIST_TOOL_NAME]: () => callLanesListTool(registry, store),
     [LANES_OVERRIDE_TOOL_NAME]: (args) => callLaneOverrideTool(registry, store, args),
@@ -190,6 +248,9 @@ export function buildToolDispatch(
     [LANES_ADD_TOOL_NAME]: (args) => callAddLaneTool(registry, envFilePath, args),
     [ROUTING_STRATEGY_GET_TOOL_NAME]: () => callRoutingStrategyGetTool(store),
     [ROUTING_STRATEGY_SET_TOOL_NAME]: (args) => callRoutingStrategySetTool(store, args),
+    [MODELS_LIST_TOOL_NAME]: (args) => callModelsListTool(store, args),
+    [MODELS_REFRESH_TOOL_NAME]: () => callModelsRefreshTool(store, registry, fetchImpl),
+    [MODELS_SET_ENABLED_TOOL_NAME]: (args) => callModelsSetEnabledTool(store, args),
   };
 }
 
@@ -198,7 +259,7 @@ export function dispatchToolCall(
   dispatch: ReturnType<typeof buildToolDispatch>,
   toolName: string,
   args: unknown,
-): ReturnType<typeof callLanesListTool> {
+): ToolResult | Promise<ToolResult> {
   const handler = dispatch[toolName];
   if (!handler) {
     throw new Error(`Unknown tool: ${toolName}`);
@@ -210,6 +271,7 @@ export function createMcpServer(
   registry: LaneRegistry,
   store: StateStore,
   envFilePath: string = DEFAULT_ENV_FILE_PATH,
+  fetchImpl?: typeof fetch,
 ): Server {
   const server = new Server(
     { name: "heimdall", version: "0.1.0" },
@@ -220,7 +282,7 @@ export function createMcpServer(
     tools: listLaneToolsDescriptor(),
   }));
 
-  const dispatch = buildToolDispatch(registry, store, envFilePath);
+  const dispatch = buildToolDispatch(registry, store, envFilePath, fetchImpl);
   server.setRequestHandler(CallToolRequestSchema, async (request) =>
     dispatchToolCall(dispatch, request.params.name, request.params.arguments),
   );

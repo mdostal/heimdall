@@ -1,7 +1,7 @@
 id: hdl-mc-02-provider-list-models
 epic: hdl-model-catalog
 title: Per-provider list-models functions (Claude, Codex, Kimi, Gemini)
-status: pending
+status: completed
 complexity: medium
 methodology: classic
 depends_on: []

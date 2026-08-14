@@ -97,6 +97,25 @@ exactly.
 | Gemini's generation-extraction regex could misparse a future naming convention change | Same accepted-drift risk class as every other provider-format assumption in this codebase; unparseable entries default to enabled (safe-open, not silently hidden) with a logged note. |
 | A refresh could overwrite an operator's deliberate "I turned this off" choice | Explicitly designed not to — `enabled` is only ever set by the recency default on a GENUINELY new `(provider, model_id)` pair; an already-seen pair's `enabled` is never touched by refresh, only `last_seen_at`. |
 
+## 4b. Known limitation, confirmed live (2026-08-13)
+
+`listClaudeModels` correctly returns `[]` (never crashes) for a `provider: "claude"` lane
+whose credential is a Claude Code subscription token (`sk-ant-oat01-...`, `hdl-claude-
+subscription-lanes`) — verified live end-to-end via the actual running service and the
+real long-lived token already configured: `POST /models/refresh` correctly reported zero
+models seen, and a direct check confirmed `api.anthropic.com/v1/models` returns `401` for
+that credential. This is the exact same OAuth-token-scoped-to-the-genuine-Claude-Code-client
+restriction `hdl-claude-subscription-lanes` already found and documented for the Messages
+API — it applies to every direct `api.anthropic.com` REST endpoint, not just completions.
+
+**Not a bug in this epic** — the never-throws contract worked exactly as designed. It IS a
+real, honest gap: model-catalog fetching currently only works for raw-API-key Claude lanes,
+not subscription-token ones. A subscription-token Claude lane's model catalog would need the
+same CLI-subprocess integration path `hdl-claude-subscription-lanes` established for
+liveness (`claude` CLI itself, not a direct HTTP call) — out of scope for this slice,
+flagged here for whoever picks up a future "subscription-token model catalog" follow-up
+rather than left as a silent, undocumented gap.
+
 ## 5. Scale assessment
 
 **Medium.** New StateStore table, four new list-models functions (one per gated provider),

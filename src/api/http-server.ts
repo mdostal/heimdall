@@ -18,6 +18,7 @@ import { StateStore, type ManualOverride } from "../core/state-store.js";
 import type { LaneStatus } from "../core/status-model.js";
 import { renderDashboardHtml } from "./ui/dashboard.js";
 import { appendLane, deriveCredentialRef, laneIdAlreadyDeclared } from "../core/env-file.js";
+import { refreshModelCatalog, getModelCatalog, setModelEnabled } from "../core/model-catalog.js";
 
 const DEFAULT_ENV_FILE_PATH = ".env";
 
@@ -228,6 +229,7 @@ export function createHttpServer(
   store: StateStore,
   refreshLane?: RefreshLaneFn,
   envFilePath: string = DEFAULT_ENV_FILE_PATH,
+  fetchImpl?: typeof fetch,
 ): Server {
   return createServer((req, res) => {
     // Liveness alias — distinct from /lanes on purpose: a monitor (e.g.
@@ -338,6 +340,65 @@ export function createHttpServer(
         if (!result.ok) {
           const { ok: _ok, ...wire } = result;
           res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify(wire));
+          return;
+        }
+        const { ok: _ok, ...wire } = result;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(wire));
+      });
+      return;
+    }
+
+    // hdl-mc-05: "what models can I actually call right now" — the live,
+    // locally-stored, per-installation catalog (see
+    // .pHive/epics/hdl-model-catalog/docs/design-discussion.md).
+    if (req.method === "GET" && req.url?.startsWith("/models")) {
+      const url = new URL(req.url, "http://localhost");
+      if (url.pathname !== "/models") {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "not_found" }));
+        return;
+      }
+      const provider = url.searchParams.get("provider") ?? undefined;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(getModelCatalog(store, provider)));
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/models/refresh") {
+      refreshModelCatalog(store, registry, fetchImpl)
+        .then((result) => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify(result));
+        })
+        .catch(() => {
+          res.writeHead(500, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "refresh_failed" }));
+        });
+      return;
+    }
+
+    const modelEnabledMatch = req.method === "POST" && req.url?.match(/^\/models\/([^/]+)\/([^/]+)$/);
+    if (modelEnabledMatch) {
+      const provider = decodeURIComponent(modelEnabledMatch[1]);
+      const modelId = decodeURIComponent(modelEnabledMatch[2]);
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+        const enabled = (body.data as { enabled?: unknown }).enabled;
+        if (typeof enabled !== "boolean") {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_enabled_value" }));
+          return;
+        }
+        const result = setModelEnabled(store, provider, modelId, enabled);
+        if (!result.ok) {
+          const { ok: _ok, ...wire } = result;
+          res.writeHead(404, { "content-type": "application/json" });
           res.end(JSON.stringify(wire));
           return;
         }
