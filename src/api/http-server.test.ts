@@ -1754,3 +1754,39 @@ test("hdl-ot-03: GET /metrics reflects real telemetry_events counts with correct
     store.close();
   }
 });
+
+test("hdl-ot-04: GET / (dashboard) includes a Telemetry panel that loads from GET /metrics", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /id="telemetry-root"/);
+    assert.match(body, /fetch\("\/metrics"\)/, "the panel must load its state from GET /metrics");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-ot-04: GET / does not change existing routes' behavior (Telemetry panel is additive only)", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const lanesRes = await fetch(`http://localhost:${port}/lanes`);
+    assert.equal(lanesRes.status, 200);
+    const metricsRes = await fetch(`http://localhost:${port}/metrics`);
+    assert.equal(metricsRes.status, 200);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
