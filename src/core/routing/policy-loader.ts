@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseDocument } from "yaml";
-import { TASK_TYPES, type TaskType } from "../route-selector.js";
+import { TASK_TYPES, type TaskType } from "../task-type.js";
 
 export const DEFAULT_POLICY_PATH = join(process.cwd(), "config", "routing-policy.yaml");
 export const POLICY_SCHEMA_VERSION = "1.0";

@@ -1,21 +1,11 @@
-import { randomUUID } from "node:crypto";
-import type { LaneRegistry } from "./lane-registry.js";
+import type { Lane, LaneRegistry } from "./lane-registry.js";
 import type { StateStore } from "./state-store.js";
-import { assignExperimentArm } from "./routing/experiment-assigner.js";
-import type { CostPreference, Policy } from "./routing/policy-loader.js";
-import { generateRationale } from "./routing/rationale-generator.js";
-import type { RouteLedger } from "./routing/route-ledger.js";
-import {
-  rankCandidates,
-  scoreCandidate,
-  type CandidateScore,
-  type LaneHealth,
-  type Policy as ScoringPolicy,
-} from "./routing/scorer.js";
+import { createRoutingStrategyRegistry, DEFAULT_ROUTING_STRATEGY_NAME } from "./routing-strategies/registry.js";
+import { ScoredStrategy } from "./routing-strategies/scored-strategy.js";
+import { resolveEffectiveModel } from "./model-catalog.js";
+import { TASK_TYPES, type TaskType, parseTaskType } from "./task-type.js";
 
-export const TASK_TYPES = ["planning", "build", "review"] as const;
-
-export type TaskType = (typeof TASK_TYPES)[number];
+export { TASK_TYPES, type TaskType, parseTaskType };
 
 export interface AvailableRoute {
   runtime: string;
@@ -24,45 +14,50 @@ export interface AvailableRoute {
   lane_id: string;
   task_type: TaskType;
   headroom: true;
+  /** hdl-mcr-01 — true when `model` isn't the lane's raw declared
+   * HEIMDALL_LANE_N_MODEL, because the model-catalog (hdl-model-catalog)
+   * found it disabled or gone and substituted the newest enabled
+   * alternative instead. Never silent — GET /lanes still reports the raw
+   * declared value unchanged for any caller that needs it. */
+  model_substituted: boolean;
+  /** hdl-rr-02 — populated only when the active strategy's selectRoute()
+   * returns a `detail` (today, only the "scored" strategy does); absent
+   * for priority/round-robin/off, exactly as before this field existed. */
+  rationale?: string;
+  decision_id?: string;
+  experiment_arm?: string;
+  ranked_candidates?: ReadonlyArray<{ laneId: string; score: number }>;
+  policy_version?: string;
 }
 
-const RUNTIME_PRIORITY: Record<TaskType, readonly string[]> = {
-  planning: ["claude", "gemini", "codex", "kimi"],
-  build: ["codex", "claude", "gemini", "kimi"],
-  review: ["claude", "codex", "gemini", "kimi"],
-};
+// hdl-rs-02: one module-level registry, created once for the process
+// lifetime — matters specifically for RoundRobinStrategy, whose rotation
+// state must persist ACROSS requests to actually rotate (a fresh registry
+// per call would reset the cursor every time). Mirrors RUNTIME_PRIORITY's
+// own pre-hdl-rs-02 module-level-const lifetime.
+const routingStrategies = createRoutingStrategyRegistry();
 
-export function parseTaskType(value: string | null): TaskType | null {
-  return TASK_TYPES.find((taskType) => taskType === value) ?? null;
+// hdl-rs-03: the settings key the active strategy is persisted under, and
+// the read-side resolution (default when unset) — the write side
+// (validating + persisting an operator-chosen name) lives in
+// http-server.ts's setRoutingStrategy, alongside the other shared mutation
+// functions (setLaneOverride/setLaneResetAt/addLane).
+export const ROUTING_STRATEGY_SETTING_KEY = "routing_strategy";
+
+export function getRoutingStrategyNames(): string[] {
+  return Object.keys(routingStrategies);
 }
 
-function runtimeRank(taskType: TaskType, runtime: string): number {
-  const rank = RUNTIME_PRIORITY[taskType].indexOf(runtime);
-  return rank === -1 ? RUNTIME_PRIORITY[taskType].length : rank;
+export function getActiveRoutingStrategyName(store: StateStore): string {
+  const stored = store.getSetting(ROUTING_STRATEGY_SETTING_KEY);
+  return stored && routingStrategies[stored] ? stored : DEFAULT_ROUTING_STRATEGY_NAME;
 }
 
-export function getLaneHealths(
-  registry: LaneRegistry,
-  store: StateStore,
-): LaneHealth[] {
-  const statuses = new Map(store.getAllCurrentStatuses().map((status) => [status.lane_id, status]));
-  return registry
-    .list()
-    .filter((lane) => lane.credential !== null)
-    .filter((lane) => statuses.get(lane.lane_id)?.status === "up")
-    .map((lane) => ({
-      lane_id: lane.lane_id,
-      provider: lane.provider,
-      headroom: lane.headroom,
-      cost_tier: lane.cost_tier,
-    }));
-}
-
-export function getAvailableRoute(
-  taskType: TaskType,
-  registry: LaneRegistry,
-  store: StateStore,
-): AvailableRoute | null {
+// hdl-rr-03: shared candidacy filtering — used by both getAvailableRoute
+// (active-strategy-driven) and getScoredRoute (always-scored, bypasses the
+// active-strategy setting). One definition of "which lanes are even
+// eligible to be routed to" for every routing surface.
+function getRoutingCandidates(registry: LaneRegistry, store: StateStore): Lane[] {
   for (const lane of registry.list()) {
     store.upsertLane({
       lane_id: lane.lane_id,
@@ -72,38 +67,55 @@ export function getAvailableRoute(
   }
 
   const statuses = new Map(store.getAllCurrentStatuses().map((status) => [status.lane_id, status]));
-  const candidates = registry
+  return registry
     .list()
     .filter((lane) => lane.credential !== null)
-    .filter((lane) => statuses.get(lane.lane_id)?.status === "up")
-    .sort((a, b) => {
-      const runtimeDelta = runtimeRank(taskType, a.provider) - runtimeRank(taskType, b.provider);
-      return runtimeDelta === 0 ? a.lane_id.localeCompare(b.lane_id) : runtimeDelta;
+    .filter((lane) => {
+      // hdl-rs-01: manual_override gates routing candidacy the SAME way it
+      // already gates Multica actuation (MulticaControlAdapter.reconcile) —
+      // "disabled" blocks a lane from being routed to no matter its sensed
+      // status; "enabled" forces it in even if sensed status isn't "up";
+      // unset (null) is byte-identical to pre-hdl-rs-01 behavior.
+      const override = store.getManualOverride(lane.lane_id);
+      if (override === "disabled") return false;
+      if (override === "enabled") return true;
+      return statuses.get(lane.lane_id)?.status === "up";
     });
+}
 
-  const lane = candidates[0];
+export function getAvailableRoute(
+  taskType: TaskType,
+  registry: LaneRegistry,
+  store: StateStore,
+): AvailableRoute | null {
+  const candidates = getRoutingCandidates(registry, store);
+
+  const strategy = routingStrategies[getActiveRoutingStrategyName(store)];
+  const { lane, detail } = strategy.selectRoute({ taskType, candidates, store });
   if (!lane) return null;
+
+  const { model, substituted } = resolveEffectiveModel(store, lane.provider, lane.model);
 
   return {
     runtime: lane.provider,
-    model: lane.model,
+    model,
     "token-ref": lane.credential_ref,
     lane_id: lane.lane_id,
     task_type: taskType,
     headroom: true,
+    model_substituted: substituted,
+    ...(detail?.rationale !== undefined ? { rationale: detail.rationale } : {}),
+    ...(detail?.decisionId !== undefined ? { decision_id: detail.decisionId } : {}),
+    ...(detail?.experimentArm !== undefined ? { experiment_arm: detail.experimentArm } : {}),
+    ...(detail?.rankedCandidates !== undefined ? { ranked_candidates: detail.rankedCandidates } : {}),
+    ...(detail?.policyVersion !== undefined ? { policy_version: detail.policyVersion } : {}),
   };
 }
 
-// --- Scored routing (rs-05): RouteSelector.select() ---------------------
-//
-// Distinct from getAvailableRoute() above: getAvailableRoute() answers "is
-// any lane up?" from LaneRegistry/StateStore for the /available-route
-// endpoint. select() answers "which lane scores best?" from a policy-driven
-// heuristic over caller-supplied LaneHealth (headroom, cost tier), wiring in
-// A/B assignment, rationale generation, and the RouteLedger audit trail.
-// getAvailableRoute() keeps its existing callers (src/api/http-server.ts);
-// this is an additive API, not a replacement.
-
+// hdl-rr-03: dev's original RouteResult contract, preserved for the
+// backward-compatible POST /route / CLI route / MCP route_selection surfaces
+// (Auriga/Minerva's existing dispatch contract per dev-assessment.md) — a
+// thin reshape of RouteSelectionResult.detail, not a second implementation.
 export interface RouteRequest {
   task_id: string;
   task_type: TaskType;
@@ -111,94 +123,36 @@ export interface RouteRequest {
 }
 
 export interface RouteResult {
-  decision_id: string;
+  decision_id: string | null;
   chosen_lane: string | null;
-  ranked_candidates: CandidateScore[];
+  ranked_candidates: ReadonlyArray<{ laneId: string; score: number }>;
   rationale: string;
   experiment_arm: string | null;
-  policy_version: string;
+  policy_version: string | null;
 }
 
-export interface RouteSelectorOptions {
-  now?: () => Date;
-  /** Injectable for deterministic tests; defaults to node:crypto randomUUID. */
-  generateDecisionId?: () => string;
-}
+// hdl-rr-03: one module-level ScoredStrategy instance — mirrors
+// routingStrategies' own module-level lifetime, so the policy file and
+// ledger DB connection load once, not per call. Always used for POST /route
+// regardless of the globally active strategy (a caller hitting this
+// endpoint is explicitly asking for the scored contract).
+const scoredStrategyForRouteEndpoint = new ScoredStrategy();
 
-// scorer.ts's cost_preference vocabulary predates PolicyLoader's and was
-// never reconciled with it (COST_PREFERENCES in policy-loader.ts is
-// "quality"/"balanced"/"economy"; scorer.ts checks "performance"/"cost").
-// Bridge here rather than changing either module's already-tested behavior.
-const COST_PREFERENCE_TO_SCORER: Record<CostPreference, ScoringPolicy["cost_preference"]> = {
-  quality: "performance",
-  balanced: "balanced",
-  economy: "cost",
-};
+export function getScoredRoute(request: RouteRequest, registry: LaneRegistry, store: StateStore): RouteResult {
+  const candidates = getRoutingCandidates(registry, store);
+  const { lane, detail } = scoredStrategyForRouteEndpoint.selectRoute({
+    taskType: request.task_type,
+    candidates,
+    store,
+    taskId: request.task_id,
+  });
 
-export class RouteSelector {
-  private readonly policy: Policy;
-  private readonly ledger: RouteLedger;
-  private readonly now: () => Date;
-  private readonly generateDecisionId: () => string;
-
-  constructor(policy: Policy, ledger: RouteLedger, options: RouteSelectorOptions = {}) {
-    this.policy = policy;
-    this.ledger = ledger;
-    this.now = options.now ?? (() => new Date());
-    this.generateDecisionId = options.generateDecisionId ?? randomUUID;
-  }
-
-  select(request: RouteRequest, laneHealth: readonly LaneHealth[]): RouteResult {
-    const decisionId = this.generateDecisionId();
-    const experimentArm = this.policy.experiments.enabled
-      ? assignExperimentArm(request.task_id, this.policy.experiments)
-      : null;
-
-    const scoringPolicy: ScoringPolicy = {
-      task_type_weights: this.policy.task_type_weights,
-      headroom_floor: this.policy.headroom_floor,
-      cost_preference: COST_PREFERENCE_TO_SCORER[this.policy.cost_preference],
-    };
-
-    const headroomByLane = new Map(laneHealth.map((lane) => [lane.lane_id, lane.headroom]));
-    const ranked = rankCandidates(
-      laneHealth.map((lane) => scoreCandidate(lane, { task_type: request.task_type }, scoringPolicy)),
-    );
-    const chosen =
-      ranked.find((candidate) => (headroomByLane.get(candidate.lane_id) ?? -Infinity) >= this.policy.headroom_floor) ??
-      null;
-
-    const rationale = chosen
-      ? generateRationale(chosen, ranked)
-      : `No candidate lane meets the headroom floor (${this.policy.headroom_floor}); no route chosen.`;
-
-    const result: RouteResult = {
-      decision_id: decisionId,
-      chosen_lane: chosen?.lane_id ?? null,
-      ranked_candidates: ranked,
-      rationale,
-      experiment_arm: experimentArm,
-      policy_version: this.policy.version,
-    };
-
-    try {
-      this.ledger.recordDecision({
-        decisionId,
-        requestSummary: { task_type: request.task_type, estimated_cost: request.estimated_cost },
-        candidateScores: ranked,
-        result: chosen ? "lane" : "no_route",
-        chosenLane: chosen?.lane_id ?? null,
-        policyVersion: this.policy.version,
-        heuristic: "weighted_scoring",
-        experimentArm,
-        recordedAt: this.now().toISOString(),
-      });
-    } catch (error) {
-      // Design decision (rs-05): routing is critical-path — losing the audit
-      // record is bad, but blocking a route decision on ledger I/O is worse.
-      console.error(`RouteSelector: failed to record decision ${decisionId} to ledger`, error);
-    }
-
-    return result;
-  }
+  return {
+    decision_id: detail?.decisionId ?? null,
+    chosen_lane: lane?.lane_id ?? null,
+    ranked_candidates: detail?.rankedCandidates ?? [],
+    rationale: detail?.rationale ?? "",
+    experiment_arm: detail?.experimentArm ?? null,
+    policy_version: detail?.policyVersion ?? null,
+  };
 }

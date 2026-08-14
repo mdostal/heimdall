@@ -18,13 +18,15 @@
 import { buildLaneRegistry, createHttpServer, type RefreshLaneFn } from "./api/http-server.js";
 import type { Server } from "node:http";
 import { StateStore } from "./core/state-store.js";
-import { PolicyLoader } from "./core/routing/policy-loader.js";
-import { RouteLedger } from "./core/routing/route-ledger.js";
-import { RouteSelector } from "./core/route-selector.js";
+import type { LaneRegistry } from "./core/lane-registry.js";
 import {
   LanePipeline,
   claudeAdapters,
   codexAdapters,
+  geminiAdapters,
+  kimiAdapters,
+  openrouterAdapters,
+  ollamaAdapters,
   type ProviderAdapters,
 } from "./core/lane-pipeline.js";
 import { ArgusClient, startArgusSdk, type ArgusEmitter } from "./core/telemetry/argus-client.js";
@@ -36,10 +38,16 @@ import { CircuitBreaker } from "./core/actuation/circuit-breaker.js";
 import { StaticLaneAgentResolver, type LaneAgentResolver } from "./core/actuation/lane-agent-resolver.js";
 import { StubControlAdapter, type ControlAdapter } from "./core/actuation/control-adapter.js";
 import { MulticaControlAdapter } from "./core/actuation/multica-control-adapter.js";
+import { RotationController, ProviderScopedLaneRegistry } from "./core/rotation-controller.js";
+import { startCapResetRecoveryJob, type RunningBackgroundJob } from "./core/background-jobs.js";
 
 const PROVIDER_ADAPTERS: Record<string, () => ProviderAdapters> = {
   claude: claudeAdapters,
   codex: codexAdapters,
+  gemini: geminiAdapters,
+  kimi: kimiAdapters,
+  openrouter: openrouterAdapters,
+  ollama: ollamaAdapters,
 };
 
 const DEFAULT_AUTOPILOT_CRON = "*/1 * * * *";
@@ -64,7 +72,29 @@ export interface ComposedService {
   multicaSchedulers: MulticaAutopilotScheduler[];
   inProcessSchedulers: InProcessScheduler[];
   controlAdapters: Map<string, ControlAdapter>;
+  /** hdl-rr-04 — keyed by provider, only present for providers with 2+ credentialed lanes (nothing to rotate between otherwise). */
+  rotationControllers: Map<string, RotationController>;
   stopAll: () => void;
+}
+
+// hdl-rr-04: mirrors PROVIDER_ADAPTERS' "every lane always gets a real
+// mechanism, never a silent no-op" precedent from hdl-actuation — but
+// rotation only makes sense with 2+ credentialed lanes on the SAME
+// provider to rotate between, so a single-lane provider correctly gets
+// none rather than a controller with nowhere to rotate to.
+function buildRotationControllers(registry: LaneRegistry, store: StateStore): Map<string, RotationController> {
+  const credentialedByProvider = new Map<string, number>();
+  for (const lane of registry.list()) {
+    if (lane.credential === null) continue;
+    credentialedByProvider.set(lane.provider, (credentialedByProvider.get(lane.provider) ?? 0) + 1);
+  }
+
+  const controllers = new Map<string, RotationController>();
+  for (const [provider, count] of credentialedByProvider) {
+    if (count < 2) continue;
+    controllers.set(provider, new RotationController(new ProviderScopedLaneRegistry(registry, provider), store));
+  }
+  return controllers;
 }
 
 /**
@@ -176,9 +206,12 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
       if (!current) continue;
       const adapter = controlAdapters.get(lane.lane_id);
       if (!adapter) continue;
-      adapter.reconcile(lane, current.status).catch((err) => {
-        console.error(`[main] reconcile() failed for lane ${lane.lane_id}:`, err);
-      });
+      const manualOverride = store.getManualOverride(lane.lane_id);
+      adapter
+        .reconcile(lane, current.status, { reason: current.reason, reset_at: current.reset_at, manualOverride })
+        .catch((err) => {
+          console.error(`[main] reconcile() failed for lane ${lane.lane_id}:`, err);
+        });
     }
   }, options.statusWatcherIntervalMs ?? STATUS_WATCHER_INTERVAL_MS);
   statusWatcher.unref?.();
@@ -192,11 +225,20 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     await pipeline.refresh(lane);
   };
 
-  const policy = PolicyLoader.load();
-  const ledger = new RouteLedger(env.HEIMDALL_DB_PATH ?? ":memory:");
-  const routeSelector = new RouteSelector(policy, ledger);
+  // hdl-rr-04: rotation is a credential-selection concern orthogonal to
+  // which lane routing picks — it decides which account backs a given
+  // provider's calls, not which provider/lane serves a task. Never wired
+  // into the live Claude completion call path yet (documented follow-up,
+  // see design-discussion.md §4); this wires the controller + cap-reset
+  // background job for the first time on either branch and exposes it for
+  // manual inspection/rotation via GET/POST /rotation/:provider.
+  const rotationControllers = buildRotationControllers(registry, store);
+  const rotationJobs: RunningBackgroundJob[] = [];
+  for (const controller of rotationControllers.values()) {
+    rotationJobs.push(startCapResetRecoveryJob(controller));
+  }
 
-  const httpServer = createHttpServer(registry, store, refreshLane, routeSelector);
+  const httpServer = createHttpServer(registry, store, refreshLane, undefined, options.fetchImpl, rotationControllers);
   if (!options.skipHttpListen) {
     httpServer.listen(port, () => {
       console.log(`heimdall service listening on http://localhost:${port}`);
@@ -210,10 +252,12 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     multicaSchedulers,
     inProcessSchedulers,
     controlAdapters,
+    rotationControllers,
     stopAll: () => {
       clearInterval(statusWatcher);
       for (const s of multicaSchedulers) s.stop();
       for (const s of inProcessSchedulers) s.stop();
+      for (const job of rotationJobs) job.stop();
       httpServer.close();
       store.close();
     },

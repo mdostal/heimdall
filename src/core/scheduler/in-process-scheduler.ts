@@ -26,6 +26,8 @@ export interface InProcessSchedulerOptions {
   setTimeoutImpl?: typeof setTimeout;
   clearTimeoutImpl?: typeof clearTimeout;
   onError?: (err: unknown, lane: Lane) => void;
+  /** Injected clock — an ISO-8601 timestamp for "now". Never Date.now() internally (matches lane-pipeline.ts's convention). */
+  nowImpl?: () => string;
 }
 
 const DEFAULT_INTERVAL_MS = 5_000;
@@ -35,6 +37,7 @@ export class InProcessScheduler implements Scheduler {
   private readonly setTimeoutImpl: typeof setTimeout;
   private readonly clearTimeoutImpl: typeof clearTimeout;
   private readonly onError: (err: unknown, lane: Lane) => void;
+  private readonly nowImpl: () => string;
 
   private timer: ReturnType<typeof setTimeout> | null = null;
   private stopped = true;
@@ -46,11 +49,12 @@ export class InProcessScheduler implements Scheduler {
     this.setTimeoutImpl = opts.setTimeoutImpl ?? setTimeout;
     this.clearTimeoutImpl = opts.clearTimeoutImpl ?? clearTimeout;
     this.onError = opts.onError ?? ((err) => console.error("[in-process-scheduler] tick failed:", err));
+    this.nowImpl = opts.nowImpl ?? (() => new Date().toISOString());
   }
 
   start(): void {
     this.stopped = false;
-    this.scheduleNext();
+    this.scheduleNext(this.intervalMs);
   }
 
   stop(): void {
@@ -61,7 +65,23 @@ export class InProcessScheduler implements Scheduler {
     }
   }
 
-  private scheduleNext(): void {
+  /**
+   * reset_at-aware delay: when a known future reset_at exists, wait until
+   * (or shortly after) it instead of the flat interval — no point probing a
+   * lane we already know won't recover until a specific time. Floored at
+   * this.intervalMs so a past/near/malformed reset_at (clock skew, stale
+   * data) can never produce a zero/negative/busy-loop delay. No ceiling —
+   * a reset_at far in the future is honored in full, that's the point.
+   */
+  private computeDelayMs(resetAt: string | null): number {
+    if (!resetAt) return this.intervalMs;
+    const resetAtMs = Date.parse(resetAt);
+    if (Number.isNaN(resetAtMs)) return this.intervalMs;
+    const nowMs = Date.parse(this.nowImpl());
+    return Math.max(this.intervalMs, resetAtMs - nowMs);
+  }
+
+  private scheduleNext(delayMs: number): void {
     // Always clear any existing timer first — poll() can be invoked
     // manually (tests do this for determinism) while start()'s own timer is
     // still pending; without this, the manual call's reschedule overwrites
@@ -74,7 +94,7 @@ export class InProcessScheduler implements Scheduler {
     if (this.stopped) return;
     this.timer = this.setTimeoutImpl(() => {
       void this.poll();
-    }, this.intervalMs);
+    }, delayMs);
   }
 
   /**
@@ -119,6 +139,17 @@ export class InProcessScheduler implements Scheduler {
     // behavior — the expensive work (refresh) stops immediately; only the
     // cheap local status read continues.
 
-    this.scheduleNext();
+    // Re-read after any refresh() above so a fresh reset_at (or recovery)
+    // informs the NEXT delay. A healthy lane always gets the flat interval
+    // — reset_at only matters while still suspect.
+    const latest = this.opts.store.getCurrentStatus(this.opts.lane.lane_id);
+    const stillSuspect = latest !== null && SUSPECT_STATUSES.includes(latest.status);
+    // hdl-lm-03: an operator-supplied manual_reset_at ("change the times")
+    // wins over the sensed reset_at, same precedence as manual_override
+    // wins over sensed status in MulticaControlAdapter — scheduling-only,
+    // does not touch ReconcileContext/ControlAdapter/Argus.
+    const manualResetAt = this.opts.store.getManualResetAt(this.opts.lane.lane_id);
+    const delayMs = stillSuspect ? this.computeDelayMs(manualResetAt ?? latest!.reset_at) : this.intervalMs;
+    this.scheduleNext(delayMs);
   }
 }

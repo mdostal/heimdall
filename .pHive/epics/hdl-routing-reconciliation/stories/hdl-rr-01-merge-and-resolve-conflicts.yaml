@@ -1,0 +1,45 @@
+id: hdl-rr-01-merge-and-resolve-conflicts
+epic: hdl-routing-reconciliation
+title: Merge origin/main into the epic branch, resolve the 12 conflicted files
+status: pending
+complexity: medium
+methodology: classic
+depends_on: []
+
+description: |
+  Run `git merge origin/main` on feat/hdl-routing-reconciliation (based on dev). This
+  brings every additive file from both branches across for free; only 12 files need
+  hand resolution (confirmed via git merge-tree in research). Resolve each per the
+  design-discussion.md §5 rules: main's version wins outright for lane-registry.ts,
+  state-store.ts, http-server.ts, mcp-server.ts, main.ts, route-selector.ts (each
+  confirmed a superset or correct base); package.json keeps main's 0.19.0 version line
+  plus dev's yaml dep and hive/**/*.test.ts glob, package-lock.json regenerated via
+  npm install; .gitignore is a union of both epic-allowlist blocks; README.md is an
+  authored merge, not a pick-a-side; test/sla-harness/report.md takes main's (generated
+  artifact).
+
+acceptance_criteria:
+  - "Given the merge is complete, when `npm run build` runs, then it completes with no TypeScript errors"
+  - "Given the merge is complete, when `git status` is checked, then no unresolved conflict markers remain in any file"
+  - "Given package.json, when inspected, then version is 0.19.0-or-later, yaml is a dependency, and both hive/**/*.test.ts and src/**/*.test.ts are in the test glob"
+  - "Given .gitignore, when inspected, then every epic allowlist entry from both branches is present (no epic dir accidentally re-ignored)"
+
+steps:
+  - id: implement
+    description: Perform the merge and resolve all 12 conflicted files per the rules above
+    agent: developer
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - path: src/core/route-selector.ts
+      purpose: take main's version wholesale — dev's copy is stale (no override gating, no model substitution)
+    - path: src/core/lane-registry.ts
+      purpose: take main's version — confirmed superset, dev's headroom/cost_tier fields get added back in story 03
+    - path: src/core/state-store.ts
+      purpose: take main's version — confirmed strict superset of dev's tables
+
+risks:
+  - severity: medium
+    description: README.md conflict requires real authored content, not a mechanical pick
+    mitigation: write a merged narrative combining dev's OSS/gateway framing with main's current-capability list

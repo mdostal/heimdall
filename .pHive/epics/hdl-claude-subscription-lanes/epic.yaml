@@ -1,0 +1,46 @@
+name: hdl-claude-subscription-lanes
+title: Claude subscription-token lanes — CLAUDE_CODE_OAUTH_TOKEN support alongside raw API keys
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [backend, signal-sources, cli-integration, small-medium-scope]
+  roster: [researcher, technical-writer]
+  per_tag_reasoning:
+    backend: extends CommandRunner + active-probe/claude.ts with a credential-shape dispatcher.
+    signal-sources: closes a real gap between north_star's "2-5 Claude Code subscriptions" framing and the API-key-only adapter shipped since lane-health-status.
+    cli-integration: first subprocess-based active-probe (shells out to the real claude CLI), reusing the existing CommandRunner pattern from Multica.
+    small-medium-scope: two files touched, zero interface/wiring changes to LanePipeline/main.ts, verified live against a real token before planning.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (autonomous loop; operator directive plus live-verified technical research, not a re-litigation of an open design question)
+    hv_planning: not_applicable (small-medium scope)
+    structured_outline: not_applicable (small-medium scope)
+
+description: >
+  Adds support for Claude Code long-lived OAuth tokens (sk-ant-oat01-...,
+  from `claude setup-token`) alongside the existing raw Anthropic API key
+  credential type, auto-detected by credential shape -- zero new
+  provider/config surface. Confirmed via web research that Anthropic's
+  Messages API rejects this token type directly (scoped to the genuine
+  Claude Code client), so the correct integration path is shelling out to
+  the real claude CLI's `auth status --json` subcommand -- a zero-cost,
+  official liveness check, verified live against the actual long-lived
+  token configured on the hive before this epic was planned. Reuses the
+  existing CommandRunner pattern already established for Multica.
+
+stories:
+  - id: hdl-csl-01-command-runner-env-support
+    title: CommandRunner supports per-call environment variable overrides
+    complexity: low
+    depends_on: []
+  - id: hdl-csl-02-claude-subscription-probe
+    title: probeClaudeLane auto-detects and dispatches to a CLI-based subscription-token check
+    complexity: medium
+    depends_on: [hdl-csl-01-command-runner-env-support]

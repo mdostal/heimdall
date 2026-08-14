@@ -1,0 +1,74 @@
+id: hdl-mc-01-model-catalog-state-store
+epic: hdl-model-catalog
+title: model_catalog StateStore table + CRUD functions
+status: completed
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  Adds a model_catalog table to state-store.ts, same file/schema-evolution
+  pattern as every existing table (CREATE TABLE IF NOT EXISTS + defensive
+  try/catch ALTER TABLE for pre-existing DB files). Columns: provider,
+  model_id (composite PK), enabled (0/1), provider_created_at (nullable),
+  first_seen_at, last_seen_at. Adds StateStore methods: upsertModelSeen
+  (called by refresh -- inserts with the recency-default enabled value on
+  first sight, updates last_seen_at on subsequent sightings, NEVER touches
+  enabled for an already-known pair), setModelEnabled (explicit operator
+  override), getModelCatalog(provider?) (read, optional provider filter).
+
+acceptance_criteria:
+  - "Given a fresh StateStore, when the schema is created, then a model_catalog table exists with the columns described above"
+  - "Given upsertModelSeen is called for a genuinely new (provider, model_id) pair with a default-enabled value, when getModelCatalog is called, then that entry appears with enabled matching the provided default"
+  - "Given upsertModelSeen is called again for an ALREADY-KNOWN (provider, model_id) pair (regardless of what default value is passed this time), when getModelCatalog is called, then enabled is UNCHANGED from its prior value -- only last_seen_at advances"
+  - "Given setModelEnabled is called for a known pair, when getModelCatalog is called, then enabled reflects the explicit override, surviving a subsequent upsertModelSeen call for the same pair"
+  - "Given getModelCatalog is called with a provider filter, when multiple providers have entries, then only that provider's entries are returned"
+  - "Given a pre-existing DB file created before this table existed, when StateStore is constructed against it, then the table is added without crashing (defensive migration, matching manual_override's precedent)"
+
+steps:
+  - id: implement
+    description: Add the schema, upsertModelSeen, setModelEnabled, getModelCatalog to state-store.ts
+    agent: developer
+  - id: test
+    description: Add tests for every acceptance criterion, mirroring existing state-store.test.ts patterns for manual_override
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that upsertModelSeen never overwrites an existing enabled value, only first-sight inserts set it
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/core/state-store.ts
+      purpose: "The file being extended -- SCHEMA constant, defensive ALTER TABLE migration pattern, manual_override's exact upsert-vs-update distinction to mirror."
+
+files_to_modify:
+  - file: src/core/state-store.ts
+    change: "Add model_catalog to SCHEMA; add upsertModelSeen/setModelEnabled/getModelCatalog methods."
+  - file: src/core/state-store.test.ts
+    change: "Add tests for every acceptance criterion."
+
+design_decisions:
+  - decision: upsertModelSeen only sets `enabled` on first sight; never overwrites it on subsequent refreshes.
+    rationale: "This is the single most important correctness property of the whole epic -- research-brief.md's design explicitly requires an operator's deliberate toggle to survive future catalog refreshes. Getting this backwards would silently undo operator choices on every refresh."
+
+risks:
+  - severity: low
+    description: None beyond the standard new-table risk class already covered by settings/manual_override's precedent.
+    mitigation: "Direct test coverage for the upsert-preserves-enabled property specifically, not just generic CRUD."
+
+references:
+  - path: .pHive/epics/hdl-model-catalog/docs/design-discussion.md
+    relevant_excerpt: |
+      an already-seen pair's enabled is never touched by refresh, only
+      last_seen_at.

@@ -19,7 +19,7 @@
 // across separate PUT calls, and rolling back a disable would re-enable
 // into a still-unhealthy lane).
 
-import type { ControlAdapter } from "./control-adapter.js";
+import type { ControlAdapter, ReconcileContext } from "./control-adapter.js";
 import type { Lane } from "../lane-registry.js";
 import type { LaneStatusValue } from "../status-model.js";
 import type { LaneAgentResolver } from "./lane-agent-resolver.js";
@@ -55,16 +55,29 @@ export class MulticaControlAdapter implements ControlAdapter {
     this.defaultEnabledConcurrency = opts.defaultEnabledConcurrency ?? DEFAULT_ENABLED_CONCURRENCY;
   }
 
-  async reconcile(lane: Lane, status: LaneStatusValue): Promise<void> {
+  async reconcile(lane: Lane, status: LaneStatusValue, context?: ReconcileContext): Promise<void> {
     const agentIds = this.opts.resolver.resolve(lane.lane_id);
-    const desiredEnabled = !SUSPECT_STATUSES.has(status);
+    // hdl-lo-01: a manual override, when set, wins outright over the sensed
+    // status — this is the SAME top-level gate the operator directed
+    // traffic through before, not a second/parallel mechanism. Unset
+    // (null/undefined, the default) is byte-identical to pre-hdl-lo-01
+    // behavior: status alone decides.
+    const desiredEnabled =
+      context?.manualOverride != null
+        ? context.manualOverride === "enabled"
+        : !SUSPECT_STATUSES.has(status);
 
     for (const agentId of agentIds) {
-      await this.reconcileAgent(lane, agentId, desiredEnabled);
+      await this.reconcileAgent(lane, agentId, desiredEnabled, context);
     }
   }
 
-  private async reconcileAgent(lane: Lane, agentId: string, desiredEnabled: boolean): Promise<void> {
+  private async reconcileAgent(
+    lane: Lane,
+    agentId: string,
+    desiredEnabled: boolean,
+    context: ReconcileContext | undefined,
+  ): Promise<void> {
     const state = this.agentState.get(agentId) ?? {
       lastAppliedEnabled: null,
       priorMaxConcurrentTasks: null,
@@ -75,22 +88,27 @@ export class MulticaControlAdapter implements ControlAdapter {
     }
 
     if (desiredEnabled) {
-      await this.enableAgent(lane, agentId, state);
+      await this.enableAgent(lane, agentId, state, context);
     } else {
-      await this.disableAgent(lane, agentId, state);
+      await this.disableAgent(lane, agentId, state, context);
     }
   }
 
-  private async disableAgent(lane: Lane, agentId: string, state: AgentState): Promise<void> {
+  private async disableAgent(
+    lane: Lane,
+    agentId: string,
+    state: AgentState,
+    context: ReconcileContext | undefined,
+  ): Promise<void> {
     if (state.priorMaxConcurrentTasks === null) {
       const listResult = await this.callViaBreaker(() => this.opts.restClient.listAgents());
       if (listResult.status !== "ok") {
-        this.emitResult(lane, agentId, "capture-prior-state", false, listResult.status);
+        this.emitResult(lane, agentId, "capture-prior-state", false, listResult.status, context);
         return; // Retried automatically next tick — mismatch is still in place.
       }
       const agent = listResult.data.find((a) => a.id === agentId);
       if (!agent) {
-        this.emitResult(lane, agentId, "capture-prior-state", false, "agent_not_found");
+        this.emitResult(lane, agentId, "capture-prior-state", false, "agent_not_found", context);
         return;
       }
       state.priorMaxConcurrentTasks = agent.max_concurrent_tasks;
@@ -101,20 +119,25 @@ export class MulticaControlAdapter implements ControlAdapter {
       this.opts.restClient.updateAgent(agentId, { max_concurrent_tasks: 0 }),
     );
     const success = updateResult.status === "ok";
-    this.emitResult(lane, agentId, "disable", success, success ? undefined : updateResult.status);
+    this.emitResult(lane, agentId, "disable", success, success ? undefined : updateResult.status, context);
     if (success) {
       state.lastAppliedEnabled = false;
       this.agentState.set(agentId, state);
     }
   }
 
-  private async enableAgent(lane: Lane, agentId: string, state: AgentState): Promise<void> {
+  private async enableAgent(
+    lane: Lane,
+    agentId: string,
+    state: AgentState,
+    context: ReconcileContext | undefined,
+  ): Promise<void> {
     const restoreValue = state.priorMaxConcurrentTasks ?? this.defaultEnabledConcurrency;
     const updateResult = await this.callViaBreaker(() =>
       this.opts.restClient.updateAgent(agentId, { max_concurrent_tasks: restoreValue }),
     );
     const success = updateResult.status === "ok";
-    this.emitResult(lane, agentId, "enable", success, success ? undefined : updateResult.status);
+    this.emitResult(lane, agentId, "enable", success, success ? undefined : updateResult.status, context);
     if (success) {
       state.lastAppliedEnabled = true;
       this.agentState.set(agentId, state);
@@ -136,7 +159,9 @@ export class MulticaControlAdapter implements ControlAdapter {
     agentId: string,
     action: string,
     success: boolean,
-    reason?: string,
+    /** Reason for THIS action's outcome (e.g. an API error code) — distinct from `context.reason`, which is why the LANE is in its current status. */
+    outcomeReason?: string,
+    context?: ReconcileContext,
   ): void {
     this.opts.argus.emitActuationResult({
       laneId: lane.lane_id,
@@ -144,7 +169,10 @@ export class MulticaControlAdapter implements ControlAdapter {
       agentId,
       action,
       success,
-      reason,
+      reason: outcomeReason,
+      laneReason: context?.reason ?? undefined,
+      laneResetAt: context?.reset_at ?? undefined,
+      overrideActive: context?.manualOverride != null,
     });
   }
 }

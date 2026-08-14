@@ -17,11 +17,40 @@ export class NoHealthyAccountsAvailableError extends Error {
   }
 }
 
+// hdl-rr-04: the minimal shape RotationController actually needs — widened
+// from the concrete LaneRegistry class so a provider-scoped view (see
+// ProviderScopedLaneRegistry below) can be passed in structurally. A real
+// LaneRegistry still satisfies this unchanged.
+export interface RotationLaneSource {
+  list(): Lane[];
+  get(laneId: string): Lane | null;
+}
+
+// hdl-rr-04: RotationController rotates through whatever registry.list()
+// returns — passing the whole multi-provider LaneRegistry would rotate a
+// capped Claude account into a Codex lane, which is never a valid
+// substitute. This view scopes rotation to one provider's lanes only.
+export class ProviderScopedLaneRegistry implements RotationLaneSource {
+  private readonly lanes: Lane[];
+
+  constructor(registry: LaneRegistry, provider: string) {
+    this.lanes = registry.list().filter((lane) => lane.provider === provider);
+  }
+
+  list(): Lane[] {
+    return this.lanes;
+  }
+
+  get(laneId: string): Lane | null {
+    return this.lanes.find((lane) => lane.lane_id === laneId) ?? null;
+  }
+}
+
 export class RotationController {
   private activeLaneId: string | null;
 
   constructor(
-    private readonly registry: LaneRegistry,
+    private readonly registry: RotationLaneSource,
     private readonly store: StateStore,
     options: { activeLaneId?: string | null; now?: () => Date } = {},
   ) {

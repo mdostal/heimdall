@@ -1,0 +1,45 @@
+id: hdl-rr-02-routing-strategy-interface-refactor
+epic: hdl-routing-reconciliation
+title: Widen RoutingStrategy to RouteSelectionContext/Result; zero behavior change
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [hdl-rr-01-merge-and-resolve-conflicts]
+
+description: |
+  Per design-discussion.md §2: replace RoutingStrategy.selectRoute(taskType,
+  candidates: Lane[]): Lane|null with selectRoute(ctx: RouteSelectionContext):
+  RouteSelectionResult, where ctx = {taskType, candidates, store} and result =
+  {lane, detail?}. Update priority-strategy.ts/round-robin-strategy.ts/off-strategy.ts
+  to the new signature — same logic, same chosen lane, detail always omitted.
+  getAvailableRoute() in route-selector.ts passes the new ctx shape and spreads
+  result.detail's fields (rationale/decision_id/experiment_arm/ranked_candidates) onto
+  AvailableRoute as optional fields, populated only when present.
+
+acceptance_criteria:
+  - "Given the existing routing-strategies test suite, when run after this refactor, then every test passes unchanged (zero-test-change gate) except signature-only updates to call sites"
+  - "Given GET /available-route with strategy=priority or round-robin, when called, then the response is byte-identical to pre-refactor except the AvailableRoute type technically allows the new optional fields (which stay undefined)"
+  - "Given the one existing exact-shape deepEqual assertion in http-server.test.ts, when this story lands, then it's updated additively (new optional fields), not restructured"
+
+steps:
+  - id: implement
+    description: Refactor the interface and all three existing strategies plus route-selector.ts's call site
+    agent: developer
+  - id: test
+    description: Run npm test, confirm zero unexpected failures
+    agent: tester
+    depends_on: [implement]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - path: src/core/routing-strategies/types.ts
+      purpose: the interface being widened
+    - path: src/core/routing-strategies/priority-strategy.ts
+      purpose: signature-only update
+    - path: src/core/routing-strategies/round-robin-strategy.ts
+      purpose: signature-only update, cursor state must survive the refactor unchanged (module-level singleton registry)
+    - path: src/core/routing-strategies/off-strategy.ts
+      purpose: signature-only update
+    - path: src/core/route-selector.ts
+      purpose: build the new context, spread optional detail fields onto AvailableRoute

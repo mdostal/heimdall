@@ -1,0 +1,77 @@
+id: hdl-mcd-01-dashboard-model-catalog-panel
+epic: hdl-model-catalog-dashboard
+title: Dashboard model-catalog panel — list, toggle, refresh
+status: completed
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  New "Model catalog" .panel in dashboard.ts, positioned after "Add lane"
+  before the lane table. loadModelCatalog() fetches GET /models once on
+  page load (not on the 5s poll, matching the routing-strategy panel's
+  documented reasoning). Renders one small table per provider, each row a
+  model id + enabled checkbox. A dedicated change listener on the panel's
+  root toggles a model via POST /models/:provider/:modelId. A Refresh
+  button calls POST /models/refresh, shows a result banner, reloads the
+  view. Empty state when the catalog has never been refreshed. No backend
+  changes -- the HTTP surface already shipped in hdl-model-catalog.
+
+acceptance_criteria:
+  - "Given GET / is requested, when the response is inspected, then it includes a 'Model catalog' panel with a Refresh button and a container for the rendered catalog"
+  - "Given the model catalog is empty (never refreshed), when the panel loads, then it shows an empty-state message directing the operator to click Refresh, not a blank/broken table"
+  - "Given the Refresh button is clicked, when the request completes, then it POSTs to /models/refresh, shows a result banner, and reloads the catalog view"
+  - "Given a model's checkbox is toggled, when the change fires, then it POSTs to /models/:provider/:modelId with the new enabled value"
+  - "Given the embedded JS is extracted from a real rendered response and syntax-checked, when node --check runs against it, then it reports no syntax errors"
+  - "Every existing dashboard-related http-server.test.ts case passes with ZERO test changes to prior cases"
+
+steps:
+  - id: implement
+    description: Add the Model catalog panel HTML + CSS + JS to dashboard.ts
+    agent: developer
+  - id: test
+    description: Add tests for every acceptance criterion, mirroring existing GET / dashboard tests' structure
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that the panel follows the routing-strategy panel's exact load-once-not-on-poll discipline and existing CSS/JS conventions (event delegation, escapeHtml everywhere)
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch; run full local test suite + tsc build + manual browser smoke test as final gate before PR
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/api/ui/dashboard.ts
+      purpose: "The file being extended. Routing-strategy panel (loadRoutingStrategy, load-once pattern) and lane-override controls (event delegation, fetch-then-reconcile) are the two patterns this story mirrors."
+
+files_to_modify:
+  - file: src/api/ui/dashboard.ts
+    change: "Add the Model catalog panel's HTML, CSS, and JS (renderModelCatalog, loadModelCatalog, toggle listener, refresh button handler)."
+  - file: src/api/http-server.test.ts
+    change: "Add tests confirming GET / includes the new panel's markup."
+
+design_decisions:
+  - decision: Load once on page load, not on the 5s lane-status poll interval.
+    rationale: "Mirrors the routing-strategy panel's already-documented reasoning exactly — a config-browsing/editing surface, not a live status row; re-rendering checkboxes under an operator's cursor every 5s would be actively annoying."
+  - decision: No backend changes — pure consumer of the already-shipped GET/POST /models surface.
+    rationale: "hdl-model-catalog (slice 1) already built the full query/mutation surface; this slice is exclusively presentation."
+
+risks:
+  - severity: low
+    description: None beyond the standard new-dashboard-panel risk class already covered by the routing-strategy and add-lane panels' precedent.
+    mitigation: "Direct mirroring of two already-shipped, already-tested UI patterns in the same file."
+
+references:
+  - path: .pHive/epics/hdl-model-catalog-dashboard/docs/design-discussion.md
+    relevant_excerpt: |
+      mirrors the existing "Routing strategy" panel's exact loading
+      discipline: fetched once on page load, not on the 5s lane-status
+      poll.
