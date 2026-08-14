@@ -273,6 +273,53 @@ test("GET /available-route returns an up lane with headroom and a token ref for 
   }
 });
 
+test("hdl-ot-02: GET /available-route records a model_substitution telemetry event when the declared model is disabled", async () => {
+  const registry = registryWithRouteLanes();
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "codex", provider: "codex", credential_ref: "CODEX_TOKEN" });
+  store.recordStatus({ lane_id: "codex", status: "up", reset_at: null, reason: null, signal_source: "active_probe", observed_at: "2026-08-05T16:00:00.000Z" });
+  store.upsertModelSeen({ provider: "codex", model_id: "gpt-codex", default_enabled: false, provider_created_at: "2024-01-01T00:00:00Z", seen_at: "2026-08-14T00:00:00Z" });
+  store.upsertModelSeen({ provider: "codex", model_id: "gpt-codex-newer", default_enabled: true, provider_created_at: "2026-06-01T00:00:00Z", seen_at: "2026-08-14T00:00:00Z" });
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/available-route?task-type=build`);
+    const body = await res.json();
+    assert.equal(body.model_substituted, true);
+    assert.equal(body.model, "gpt-codex-newer");
+
+    const counts = store.getTelemetryEventCounts("model_substitution");
+    assert.equal(counts.length, 1);
+    assert.equal(counts[0].labels.declaredModel, "gpt-codex");
+    assert.equal(counts[0].labels.effectiveModel, "gpt-codex-newer");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-ot-02: GET /available-route does NOT record a model_substitution event when the declared model is used as-is", async () => {
+  const registry = registryWithRouteLanes();
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "codex", provider: "codex", credential_ref: "CODEX_TOKEN" });
+  store.recordStatus({ lane_id: "codex", status: "up", reset_at: null, reason: null, signal_source: "active_probe", observed_at: "2026-08-05T16:00:00.000Z" });
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/available-route?task-type=build`);
+    const body = await res.json();
+    assert.equal(body.model_substituted, false);
+    assert.deepEqual(store.getTelemetryEventCounts("model_substitution"), []);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
 test("hdl-rs-01: GET /available-route skips a lane whose manual_override is 'disabled', even though its sensed status is 'up'", async () => {
   const registry = registryWithRouteLanes();
   const store = new StateStore(":memory:");
@@ -1654,6 +1701,90 @@ test("hdl-rr-04: POST /rotation/:provider/rotate advances to the next healthy la
     const getRes = await fetch(`http://localhost:${port}/rotation/claude`);
     const getBody = await getRes.json();
     assert.equal(getBody.active_lane_id, "claude-b");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-ot-03: GET /metrics returns 200 with valid Prometheus text format on an empty store, never a crash", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/metrics`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /^text\/plain/);
+    const body = await res.text();
+    assert.match(body, /^# HELP heimdall_lanes /m);
+    assert.match(body, /^# TYPE heimdall_lanes gauge$/m);
+    // A declared-but-never-probed lane still counts as a lane (status
+    // defaults to "down" — same fallback GET /lanes already uses).
+    assert.match(body, /heimdall_lanes\{provider="claude",status="down"\} 1/);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-ot-03: GET /metrics reflects real telemetry_events counts with correct labels", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  store.recordTelemetryEvent("actuation_result", { provider: "claude", action: "disable", success: "true" });
+  store.recordTelemetryEvent("actuation_result", { provider: "claude", action: "disable", success: "true" });
+  store.recordTelemetryEvent("actuation_result", { provider: "claude", action: "enable", success: "false" });
+  store.recordTelemetryEvent("rotation_event", { provider: "claude", kind: "capped" });
+  store.recordTelemetryEvent("model_substitution", { provider: "claude" });
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/metrics`);
+    const body = await res.text();
+    assert.match(body, /heimdall_actuation_results_total\{provider="claude",action="disable",success="true"\} 2/);
+    assert.match(body, /heimdall_actuation_results_total\{provider="claude",action="enable",success="false"\} 1/);
+    assert.match(body, /heimdall_rotation_events_total\{provider="claude",kind="capped"\} 1/);
+    assert.match(body, /heimdall_model_substitutions_total\{provider="claude"\} 1/);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-ot-04: GET / (dashboard) includes a Telemetry panel that loads from GET /metrics", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /id="telemetry-root"/);
+    assert.match(body, /fetch\("\/metrics"\)/, "the panel must load its state from GET /metrics");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-ot-04: GET / does not change existing routes' behavior (Telemetry panel is additive only)", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const lanesRes = await fetch(`http://localhost:${port}/lanes`);
+    assert.equal(lanesRes.status, 200);
+    const metricsRes = await fetch(`http://localhost:${port}/metrics`);
+    assert.equal(metricsRes.status, 200);
   } finally {
     server.close();
     store.close();

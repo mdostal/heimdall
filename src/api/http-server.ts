@@ -21,6 +21,7 @@ import { renderDashboardHtml } from "./ui/dashboard.js";
 import { appendLane, deriveCredentialRef, laneIdAlreadyDeclared } from "../core/env-file.js";
 import { refreshModelCatalog, getModelCatalog, setModelEnabled } from "../core/model-catalog.js";
 import { NoHealthyAccountsAvailableError, type RotationController } from "../core/rotation-controller.js";
+import { renderMetrics } from "./metrics.js";
 
 const DEFAULT_ENV_FILE_PATH = ".env";
 
@@ -272,6 +273,15 @@ export function createHttpServer(
     if (req.method === "GET" && req.url === "/healthz") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ status: "ok" }));
+      return;
+    }
+
+    // hdl-ot-03: Heimdall's own metrics, entirely local — Prometheus text
+    // format so any OTEL/Prometheus-compatible scraper (Argus included) can
+    // pull it later without Heimdall depending on any of them being present.
+    if (req.method === "GET" && req.url === "/metrics") {
+      res.writeHead(200, { "content-type": "text/plain; version=0.0.4; charset=utf-8" });
+      res.end(renderMetrics(registry, store));
       return;
     }
 

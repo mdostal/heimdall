@@ -1,0 +1,35 @@
+id: hdl-ot-04-dashboard-telemetry-panel
+epic: hdl-own-telemetry
+title: Dashboard Telemetry panel
+status: pending
+complexity: low
+methodology: classic
+depends_on: [hdl-ot-03-metrics-endpoint]
+
+description: |
+  New "Telemetry" panel on the dashboard, positioned after the model-catalog
+  panel — loaded once on page load (a summary surface, not a live-polled
+  row, mirroring the routing-strategy/model-catalog panels' exact loading
+  discipline). Parses GET /metrics' text format client-side (simple line
+  regex — no new dependency) and renders a small summary table: lane counts
+  by status, actuation success/fail counts, rotation events, model
+  substitutions, routing decision counts.
+
+acceptance_criteria:
+  - "Given GET / is called, when the response is parsed, then it includes a Telemetry panel container and a script that fetches GET /metrics on load"
+  - "Given GET / is called, when compared to the pre-existing routes, then every existing route's behavior is unchanged (additive only)"
+
+steps:
+  - id: implement
+    description: Add the panel + client-side Prometheus-text parsing to dashboard.ts
+    agent: developer
+  - id: test
+    description: http-server.test.ts dashboard-content assertions matching the existing panel-presence test pattern
+    agent: tester
+    depends_on: [implement]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - path: src/api/ui/dashboard.ts
+      purpose: existing panel patterns (routing-strategy, model-catalog) to mirror

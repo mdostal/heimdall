@@ -196,6 +196,12 @@ export function renderDashboardHtml(): string {
   </div>
 
   <div class="panel">
+    <h2>Telemetry</h2>
+    <div class="strategy-status">Heimdall's own local metrics — <code>GET /metrics</code> (Prometheus text format), never dependent on Argus or any other external collector.</div>
+    <div id="telemetry-root">Loading…</div>
+  </div>
+
+  <div class="panel">
     <h2>Add lane</h2>
     <form id="add-lane-form">
       <div class="row">
@@ -602,8 +608,66 @@ export function renderDashboardHtml(): string {
       });
   });
 
+  // Telemetry panel (hdl-ot-04) — loaded once on page load, same reasoning
+  // as routing-strategy/model-catalog above: a summary surface, not a live
+  // status row. Parses GET /metrics' Prometheus text format client-side —
+  // a simple line regex, no new dependency, matching this file's own
+  // "no framework, no build step" bar.
+  function parsePrometheusText(text) {
+    var families = {};
+    var order = [];
+    text.split("\\n").forEach(function (line) {
+      if (line.indexOf("# HELP ") === 0) {
+        var name = line.split(" ")[2];
+        if (!families[name]) { families[name] = []; order.push(name); }
+        return;
+      }
+      if (line.indexOf("#") === 0 || line.trim() === "") return;
+      var match = line.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)(\\{[^}]*\\})? (-?[0-9.]+)$/);
+      if (!match) return;
+      var name = match[1];
+      if (!families[name]) { families[name] = []; order.push(name); }
+      families[name].push({ labels: match[2] || "", value: match[3] });
+    });
+    return { families: families, order: order };
+  }
+
+  function renderTelemetry(text) {
+    var root = document.getElementById("telemetry-root");
+    var parsed = parsePrometheusText(text);
+    var rows = [];
+    parsed.order.forEach(function (name) {
+      parsed.families[name].forEach(function (sample) {
+        rows.push({ name: name, labels: sample.labels, value: sample.value });
+      });
+    });
+    if (rows.length === 0) {
+      root.innerHTML = "<div class=\\"empty-state\\">No telemetry recorded yet.</div>";
+      return;
+    }
+    var html = "<table><thead><tr><th>Metric</th><th>Labels</th><th>Value</th></tr></thead><tbody>";
+    rows.forEach(function (row) {
+      html +=
+        "<tr><td>" + escapeHtml(row.name) + "</td><td>" + escapeHtml(row.labels) +
+        "</td><td>" + escapeHtml(row.value) + "</td></tr>";
+    });
+    html += "</tbody></table>";
+    root.innerHTML = html;
+  }
+
+  function loadTelemetry() {
+    fetch("/metrics")
+      .then(function (res) { return res.text(); })
+      .then(renderTelemetry)
+      .catch(function (err) {
+        document.getElementById("telemetry-root").innerHTML =
+          "<div class=\\"empty-state\\">Failed to load telemetry: " + escapeHtml(err) + "</div>";
+      });
+  }
+
   loadRoutingStrategy();
   loadModelCatalog();
+  loadTelemetry();
   poll();
   setInterval(poll, 5000);
 })();

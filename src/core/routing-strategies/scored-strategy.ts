@@ -74,6 +74,11 @@ export class ScoredStrategy implements RoutingStrategy {
     return this.ledger;
   }
 
+  /** hdl-ot-03: exposes the same ledger connection selectRoute() already writes to — GET /metrics reads through this, no second connection opened. */
+  getDecisionCounts(): ReturnType<RouteLedger["getDecisionCounts"]> {
+    return this.getLedger().getDecisionCounts();
+  }
+
   selectRoute({ taskType, candidates, taskId }: RouteSelectionContext): RouteSelectionResult {
     const policy = this.getPolicy();
     const now = this.options.now ?? (() => new Date());

@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`hdl-own-telemetry` epic complete.** Heimdall gets its own self-contained metric tracking, independent of Argus. Operator directive (2026-08-14), in response to a proposal to add Argus OTEL emission for routing decisions: *"heimdall should have it's own telemetry and stuff, we need to be working completely in a silo... each god needs its own metric tracking done separately -- argus is just another silly dashboard for otel alike posthog or anything else."* Audit found actuation results, rotation events, and model substitutions had zero local record — Argus-only fire-and-forget OTEL push, gone entirely if Argus wasn't configured (the common standalone-mode case).
+  - New `telemetry_events` StateStore table for the three event kinds with no existing local record. `LocalTelemetryRecorder` implements the same 3-method `ArgusEmitter` interface `ArgusClient` does, writing locally instead of pushing OTEL. `CompositeTelemetryEmitter` fans one call out to a list of emitters — the single construction-site change in `composeService()` (`new ArgusClient()` → a composite of `[LocalTelemetryRecorder(store), ArgusClient]`) means every existing call site keeps its `ArgusEmitter`-typed parameter completely unchanged. Argus keeps receiving the exact same spans it always has; Heimdall just stops depending on it.
+  - `rotation-controller.ts`/`route-selector.ts` now record rotation events and model substitutions locally — genuinely new instrumentation, since neither ever emitted telemetry of any kind before, not even to Argus.
+  - New `GET /metrics` — hand-rolled Prometheus text exposition format, no new dependency. Aggregates lane counts, actuation results, rotation events, model substitutions, routing decisions, and model-catalog entries, all from Heimdall's own local state. Scrapable by Argus, Grafana, Prometheus, or anything else OTEL/Prometheus-compatible later, without Heimdall depending on any of them being present.
+  - Dashboard gets a "Telemetry" panel parsing `GET /metrics` client-side.
+  - See `.pHive/epics/hdl-own-telemetry/docs/design-discussion.md`. Version bump `0.20.0` → `0.21.0`.
+
 ## [0.20.0] - 2026-08-14
 
 First tagged release. Everything below accumulated in `[Unreleased]` prior to this

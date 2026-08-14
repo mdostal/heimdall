@@ -100,6 +100,13 @@ test("429 weekly-limit response caps current account and rotates to the next hea
   assert.equal(store.getCurrentStatus("claude-a")?.status, "out_of_credit");
   assert.equal(store.getCurrentStatus("claude-a")?.reset_at, "2026-08-15T12:00:00.000Z");
   assert.equal(controller.getActiveAccount().lane_id, "claude-b");
+
+  // hdl-ot-02: both the cap and the rotation get a local telemetry record —
+  // previously this whole flow emitted nothing locally at all.
+  const events = store.getTelemetryEventCounts("rotation_event");
+  const kinds = events.flatMap((e) => Array(e.count).fill(e.labels.kind));
+  assert.ok(kinds.includes("capped"));
+  assert.ok(kinds.includes("rotated"));
   store.close();
 });
 

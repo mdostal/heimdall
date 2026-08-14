@@ -1,0 +1,43 @@
+id: hdl-ot-03-metrics-endpoint
+epic: hdl-own-telemetry
+title: "GET /metrics — Prometheus text format, aggregated from local state"
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [hdl-ot-02-instrument-rotation-and-model-substitution]
+
+description: |
+  Add GET /metrics to http-server.ts, hand-rolled Prometheus text exposition
+  format (# HELP / # TYPE / metric lines), no new dependency. Aggregates:
+  - heimdall_lanes{provider,status} gauge — from getAllCurrentStatuses() (already local)
+  - heimdall_actuation_results_total{success} counter — from telemetry_events
+  - heimdall_rotation_events_total{provider,kind} counter — from telemetry_events
+  - heimdall_model_substitutions_total{provider} counter — from telemetry_events
+  - heimdall_routing_decisions_total{result} counter — new RouteLedger.getDecisionCounts() method
+  - heimdall_model_catalog_entries{provider,enabled} gauge — from model_catalog table (already local)
+
+  Content-Type: text/plain; version=0.0.4 (the Prometheus exposition format
+  spec's required content-type), so any Prometheus-compatible scraper (Argus
+  included) can pull it without Heimdall depending on any of them.
+
+acceptance_criteria:
+  - "Given GET /metrics, when called on an empty store, then it returns 200 with valid Prometheus text format and zero-value counters, never a crash"
+  - "Given at least one actuation_result/rotation_event/model_substitution telemetry event exists, when GET /metrics is called, then the corresponding counter reflects the real count with correct labels"
+  - "Given GET /metrics, when parsed, then every metric line matches the Prometheus text exposition format (HELP/TYPE preceding each metric family)"
+
+steps:
+  - id: implement
+    description: Add RouteLedger.getDecisionCounts() and the GET /metrics handler
+    agent: developer
+  - id: test
+    description: http-server.test.ts coverage for the new endpoint against seeded telemetry_events/routing_decisions/model_catalog data
+    agent: tester
+    depends_on: [implement]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - path: src/core/routing/route-ledger.ts
+      purpose: needs a new getDecisionCounts() aggregate query method
+    - path: src/api/http-server.ts
+      purpose: route handler placement, matching the existing GET /models pattern
