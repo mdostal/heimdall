@@ -1,10 +1,19 @@
 name: CI
 # Standard, reusable CI gate shared identically across all Pantheon/god repos.
 # Auto-detects the stack (node / python / go) and runs install + build + test.
-# Runs on every PR into dev and into the default branch (main/master). This is THE gate.
+#
+# DISABLED for this repo (2026-08-12, heimdall only — see
+# docs/decisions/DEC-hdl-local-build-verification.md): GitHub Actions is
+# billing-blocked on this account, so pull_request-triggered runs fail
+# before they even start, unrelated to code correctness. scripts/
+# hive-verify.sh, run on the hive build box, is the merge gate now.
+# workflow_dispatch is kept so this can still be run manually or
+# re-enabled (restore the pull_request: trigger below) without any other
+# change to this file — it stays byte-identical to the shared template
+# otherwise.
 on:
-  pull_request:
-    branches: [dev, main, master]
+  # pull_request:
+  #   branches: [dev, main, master]
   workflow_dispatch:
 
 jobs:

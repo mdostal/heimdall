@@ -1,0 +1,107 @@
+id: hdl-gs-03-wire-gemini-provider
+epic: hdl-gemini-signals
+title: Wire Gemini into lane-pipeline + main.ts PROVIDER_ADAPTERS registry, end-to-end test
+status: completed
+complexity: low
+methodology: classic
+depends_on: [hdl-gs-01-active-probe-gemini, hdl-gs-02-public-status-gemini]
+
+description: |
+  Wires the two adapters built in hdl-gs-01/02 into the single real
+  dispatch point. Adds geminiAdapters(): ProviderAdapters to
+  lane-pipeline.ts (mirroring claudeAdapters/codexAdapters exactly -- a
+  two-line bundling function, no new logic), then adds one line to
+  PROVIDER_ADAPTERS in main.ts: `gemini: geminiAdapters`. No changes to
+  Lane/LaneDeclaration (provider is already an open string), LanePipeline
+  (already provider-agnostic), route-selector.ts, or any HTTP/MCP/UI
+  surface -- confirmed in research-brief.md that none of those branch on
+  provider identity. Proves the wiring end-to-end with a test mirroring
+  main.test.ts's existing "unknown provider is skipped gracefully" case,
+  but inverted: a lane declared with provider=gemini now DOES get a real
+  LanePipeline + schedulers, exactly like claude/codex lanes do today.
+
+acceptance_criteria:
+  - "Given a lane declared with HEIMDALL_LANE_N_PROVIDER=gemini and a valid credential, when composeService() runs, then that lane gets a real LanePipeline, MulticaAutopilotScheduler, and InProcessScheduler wired up -- no 'no ProviderAdapters registered' error is logged for it"
+  - "Given the same gemini lane, when its InProcessScheduler.poll() is exercised end-to-end (mirroring main.test.ts's degraded-lane escalation test), then it correctly calls through to probeGeminiLane/checkGeminiPublicStatus, not a stub"
+  - "Every existing main.test.ts case (including the still-relevant 'unknown provider is skipped gracefully' test using a genuinely unregistered provider name) passes with ZERO test changes to prior cases -- proves this is additive, not a behavior change for claude/codex lanes"
+  - "npm run build (tsc) is clean and npm test passes in full after this story"
+
+steps:
+  - id: research
+    description: Confirm the exact PROVIDER_ADAPTERS registry shape and claudeAdapters/codexAdapters factory pattern before adding the gemini entry
+    agent: researcher
+  - id: implement
+    description: Add geminiAdapters() to lane-pipeline.ts and the gemini entry to PROVIDER_ADAPTERS in main.ts
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Add the end-to-end wiring test to main.test.ts; confirm all existing tests pass unmodified
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that this story touches only the two documented lines/files plus its own test -- no incidental changes to provider-agnostic code
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch; run full local test suite + tsc build as final gate before PR
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/main.ts
+      purpose: "PROVIDER_ADAPTERS registry (lines 37-40) and the composeService loop that looks it up per lane (lines 122-134) -- the single dispatch point being extended."
+    - path: src/core/lane-pipeline.ts
+      purpose: "claudeAdapters()/codexAdapters() (lines 59-65) -- the exact factory shape geminiAdapters() mirrors."
+    - path: src/main.test.ts
+      purpose: "Existing end-to-end pipeline tests (composeService wiring, degraded-lane escalation, unknown-provider-skipped) that this story's new test mirrors and must not regress."
+
+files_to_modify:
+  - file: src/core/lane-pipeline.ts
+    change: "Add geminiAdapters(): ProviderAdapters, importing probeGeminiLane and checkGeminiPublicStatus from the new signal-sources files."
+  - file: src/main.ts
+    change: "Add `gemini: geminiAdapters` to the PROVIDER_ADAPTERS registry (one line, plus the corresponding import)."
+  - file: src/main.test.ts
+    change: "Add one end-to-end test proving a gemini-provider lane gets real pipelines/schedulers wired up."
+
+code_examples:
+  - title: The factory pattern to mirror exactly
+    file: src/core/lane-pipeline.ts
+    snippet: |
+      export function claudeAdapters(): ProviderAdapters {
+        return {
+          checkPublicStatus: checkClaudePublicStatus,
+          probe: probeClaudeLane,
+        };
+      }
+
+  - title: The one-line registry addition
+    file: src/main.ts
+    snippet: |
+      const PROVIDER_ADAPTERS: Record<string, () => ProviderAdapters> = {
+        claude: claudeAdapters,
+        codex: codexAdapters,
+        gemini: geminiAdapters,  // <- this story's addition
+      };
+
+design_decisions:
+  - decision: No changes to Lane/LaneDeclaration types or any validation/allow-list for provider strings.
+    rationale: "provider is already an open string (confirmed in research-brief.md) -- adding gemini as a THIRD known value needs no type widening, matching the existing zero-schema-change cost of the claude/codex split."
+
+risks:
+  - severity: low
+    description: A typo or wrong import in the one-line registry addition would silently fall through to the existing 'unknown provider skipped' path rather than erroring loudly.
+    mitigation: "The acceptance criteria explicitly assert a gemini lane gets a real pipeline (not the skipped-lane log line) -- this is caught by the story's own test, not left to production observation."
+
+references:
+  - path: .pHive/epics/hdl-gemini-signals/docs/research-brief.md
+    relevant_excerpt: |
+      Minimal wiring for a new provider (e.g. gemini): add
+      src/core/signal-sources/public-status/gemini.ts +
+      active-probe/gemini.ts, add a geminiAdapters(): ProviderAdapters in
+      lane-pipeline.ts, then add one line to PROVIDER_ADAPTERS in main.ts.

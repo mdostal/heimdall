@@ -18,13 +18,14 @@
 import { buildLaneRegistry, createHttpServer, type RefreshLaneFn } from "./api/http-server.js";
 import type { Server } from "node:http";
 import { StateStore } from "./core/state-store.js";
-import { PolicyLoader } from "./core/routing/policy-loader.js";
-import { RouteLedger } from "./core/routing/route-ledger.js";
-import { RouteSelector } from "./core/route-selector.js";
 import {
   LanePipeline,
   claudeAdapters,
   codexAdapters,
+  geminiAdapters,
+  kimiAdapters,
+  openrouterAdapters,
+  ollamaAdapters,
   type ProviderAdapters,
 } from "./core/lane-pipeline.js";
 import { ArgusClient, startArgusSdk, type ArgusEmitter } from "./core/telemetry/argus-client.js";
@@ -40,6 +41,10 @@ import { MulticaControlAdapter } from "./core/actuation/multica-control-adapter.
 const PROVIDER_ADAPTERS: Record<string, () => ProviderAdapters> = {
   claude: claudeAdapters,
   codex: codexAdapters,
+  gemini: geminiAdapters,
+  kimi: kimiAdapters,
+  openrouter: openrouterAdapters,
+  ollama: ollamaAdapters,
 };
 
 const DEFAULT_AUTOPILOT_CRON = "*/1 * * * *";
@@ -176,9 +181,12 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
       if (!current) continue;
       const adapter = controlAdapters.get(lane.lane_id);
       if (!adapter) continue;
-      adapter.reconcile(lane, current.status).catch((err) => {
-        console.error(`[main] reconcile() failed for lane ${lane.lane_id}:`, err);
-      });
+      const manualOverride = store.getManualOverride(lane.lane_id);
+      adapter
+        .reconcile(lane, current.status, { reason: current.reason, reset_at: current.reset_at, manualOverride })
+        .catch((err) => {
+          console.error(`[main] reconcile() failed for lane ${lane.lane_id}:`, err);
+        });
     }
   }, options.statusWatcherIntervalMs ?? STATUS_WATCHER_INTERVAL_MS);
   statusWatcher.unref?.();
@@ -192,11 +200,7 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     await pipeline.refresh(lane);
   };
 
-  const policy = PolicyLoader.load();
-  const ledger = new RouteLedger(env.HEIMDALL_DB_PATH ?? ":memory:");
-  const routeSelector = new RouteSelector(policy, ledger);
-
-  const httpServer = createHttpServer(registry, store, refreshLane, routeSelector);
+  const httpServer = createHttpServer(registry, store, refreshLane, undefined, options.fetchImpl);
   if (!options.skipHttpListen) {
     httpServer.listen(port, () => {
       console.log(`heimdall service listening on http://localhost:${port}`);

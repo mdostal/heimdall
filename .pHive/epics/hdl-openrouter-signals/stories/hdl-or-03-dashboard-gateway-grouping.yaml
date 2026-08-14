@@ -1,0 +1,93 @@
+id: hdl-or-03-dashboard-gateway-grouping
+epic: hdl-openrouter-signals
+title: Dashboard groups lanes sharing a gateway credential, shows each route's model
+status: completed
+complexity: medium
+methodology: classic
+depends_on: [hdl-or-02-wire-openrouter-provider]
+
+description: |
+  Makes the "nesting" visible, not just structurally supported. GET /lanes
+  (getLaneStatuses in http-server.ts) gains two fields on
+  LaneStatusWithOverride -- model and credential_ref -- both read from the
+  in-memory registry via registry.get(status.lane_id), mirroring the exact
+  pattern credential_configured already uses (no new DB column;
+  credential_ref is an env-var NAME, not a secret, same non-sensitive
+  category as lane_id/provider). Dashboard groups lane rows by
+  credential_ref: when more than one lane shares a credential_ref, they
+  render under one gateway header (e.g. "OpenRouter (OPENROUTER_TOKEN)")
+  with each route's model shown; a credential_ref used by exactly one lane
+  renders exactly as it does today -- zero visual change for Claude/Codex/
+  Gemini/Kimi lanes, which never share a credential.
+
+acceptance_criteria:
+  - "Given GET /lanes, when the response is inspected, then every lane object includes model and credential_ref fields"
+  - "Given credential_configured is already boolean-only for secret hygiene, when credential_ref is added, then it carries only the env-var NAME (e.g. 'OPENROUTER_TOKEN'), never a resolved secret value"
+  - "Given two or more lanes share the same credential_ref, when the dashboard renders, then those lanes appear grouped under one gateway header, each showing its own model"
+  - "Given a credential_ref used by exactly one lane (every existing Claude/Codex/Gemini/Kimi lane in today's test fixtures), when the dashboard renders, then that lane's row is visually IDENTICAL to its pre-this-story rendering -- zero DOM/visual change for the non-nested case"
+  - "Every existing dashboard.test.ts / http-server.test.ts case covering GET /lanes passes with ZERO test changes for the non-grouped case"
+
+steps:
+  - id: research
+    description: Confirm getLaneStatuses's exact registry-lookup pattern (credential_configured) and dashboard.ts's current renderRow structure
+    agent: researcher
+  - id: implement
+    description: Add model/credential_ref to LaneStatusWithOverride; implement dashboard grouping logic (group-by-credential_ref, single-member groups render unchanged)
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Add tests for the new GET /lanes fields, the grouped-rendering case, and an explicit zero-change assertion for the ungrouped case
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that credential_ref never carries a resolved secret, and that ungrouped rendering is provably unchanged (the zero-test-change acceptance gate)
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/api/http-server.ts
+      purpose: "getLaneStatuses (around line 182) -- the exact function gaining model/credential_ref, using registry.get(status.lane_id) exactly like credential_configured already does at line 196."
+    - path: src/api/ui/dashboard.ts
+      purpose: "renderRow and the lane-list rendering loop -- gains the group-by-credential_ref logic."
+
+files_to_modify:
+  - file: src/api/http-server.ts
+    change: "Add model: string and credential_ref: string to LaneStatusWithOverride, populated in getLaneStatuses via registry.get(status.lane_id)."
+  - file: src/api/http-server.test.ts
+    change: "Add assertions that GET /lanes responses include model and credential_ref."
+  - file: src/api/ui/dashboard.ts
+    change: "Group lane rows by credential_ref when more than one lane shares it; render a gateway header; show model per grouped route. Single-member groups render via the existing unchanged path."
+
+code_examples:
+  - title: The registry-lookup pattern to mirror exactly
+    file: src/api/http-server.ts
+    snippet: |
+      credential_configured: registry.get(status.lane_id)?.credential != null,
+
+design_decisions:
+  - decision: credential_ref (the env-var name) is safe to expose in GET /lanes, unlike the resolved secret it names.
+    rationale: "Matches the existing REQ-07 invariant precedent (credential_configured already distinguishes 'is this lane's secret set' from the secret itself) -- credential_ref is metadata about WHERE a secret lives, not the secret."
+  - decision: Grouping is computed client-side from the flat GET /lanes response, not a new grouped API shape.
+    rationale: "Keeps the HTTP contract flat and simple (existing MCP tools/CLI consumers of GET /lanes are unaffected) -- the dashboard is the only consumer that needs the grouped view, so it does the grouping."
+
+risks:
+  - severity: low
+    description: A future lane accidentally reusing another lane's credential_ref (typo, not a real gateway) would visually group them, implying a relationship that isn't intended.
+    mitigation: "This is an honest reflection of the data -- if two lanes truly share a credential, grouping them is correct information, not a false claim. Not treated as a defect."
+
+references:
+  - path: .pHive/epics/hdl-openrouter-signals/docs/design-discussion.md
+    relevant_excerpt: |
+      the dashboard groups rows sharing a credential_ref used by more than
+      one lane under one gateway header ... a credential_ref used by
+      exactly one lane renders exactly as today.

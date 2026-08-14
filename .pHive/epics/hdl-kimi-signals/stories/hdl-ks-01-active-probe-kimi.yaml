@@ -1,0 +1,107 @@
+id: hdl-ks-01-active-probe-kimi
+epic: hdl-kimi-signals
+title: Kimi K3 active-probe adapter (models list, Bearer auth, typed error.type quota-vs-transient split)
+status: completed
+complexity: medium
+methodology: classic
+depends_on: []
+
+description: |
+  Implements src/core/signal-sources/active-probe/kimi.ts. Closest structural
+  mirror is active-probe/codex.ts (Bearer-token auth, OpenAI-API-compatible
+  host, best-effort JSON error-body parse with a degraded fallback) rather
+  than Claude's header-name pattern. GET api.moonshot.ai/v1/models,
+  Authorization: Bearer <key>. Moonshot's documented error.type vocabulary
+  (research-brief.md) is richer than Codex's own unconfirmed guesswork:
+  engine_overloaded/too_many_requests -> degraded (transient);
+  billing_quota_exhausted/monthly_quota_exhausted/rolling_quota_exceeded ->
+  out_of_credit (longer-lived quota conditions); invalid_api_key/
+  invalid_authentication -> down. reset_at reads the retry-after header when
+  present and passes it through RAW, mirroring codex.ts's own already-accepted
+  simplification for the identical header (no relative-to-absolute
+  conversion -- an existing codebase precedent, not a new gap this story
+  introduces).
+
+acceptance_criteria:
+  - "Given a 2xx response, when probeKimiLane is called, then it returns { status: 'up', reset_at: null, reason: null }"
+  - "Given a 401 response with error.type invalid_api_key or invalid_authentication, when probeKimiLane is called, then it returns { status: 'down', reason: <message> }"
+  - "Given a 429 or 403 response whose error.type is one of billing_quota_exhausted, monthly_quota_exhausted, rolling_quota_exceeded, when probeKimiLane is called, then it returns { status: 'out_of_credit', reason: <message> }"
+  - "Given a 429 response whose error.type is engine_overloaded or too_many_requests, when probeKimiLane is called, then it returns { status: 'degraded', reason: <message> }, and reset_at carries the raw retry-after header value when present, else null"
+  - "Given a 429/403 response with an unrecognized or missing error.type, when probeKimiLane is called, then it defaults to 'degraded', never guesses 'out_of_credit'"
+  - "Given a 5xx response, when probeKimiLane is called, then it returns { status: 'down', reason: 'server error (<code>)' }"
+  - "Given a network-level fetch failure, when probeKimiLane is called, then it never throws -- it returns { status: 'down', reason: 'probe request failed: <message>' }"
+
+steps:
+  - id: research
+    description: Confirm the request/response shapes captured in research-brief.md before implementing
+    agent: researcher
+  - id: implement
+    description: Implement active-probe/kimi.ts mirroring active-probe/codex.ts's Bearer-auth + best-effort-JSON-parse structure
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Unit tests covering every acceptance criterion using hand-built fixture responses
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that unrecognized error.type values default to degraded, never out_of_credit, and that reset_at passthrough matches codex.ts's existing behavior exactly
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/core/signal-sources/active-probe/codex.ts
+      purpose: "The exact structural pattern to mirror -- Bearer auth, best-effort JSON error-body parse with a degraded fallback, raw retry-after passthrough."
+
+files_to_modify:
+  - file: src/core/signal-sources/active-probe/kimi.ts
+    change: "New file -- probeKimiLane(apiKey, fetchImpl?) implementing the mapping described above."
+  - file: src/core/signal-sources/active-probe/kimi.test.ts
+    change: "New file -- unit tests for every acceptance criterion."
+
+code_examples:
+  - title: The Bearer-auth + best-effort-parse pattern to mirror
+    file: src/core/signal-sources/active-probe/codex.ts
+    snippet: |
+      response = await fetchImpl(CODEX_MODELS_URL, {
+        method: "GET",
+        headers: { authorization: `Bearer ${apiKey}` },
+      });
+      ...
+      let body: OpenAiErrorBody = {};
+      try {
+        body = (await response.json()) as OpenAiErrorBody;
+      } catch {
+        // Malformed/non-JSON error body — fall through to the degraded default.
+      }
+
+design_decisions:
+  - decision: reset_at passes through the raw retry-after header value with no conversion, exactly like codex.ts.
+    rationale: "codex.ts already accepts this simplification for the identical header shape (a relative-seconds value, not an ISO timestamp) -- introducing a new conversion here would be inconsistent with the established pattern and out of this story's scope."
+  - decision: Unrecognized 429/403 error.type defaults to degraded, never out_of_credit.
+    rationale: "Same conservative-default posture as every other adapter in this codebase -- an unrecognized shape should never over-trigger actuation by guessing the more severe verdict."
+
+risks:
+  - severity: medium
+    description: "The GET /v1/models endpoint's existence at api.moonshot.ai wasn't confirmed via a documented example -- only the general OpenAI-compatible host/auth convention."
+    mitigation: "Flagged in-file exactly like codex.ts's own honesty note about its unconfirmed 429 body shape; accepted verification gap, revisit once a live account is tested."
+  - severity: low
+    description: "error.type vocabulary was documented for the 'Kimi Code' product rather than the raw completions API explicitly."
+    mitigation: "Treated as best-available signal per research-brief.md; degraded-default fallback bounds the blast radius of a wrong guess."
+
+references:
+  - path: .pHive/epics/hdl-kimi-signals/docs/research-brief.md
+    relevant_excerpt: |
+      billing_quota_exhausted (weekly cycle), monthly_quota_exhausted,
+      rolling_quota_exceeded ... engine_overloaded, too_many_requests ...
+      Retry-After header for the engine_overloaded_error case (only), with
+      no guarantee every 429 carries it.

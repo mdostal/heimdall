@@ -1,0 +1,78 @@
+id: hdl-ks-02-public-status-kimi
+epic: hdl-kimi-signals
+title: Kimi K3 public-status adapter (status.moonshot.cn StatusPage.io feed)
+status: completed
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  Implements src/core/signal-sources/public-status/kimi.ts. Unlike Gemini's
+  incidents.json workaround, status.moonshot.cn is a real Atlassian
+  Statuspage instance with a working api/v2/summary.json endpoint -- the
+  exact same shape public-status/claude.ts already consumes. This is a
+  near-verbatim mirror of claude.ts/codex.ts, adapted only in URL and
+  fragment list. Fragment list ["API", "Model"] (broad, matches "API
+  Service", "Open API", and every current/future *Model component,
+  including a not-yet-existing "K3 Model" line) per research-brief.md's
+  confirmed component roster.
+
+acceptance_criteria:
+  - "Given an all-operational status page, when checkKimiPublicStatus is called, then it returns { status: 'up', reason: null }"
+  - "Given degraded_performance or partial_outage on a component matching the fragment list, when checkKimiPublicStatus is called, then it returns { status: 'degraded', reason: '<component>: <indicator>' }"
+  - "Given major_outage on a matching component, when checkKimiPublicStatus is called, then it returns { status: 'down' }"
+  - "Given an incident on an unrelated component (e.g. Sign In / Sign Up, File uploads) not matching the fragment list, when checkKimiPublicStatus is called, then it returns { status: 'degraded', reason: 'no matching status-page component found' } -- mirrors claude.ts's exact no-match behavior"
+  - "Given a non-200 status-page response or a network failure, when checkKimiPublicStatus is called, then it degrades gracefully, never throws"
+
+steps:
+  - id: research
+    description: Confirm the summary.json shape and confirmed component roster from research-brief.md
+    agent: researcher
+  - id: implement
+    description: Implement public-status/kimi.ts mirroring public-status/claude.ts's structure verbatim, adapted to the URL and fragment list
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Unit tests covering every acceptance criterion using hand-built fixture responses
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that this is a faithful mirror of claude.ts with no incidental logic drift
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/core/signal-sources/public-status/claude.ts
+      purpose: "The exact structural pattern to mirror -- this is a near-verbatim copy given both feeds are the same StatusPage.io shape."
+
+files_to_modify:
+  - file: src/core/signal-sources/public-status/kimi.ts
+    change: "New file -- checkKimiPublicStatus(fetchImpl?), a close mirror of claude.ts."
+  - file: src/core/signal-sources/public-status/kimi.test.ts
+    change: "New file -- unit tests for every acceptance criterion."
+
+design_decisions:
+  - decision: "Fragment list [\"API\", \"Model\"], broader than claude.ts's/codex.ts's narrower per-product fragments."
+    rationale: "Moonshot's status page has no K3-specific component yet (confirmed in research-brief.md's 2026-08-13 component snapshot) -- a broad match on the current *Model/API component family avoids needing a per-model-version update when that changes."
+
+risks:
+  - severity: low
+    description: The broad fragment list could match a future unrelated component whose name happens to contain 'Model' or 'API'.
+    mitigation: "Same tradeoff class already accepted by claude.ts/codex.ts's own fragment lists; documented in-file for easy tuning."
+
+references:
+  - path: .pHive/epics/hdl-kimi-signals/docs/research-brief.md
+    relevant_excerpt: |
+      status.moonshot.cn is confirmed Atlassian-Statuspage-hosted ... with a
+      working api/v2/summary.json JSON endpoint -- the exact same shape
+      Claude's and Codex's adapters already consume.

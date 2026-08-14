@@ -31,7 +31,14 @@ export interface ArgusEmitter {
     agentId: string;
     action: string;
     success: boolean;
+    /** Reason for THIS action's outcome (e.g. an API error code). */
     reason?: string;
+    /** Why the LANE is in its current status (e.g. "billing error (402)") — hdl-rar-02, distinct from `reason` above. */
+    laneReason?: string;
+    /** When the lane is expected to recover, if known — hdl-rar-02. */
+    laneResetAt?: string;
+    /** True when this action's block/allow decision was driven by a manual override rather than the sensed status — hdl-lo-01. */
+    overrideActive?: boolean;
   }): void;
 }
 
@@ -84,6 +91,9 @@ export class ArgusClient implements ArgusEmitter {
     action: string;
     success: boolean;
     reason?: string;
+    laneReason?: string;
+    laneResetAt?: string;
+    overrideActive?: boolean;
   }): void {
     this.safeEmit("heimdall.actuation.result", {
       "lane.id": params.laneId,
@@ -92,6 +102,9 @@ export class ArgusClient implements ArgusEmitter {
       action: params.action,
       success: String(params.success),
       ...(params.reason !== undefined ? { reason: params.reason } : {}),
+      ...(params.laneReason !== undefined ? { "lane.reason": params.laneReason } : {}),
+      ...(params.laneResetAt !== undefined ? { "lane.reset_at": params.laneResetAt } : {}),
+      ...(params.overrideActive !== undefined ? { "override.active": String(params.overrideActive) } : {}),
     });
   }
 

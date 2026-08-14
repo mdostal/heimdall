@@ -1,0 +1,38 @@
+name: hdl-lane-status-ui
+title: Lane status UI — read-only live view (slice 1)
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [backend, ui, small-scope]
+  roster: [researcher, technical-writer]
+  per_tag_reasoning:
+    backend: The new route lives in the existing node:http router — no framework.
+    ui: First slice of the has_ui: true standalone-mode requirement.
+    small-scope: One new module + one new route + existing test file to extend — design discussion alone is sufficient per the plan skill's Small-scope routing rule.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (--skip-sign-off)
+    hv_planning: not_applicable (small scope)
+    structured_outline: not_applicable (small scope)
+
+description: >
+  First vertical slice of Heimdall's standalone-mode UI requirement
+  (has_ui: true, .pHive/project-profile.yaml). Adds GET / to the existing
+  HTTP router — a self-contained, dependency-free read-only dashboard
+  polling the existing GET /lanes endpoint. Manual disable/enable, add-lane,
+  and MCP agent-tooling are explicitly deferred to follow-up epics (see
+  docs/decisions/DEC-hdl-reason-aware-recovery.md item 3 and this epic's
+  design-discussion.md non-goals).
+
+stories:
+  - id: hdl-ui-01-readonly-status-view
+    title: GET / serves a read-only live lane-status dashboard
+    complexity: low
+    depends_on: []

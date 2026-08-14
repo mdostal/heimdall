@@ -1,0 +1,90 @@
+id: hdl-rs-03-settings-persistence-http
+epic: hdl-routing-strategies
+title: Global settings table + GET/POST /routing-strategy
+status: completed
+complexity: medium
+methodology: classic
+depends_on: [hdl-rs-02-routing-strategy-interface]
+
+description: |
+  Adds a generic key-value settings table to StateStore (getSetting/
+  setSetting) -- the routing strategy is the first consumer but the table
+  isn't routing-specific. getAvailableRoute reads the active strategy name
+  from settings (defaulting to "priority" when unset -- byte-identical to
+  every pre-this-epic caller). GET /routing-strategy returns the current
+  active strategy + all valid names; POST /routing-strategy sets it,
+  400 on an unrecognized name, following the exact discriminated-result
+  shared-function pattern hdl-mcp-01 established.
+
+acceptance_criteria:
+  - "Given no routing strategy has ever been set, when GET /routing-strategy is called, then it returns { active: 'priority', available: ['priority', 'round-robin', 'off'] }"
+  - "Given POST /routing-strategy sets 'round-robin', when GET /available-route is next called, then round-robin's selection logic decides the pick, not priority's"
+  - "Given POST /routing-strategy is called with an unrecognized strategy name, then it returns 400 with a structured error naming the allowed values -- the setting is NOT changed"
+  - "Given the active strategy is 'off', when GET /available-route is called, then it returns 404 no_available_route for every task type, regardless of how many candidates would otherwise be eligible"
+  - "Every existing http-server.test.ts /available-route test passes with ZERO test changes -- confirms the unset-setting default (priority) reproduces today's exact behavior end-to-end through the full HTTP route, not just the strategy unit"
+
+steps:
+  - id: research
+    description: Confirm hdl-rs-02's RoutingStrategy registry shape and hdl-mcp-01's discriminated-result shared-function pattern before implementing the settings table and HTTP routes
+    agent: researcher
+  - id: implement
+    description: Add settings table + getSetting/setSetting to StateStore; wire getAvailableRoute to resolve the active strategy from settings; add GET/POST /routing-strategy to http-server.ts
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Extend state-store.test.ts and http-server.test.ts per the acceptance criteria above
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review for correctness and confirm the unset-setting default path is provably unchanged end-to-end
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/core/state-store.ts
+      purpose: "setManualOverride/getManualOverride's discriminated-shape-free simple get/set pattern -- settings follows a similar shape but as a standalone table, not a lanes-table column (routing strategy is global, not per-lane)"
+    - path: src/api/http-server.ts
+      purpose: "setLaneOverride's discriminated-result-then-status-code-translation pattern (hdl-mcp-01) -- the exact shape setRoutingStrategy/the new route follow"
+    - path: src/core/routing-strategies/registry.ts
+      purpose: "hdl-rs-02's ROUTING_STRATEGIES map and DEFAULT_ROUTING_STRATEGY_NAME -- the source of truth for valid names and the default"
+
+files_to_modify:
+  - file: src/core/state-store.ts
+    change: "Add CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL); getSetting(key): string | null; setSetting(key, value): void."
+  - file: src/core/route-selector.ts
+    change: "getAvailableRoute resolves the active strategy via store.getSetting('routing_strategy') ?? DEFAULT_ROUTING_STRATEGY_NAME, looks it up in the registry, and delegates to it (replacing hdl-rs-02's hardcoded priority instance)."
+  - file: src/api/http-server.ts
+    change: "Add GET /routing-strategy and POST /routing-strategy, following the setLaneOverride/POST-override route pattern exactly."
+
+design_decisions:
+  - decision: A generic settings table, not a routing-strategy-specific column or table.
+    rationale: The routing strategy is the first global setting this codebase needs, but almost certainly not the last -- a generic key-value table means the next global setting doesn't need its own schema migration.
+  - decision: An unrecognized POST /routing-strategy name is rejected (400), never silently falls back to the default.
+    rationale: Matches hdl-mcp-01's invalid_override_state handling exactly -- a typo'd strategy name should be an obvious error, not a silent no-op that looks like it worked.
+
+cross_cutting:
+  - concern: documentation
+    action: "README gets the new GET/POST /routing-strategy endpoints documented, and a note that manual_override + the 'off' strategy both affect /available-route's candidacy/availability."
+
+risks:
+  - severity: low
+    description: Forgetting to default to 'priority' when the setting is unset would change behavior for every existing caller on first deploy.
+    mitigation: Explicit acceptance criterion + the zero-test-change gate on existing /available-route tests specifically targets this.
+
+references:
+  - path: .pHive/epics/hdl-routing-strategies/docs/design-discussion.md
+    relevant_excerpt: |
+      getAvailableRoute reads the active strategy name from settings
+      (defaulting to "priority" when unset -- byte-identical to
+      pre-this-epic behavior for every existing caller who never touches
+      the new endpoint).

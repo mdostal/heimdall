@@ -1,0 +1,78 @@
+id: hdl-ks-03-wire-kimi-provider
+epic: hdl-kimi-signals
+title: Wire Kimi K3 into lane-pipeline + main.ts PROVIDER_ADAPTERS registry, end-to-end test
+status: completed
+complexity: low
+methodology: classic
+depends_on: [hdl-ks-01-active-probe-kimi, hdl-ks-02-public-status-kimi]
+
+description: |
+  Wires the two adapters from hdl-ks-01/02 into the single real dispatch
+  point, identical shape to hdl-gs-03: kimiAdapters(): ProviderAdapters in
+  lane-pipeline.ts, one PROVIDER_ADAPTERS line in main.ts
+  (`kimi: kimiAdapters`), and one end-to-end main.test.ts case proving a
+  kimi-provider lane gets a real LanePipeline + schedulers wired up,
+  calling through to probeKimiLane/checkKimiPublicStatus rather than a
+  stub.
+
+acceptance_criteria:
+  - "Given a lane declared with HEIMDALL_LANE_N_PROVIDER=kimi and a valid credential, when composeService() runs, then that lane gets a real LanePipeline, MulticaAutopilotScheduler, and InProcessScheduler wired up"
+  - "Given the same kimi lane, when its InProcessScheduler.poll() is exercised end-to-end, then it correctly calls through to probeKimiLane/checkKimiPublicStatus"
+  - "Every existing main.test.ts case passes with ZERO test changes to prior cases"
+  - "npm run build (tsc) is clean and npm test passes in full after this story"
+
+steps:
+  - id: research
+    description: Confirm the PROVIDER_ADAPTERS registry shape and kimiAdapters factory pattern before adding the entry
+    agent: researcher
+  - id: implement
+    description: Add kimiAdapters() to lane-pipeline.ts and the kimi entry to PROVIDER_ADAPTERS in main.ts
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Add the end-to-end wiring test to main.test.ts; confirm all existing tests pass unmodified
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that this story touches only the documented lines/files plus its own test
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch; run full local test suite + tsc build as final gate before PR
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/main.ts
+      purpose: "PROVIDER_ADAPTERS registry -- the single dispatch point being extended, now a 4-entry map (claude, codex, gemini, kimi)."
+    - path: src/core/lane-pipeline.ts
+      purpose: "claudeAdapters/codexAdapters/geminiAdapters -- the exact factory shape kimiAdapters() mirrors."
+
+files_to_modify:
+  - file: src/core/lane-pipeline.ts
+    change: "Add kimiAdapters(): ProviderAdapters, importing probeKimiLane and checkKimiPublicStatus."
+  - file: src/main.ts
+    change: "Add `kimi: kimiAdapters` to PROVIDER_ADAPTERS (one line, plus the corresponding import)."
+  - file: src/main.test.ts
+    change: "Add one end-to-end test proving a kimi-provider lane gets real pipelines/schedulers wired up; extend mockFetch to serve status.moonshot.cn's StatusPage.io shape."
+
+design_decisions:
+  - decision: No changes to Lane/LaneDeclaration types.
+    rationale: "provider is already an open string -- adding kimi as a FOURTH known value needs no type widening, same zero-schema-change cost every prior provider addition has had."
+
+risks:
+  - severity: low
+    description: A typo in the one-line registry addition would silently fall through to the existing 'unknown provider skipped' path.
+    mitigation: "The story's own end-to-end test asserts a real pipeline gets created, catching this before merge."
+
+references:
+  - path: .pHive/epics/hdl-kimi-signals/docs/research-brief.md
+    relevant_excerpt: |
+      Minimal wiring is: two new adapter files + one kimiAdapters() factory
+      in lane-pipeline.ts + one registry line in main.ts.

@@ -1,0 +1,48 @@
+name: hdl-kimi-signals
+title: Kimi K3 signal-source adapters — public-status + active-probe, wired into lane dispatch
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [backend, signal-sources, provider-expansion, small-scope]
+  roster: [researcher, technical-writer]
+  per_tag_reasoning:
+    backend: two new adapter files behind the existing ProviderSignalAdapter shape.
+    signal-sources: extends REQ-01/02/03's layered signal model to a fourth provider.
+    provider-expansion: closes another concrete gap against north_star.expected_scale -- 4 of 6 providers implemented after this epic.
+    small-scope: direct mirror of hdl-gemini-signals's already-proven pattern; Kimi's OpenAI-compatible host + real StatusPage.io feed make this an even closer fit than Gemini was.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (autonomous loop; real web research performed and documented, resolved inline -- an implementation-tradeoff question, not the ambiguous-product-direction class the operator asked to see as an artifact)
+    hv_planning: not_applicable (small scope)
+    structured_outline: not_applicable (small scope)
+
+description: >
+  Adds Kimi K3 (Moonshot AI) as a fourth supported lane provider, mirroring
+  hdl-gemini-signals's shape exactly: active-probe/kimi.ts (OpenAI-compatible
+  api.moonshot.ai host, Bearer auth like Codex, typed error.type vocabulary
+  distinguishing transient overload/rate-limit from longer-lived quota
+  exhaustion) and public-status/kimi.ts (status.moonshot.cn -- a real
+  Atlassian-Statuspage feed, the same shape Claude's/Codex's adapters already
+  consume, a better fit than Gemini's incidents.json workaround). Real web
+  research backing every decision is in research-brief.md/design-discussion.md.
+
+stories:
+  - id: hdl-ks-01-active-probe-kimi
+    title: Kimi K3 active-probe adapter (models list, Bearer auth, typed error.type quota-vs-transient split)
+    complexity: medium
+    depends_on: []
+  - id: hdl-ks-02-public-status-kimi
+    title: Kimi K3 public-status adapter (status.moonshot.cn StatusPage.io feed)
+    complexity: low
+    depends_on: []
+  - id: hdl-ks-03-wire-kimi-provider
+    title: Wire Kimi K3 into lane-pipeline + main.ts PROVIDER_ADAPTERS registry, end-to-end test
+    complexity: low
+    depends_on: [hdl-ks-01-active-probe-kimi, hdl-ks-02-public-status-kimi]

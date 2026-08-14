@@ -1,0 +1,58 @@
+name: hdl-openrouter-signals
+title: OpenRouter as a nested gateway — routes, dashboard grouping, operator-ranked priority
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [backend, signal-sources, routing, ui, provider-expansion, medium-scope]
+  roster: [researcher, technical-writer]
+  per_tag_reasoning:
+    backend: new active-probe adapter + priority-strategy extension.
+    signal-sources: fifth of six north-star providers gets a real adapter.
+    routing: closes the one confirmed "judging" gap (priority ties among same-provider lanes).
+    ui: dashboard groups routes sharing a gateway credential, per operator decision.
+    provider-expansion: 5 of 6 north-star providers have adapters after this epic.
+    medium-scope: three layers touched (signal-source, routing-strategy, HTTP+dashboard), each mirroring an established pattern from this loop -- no new architecture, so no H/V pass needed (same precedent as hdl-routing-strategies).
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (autonomous loop; operator already resolved the core "gateway with nested routes" shape via a design-options artifact -- this design-discussion covers implementation, grounded in a dedicated codebase research pass, not a re-litigation of the operator's decision)
+    hv_planning: not_applicable (medium scope, every story mirrors an established pattern)
+    structured_outline: not_applicable (medium scope)
+
+description: >
+  Resolves the operator's decision (2026-08-13, made against a design-options
+  artifact) that OpenRouter should nest as a gateway with independently
+  toggleable, judged routes underneath it, rather than as one more flat lane.
+  A dedicated research pass confirmed the persistence/actuation layers need
+  zero schema changes for this -- lane_id is the only identity key anywhere,
+  and multiple lanes already share one credential_ref today. Closes the two
+  real gaps found: no openrouter ProviderAdapters implementation exists yet
+  (hdl-or-01/02, mirrors Gemini/Kimi's pattern), and priority-strategy.ts
+  can't distinguish same-provider routes from each other (hdl-or-04, an
+  opt-in per-lane priority override mirroring manual_override's
+  override-wins-outright shape). hdl-or-03 makes the nesting visible on the
+  dashboard by grouping lanes that share a gateway credential.
+
+stories:
+  - id: hdl-or-01-active-probe-openrouter
+    title: OpenRouter active-probe adapter (GET /api/v1/key, credit + rate-limit state in one call)
+    complexity: medium
+    depends_on: []
+  - id: hdl-or-02-wire-openrouter-provider
+    title: Wire OpenRouter into lane-pipeline + main.ts, prove shared-credential nesting end-to-end
+    complexity: low
+    depends_on: [hdl-or-01-active-probe-openrouter]
+  - id: hdl-or-03-dashboard-gateway-grouping
+    title: Dashboard groups lanes sharing a gateway credential, shows each route's model
+    complexity: medium
+    depends_on: [hdl-or-02-wire-openrouter-provider]
+  - id: hdl-or-04-lane-priority-override
+    title: Optional per-lane priority override — operator-ranked routes, not lane_id-accident
+    complexity: low
+    depends_on: [hdl-or-02-wire-openrouter-provider]

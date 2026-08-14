@@ -1,0 +1,46 @@
+name: hdl-ollama-signals
+title: Ollama liveness-only signal adapter — the sixth and last north-star provider
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [backend, signal-sources, provider-expansion, small-scope]
+  roster: [researcher, technical-writer]
+  per_tag_reasoning:
+    backend: one new liveness-only adapter behind the existing ProviderSignalAdapter shape.
+    signal-sources: sixth and last north-star provider gets a real adapter.
+    provider-expansion: closes north_star.expected_scale's provider list to 6/6.
+    small-scope: a design simplification found during implementation research means this needs zero touches to lane-registry.ts/route-selector.ts/lane-pipeline.ts's credential-gating logic -- smaller than the design-options artifact originally anticipated.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (autonomous loop; operator already resolved the "liveness-only" shape via the design-options artifact response -- this design-discussion covers an implementation simplification found during research, not a re-litigation of the operator's decision)
+    hv_planning: not_applicable (small scope)
+    structured_outline: not_applicable (small scope)
+
+description: >
+  Resolves the Ollama half of the design-options artifact (2026-08-13
+  operator decision: "liveliness it doesn't really have a path -- it should
+  have liveliness so we can signal off of it mostly") — a minimal
+  liveness-only adapter (up/down, no degraded/out_of_credit path, since none
+  exists for local unauthenticated inference). Implementation research found
+  a cleaner path than the artifact anticipated: repurposing the existing
+  credential_ref indirection to carry an Ollama instance's base URL instead
+  of a secret, needing zero changes to lane-registry.ts/route-selector.ts/
+  lane-pipeline.ts's credential-gating logic. Closes the north star's
+  provider list to 6/6 (Claude, Codex, Gemini, OpenRouter, Kimi K3, Ollama).
+
+stories:
+  - id: hdl-ol-01-active-probe-ollama
+    title: Ollama liveness-only active-probe adapter (GET /api/tags, no auth, up/down only)
+    complexity: low
+    depends_on: []
+  - id: hdl-ol-02-wire-ollama-provider
+    title: Wire Ollama into lane-pipeline + main.ts, end-to-end liveness proof
+    complexity: low
+    depends_on: [hdl-ol-01-active-probe-ollama]

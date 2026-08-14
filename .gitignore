@@ -5,6 +5,9 @@ build/
 *.log
 npm-debug.log*
 
+# Playwright MCP session artifacts (manual browser smoke-testing)
+.playwright-mcp/
+
 # Secrets — REQ-07 credential loading reads from this; never commit it
 .env
 .env.*
@@ -32,3 +35,33 @@ npm-debug.log*
 !.pHive/epics/routing-dispatch-handoff/**
 !.pHive/epics/hdl-routing-reconciliation/
 !.pHive/epics/hdl-routing-reconciliation/**
+!.pHive/epics/hdl-reason-aware-recovery/
+!.pHive/epics/hdl-reason-aware-recovery/**
+!.pHive/epics/hdl-lane-status-ui/
+!.pHive/epics/hdl-lane-status-ui/**
+!.pHive/epics/hdl-lane-override/
+!.pHive/epics/hdl-lane-override/**
+!.pHive/epics/hdl-lane-management/
+!.pHive/epics/hdl-lane-management/**
+!.pHive/epics/hdl-mcp-lane-tools/
+!.pHive/epics/hdl-mcp-lane-tools/**
+!.pHive/epics/hdl-routing-strategies/
+!.pHive/epics/hdl-routing-strategies/**
+!.pHive/epics/hdl-gemini-signals/
+!.pHive/epics/hdl-gemini-signals/**
+!.pHive/epics/hdl-kimi-signals/
+!.pHive/epics/hdl-kimi-signals/**
+!.pHive/epics/hdl-openrouter-signals/
+!.pHive/epics/hdl-openrouter-signals/**
+!.pHive/epics/hdl-ollama-signals/
+!.pHive/epics/hdl-ollama-signals/**
+!.pHive/epics/hdl-mcp-routing-strategy/
+!.pHive/epics/hdl-mcp-routing-strategy/**
+!.pHive/epics/hdl-claude-subscription-lanes/
+!.pHive/epics/hdl-claude-subscription-lanes/**
+!.pHive/epics/hdl-model-catalog/
+!.pHive/epics/hdl-model-catalog/**
+!.pHive/epics/hdl-model-catalog-routing/
+!.pHive/epics/hdl-model-catalog-routing/**
+!.pHive/epics/hdl-model-catalog-dashboard/
+!.pHive/epics/hdl-model-catalog-dashboard/**

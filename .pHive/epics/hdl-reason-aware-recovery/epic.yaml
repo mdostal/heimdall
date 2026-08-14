@@ -1,0 +1,44 @@
+name: hdl-reason-aware-recovery
+title: Reason-aware recovery scheduling and actuation
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [backend, scheduler, actuation, small-scope]
+  roster: [researcher, technical-writer]
+  per_tag_reasoning:
+    backend: Both stories touch backend TypeScript modules only, no UI surface.
+    scheduler: Story 1 is a scheduling-delay computation change.
+    actuation: Story 2 is an actuation-layer context-threading change.
+    small-scope: Two isolated files each, no new modules, existing test files to extend — design discussion alone is sufficient context per the plan skill's Small-scope routing rule.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (--skip-sign-off)
+    hv_planning: not_applicable (small scope)
+    structured_outline: not_applicable (small scope)
+
+description: >
+  Consume the reason/reset_at data Heimdall already captures at the signal
+  layer (LanePipeline.persistResolved) in the two downstream layers that
+  currently ignore it: InProcessScheduler's retry delay (currently a flat 5s
+  regardless of a known reset_at) and ControlAdapter's actuation logging
+  (currently only sees the bare status enum, not why). Does not change the
+  block/allow actuation decision itself — additive context threading plus a
+  smarter retry delay. See docs/decisions/DEC-hdl-reason-aware-recovery.md
+  for the full design.
+
+stories:
+  - id: hdl-rar-01-scheduler-reset-at
+    title: InProcessScheduler retries at reset_at instead of a flat 5s interval when known
+    complexity: low
+    depends_on: []
+  - id: hdl-rar-02-actuation-reason-context
+    title: ControlAdapter.reconcile carries reason/reset_at so actuation logging can say why
+    complexity: low
+    depends_on: []

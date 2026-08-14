@@ -24,6 +24,12 @@ import { checkClaudePublicStatus } from "./signal-sources/public-status/claude.j
 import { probeClaudeLane } from "./signal-sources/active-probe/claude.js";
 import { checkCodexPublicStatus } from "./signal-sources/public-status/codex.js";
 import { probeCodexLane } from "./signal-sources/active-probe/codex.js";
+import { checkGeminiPublicStatus } from "./signal-sources/public-status/gemini.js";
+import { probeGeminiLane } from "./signal-sources/active-probe/gemini.js";
+import { checkKimiPublicStatus } from "./signal-sources/public-status/kimi.js";
+import { probeKimiLane } from "./signal-sources/active-probe/kimi.js";
+import { probeOpenRouterLane } from "./signal-sources/active-probe/openrouter.js";
+import { probeOllamaLane } from "./signal-sources/active-probe/ollama.js";
 import {
   decideSignalSource,
   resolveWithCorroboration,
@@ -62,6 +68,38 @@ export function claudeAdapters(): ProviderAdapters {
 
 export function codexAdapters(): ProviderAdapters {
   return { checkPublicStatus: checkCodexPublicStatus, probe: probeCodexLane };
+}
+
+export function geminiAdapters(): ProviderAdapters {
+  return { checkPublicStatus: checkGeminiPublicStatus, probe: probeGeminiLane };
+}
+
+export function kimiAdapters(): ProviderAdapters {
+  return { checkPublicStatus: checkKimiPublicStatus, probe: probeKimiLane };
+}
+
+// No public-status/openrouter.ts exists — no confirmed machine-readable
+// status feed was found for OpenRouter (see hdl-or-01's research-brief.md).
+// An honest always-up stub, not an omitted field: ProviderAdapters requires
+// both functions, and this is truthful about there being no real feed to
+// check rather than fabricating one.
+async function alwaysUpOpenRouterPublicStatus(): Promise<{ status: "up"; reason: null }> {
+  return { status: "up", reason: null };
+}
+
+export function openrouterAdapters(): ProviderAdapters {
+  return { checkPublicStatus: alwaysUpOpenRouterPublicStatus, probe: probeOpenRouterLane };
+}
+
+// No public-status/ollama.ts — it's local infra, not a hosted service, so no
+// status page exists to check. Same honest always-up stub pattern as
+// openrouterAdapters().
+async function alwaysUpOllamaPublicStatus(): Promise<{ status: "up"; reason: null }> {
+  return { status: "up", reason: null };
+}
+
+export function ollamaAdapters(): ProviderAdapters {
+  return { checkPublicStatus: alwaysUpOllamaPublicStatus, probe: probeOllamaLane };
 }
 
 /**

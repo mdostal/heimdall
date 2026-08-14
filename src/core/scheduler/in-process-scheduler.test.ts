@@ -29,13 +29,16 @@ function fakePipeline(refresh: (lane: Lane) => Promise<void>): LanePipeline {
   return { refresh } as unknown as LanePipeline;
 }
 
-function seedStore(status: "up" | "down" | "degraded" | "out_of_credit"): StateStore {
+function seedStore(
+  status: "up" | "down" | "degraded" | "out_of_credit",
+  reset_at: string | null = null,
+): StateStore {
   const store = new StateStore(":memory:");
   store.upsertLane({ lane_id: LANE.lane_id, provider: LANE.provider, credential_ref: LANE.credential_ref });
   store.recordStatus({
     lane_id: LANE.lane_id,
     status,
-    reset_at: null,
+    reset_at,
     reason: null,
     signal_source: "active_probe",
     observed_at: "2026-07-25T12:00:00.000Z",
@@ -247,5 +250,181 @@ test("stop() cancels the real underlying timer even after a manual poll() resche
   scheduler.stop(); // must cancel timer B
 
   assert.equal(clearedTimers.length, 2, "both the original and the rescheduled timer must be cleared");
+  store.close();
+});
+
+test("reset_at-aware delay: schedules the next poll at reset_at, not the flat interval, when reset_at is known and in the future", async () => {
+  // Lane stays suspect after refresh (pipeline doesn't change status) with a
+  // reset_at 30 minutes past "now" (nowImpl below) — the next scheduled
+  // delay should reflect that ~30min wait, not the 5s default.
+  const store = seedStore("out_of_credit", "2026-07-25T12:30:00.000Z");
+  const delays: number[] = [];
+  const scheduler = new InProcessScheduler({
+    lane: LANE,
+    pipeline: fakePipeline(async () => {}),
+    store,
+    argus: fakeArgus(),
+    nowImpl: () => "2026-07-25T12:00:00.000Z",
+    setTimeoutImpl: ((fn: () => void, ms: number) => {
+      delays.push(ms);
+      return {} as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+  });
+
+  scheduler.start(); // schedules delays[0] with the default interval (unrelated to this test)
+  await scheduler.poll(); // manually driven — schedules delays[1], the one under test
+
+  assert.equal(delays.length, 2);
+  assert.equal(delays[1], 30 * 60 * 1000, "expected the delay to equal reset_at - now (30 minutes)");
+  store.close();
+});
+
+test("reset_at-aware delay: falls back to the flat interval when reset_at is null (unknown-reason down)", async () => {
+  const store = seedStore("down", null);
+  const delays: number[] = [];
+  const scheduler = new InProcessScheduler({
+    lane: LANE,
+    pipeline: fakePipeline(async () => {}),
+    store,
+    argus: fakeArgus(),
+    setTimeoutImpl: ((fn: () => void, ms: number) => {
+      delays.push(ms);
+      return {} as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+  });
+
+  scheduler.start();
+  await scheduler.poll();
+
+  assert.equal(delays.length, 2);
+  assert.equal(delays[1], 5_000, "expected the existing flat DEFAULT_INTERVAL_MS when reset_at is unknown");
+  store.close();
+});
+
+test("reset_at-aware delay: clamps to the flat interval floor when reset_at is in the past (clock skew / stale data)", async () => {
+  const store = seedStore("out_of_credit", "2026-07-25T11:00:00.000Z"); // 1h in the past relative to nowImpl below
+  const delays: number[] = [];
+  const scheduler = new InProcessScheduler({
+    lane: LANE,
+    pipeline: fakePipeline(async () => {}),
+    store,
+    argus: fakeArgus(),
+    nowImpl: () => "2026-07-25T12:00:00.000Z",
+    setTimeoutImpl: ((fn: () => void, ms: number) => {
+      delays.push(ms);
+      return {} as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+  });
+
+  scheduler.start();
+  await scheduler.poll();
+
+  assert.equal(delays.length, 2);
+  assert.equal(delays[1], 5_000, "a past reset_at must clamp to the flat interval floor, never negative/zero");
+  store.close();
+});
+
+test("reset_at-aware delay: a lane that recovers to healthy reverts to the flat interval regardless of the prior reset_at", async () => {
+  const store = seedStore("out_of_credit", "2026-07-25T18:00:00.000Z"); // far future — would dominate if not for recovery
+  const pipeline = fakePipeline(async (lane) => {
+    store.recordStatus({
+      lane_id: lane.lane_id,
+      status: "up",
+      reset_at: null,
+      reason: null,
+      signal_source: "active_probe",
+      observed_at: "2026-07-25T12:00:05.000Z",
+    });
+  });
+  const delays: number[] = [];
+  const scheduler = new InProcessScheduler({
+    lane: LANE,
+    pipeline,
+    store,
+    argus: fakeArgus(),
+    setTimeoutImpl: ((fn: () => void, ms: number) => {
+      delays.push(ms);
+      return {} as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+  });
+
+  scheduler.start();
+  await scheduler.poll();
+
+  assert.equal(delays.length, 2);
+  assert.equal(delays[1], 5_000, "a recovered (healthy) lane always gets the flat interval, unaffected by the pre-recovery reset_at");
+  store.close();
+});
+
+test("hdl-lm-03: manual_reset_at wins over the sensed reset_at when set", async () => {
+  const store = seedStore("out_of_credit", "2026-07-25T12:05:00.000Z"); // sensed reset_at: 5 min out
+  store.setManualResetAt(LANE.lane_id, "2026-07-25T13:00:00.000Z"); // manual: 1 hour out
+  const delays: number[] = [];
+  const scheduler = new InProcessScheduler({
+    lane: LANE,
+    pipeline: fakePipeline(async () => {}),
+    store,
+    argus: fakeArgus(),
+    nowImpl: () => "2026-07-25T12:00:00.000Z",
+    setTimeoutImpl: ((fn: () => void, ms: number) => {
+      delays.push(ms);
+      return {} as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+  });
+
+  scheduler.start();
+  await scheduler.poll();
+
+  assert.equal(delays.length, 2);
+  assert.equal(delays[1], 60 * 60 * 1000, "expected the manual_reset_at (1 hour) to win over the sensed reset_at (5 minutes)");
+  store.close();
+});
+
+test("hdl-lm-03: byte-identical to pre-hdl-lm-03 behavior when manual_reset_at is unset (null)", async () => {
+  const store = seedStore("out_of_credit", "2026-07-25T12:30:00.000Z");
+  // no setManualResetAt call — stays null
+  const delays: number[] = [];
+  const scheduler = new InProcessScheduler({
+    lane: LANE,
+    pipeline: fakePipeline(async () => {}),
+    store,
+    argus: fakeArgus(),
+    nowImpl: () => "2026-07-25T12:00:00.000Z",
+    setTimeoutImpl: ((fn: () => void, ms: number) => {
+      delays.push(ms);
+      return {} as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+  });
+
+  scheduler.start();
+  await scheduler.poll();
+
+  assert.equal(delays.length, 2);
+  assert.equal(delays[1], 30 * 60 * 1000, "expected the sensed reset_at (30 minutes) to decide, unchanged from hdl-rar-01 behavior");
+  store.close();
+});
+
+test("hdl-lm-03: clearing manual_reset_at (set back to null) reverts to the sensed reset_at", async () => {
+  const store = seedStore("out_of_credit", "2026-07-25T12:10:00.000Z"); // sensed: 10 min out
+  store.setManualResetAt(LANE.lane_id, "2026-07-25T18:00:00.000Z"); // manual: far out
+  store.setManualResetAt(LANE.lane_id, null); // cleared
+  const delays: number[] = [];
+  const scheduler = new InProcessScheduler({
+    lane: LANE,
+    pipeline: fakePipeline(async () => {}),
+    store,
+    argus: fakeArgus(),
+    nowImpl: () => "2026-07-25T12:00:00.000Z",
+    setTimeoutImpl: ((fn: () => void, ms: number) => {
+      delays.push(ms);
+      return {} as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+  });
+
+  scheduler.start();
+  await scheduler.poll();
+
+  assert.equal(delays.length, 2);
+  assert.equal(delays[1], 10 * 60 * 1000, "expected the sensed reset_at (10 minutes) to decide once the manual override was cleared");
   store.close();
 });

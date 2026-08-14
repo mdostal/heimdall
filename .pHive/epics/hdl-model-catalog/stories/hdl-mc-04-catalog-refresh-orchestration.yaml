@@ -1,0 +1,90 @@
+id: hdl-mc-04-catalog-refresh-orchestration
+epic: hdl-model-catalog
+title: refreshModelCatalog orchestration — fetch, diff, apply defaults, preserve operator choices
+status: completed
+complexity: medium
+methodology: classic
+depends_on: [hdl-mc-01-model-catalog-state-store, hdl-mc-02-provider-list-models, hdl-mc-03-recency-heuristic]
+
+description: |
+  New src/core/model-catalog.ts. refreshModelCatalog(store, registry,
+  fetchImpl?) iterates registry.list(), filters to lanes whose provider is
+  one of the four gated providers (claude/codex/kimi/gemini) AND whose
+  credential resolved (skip silently otherwise -- an unconfigured lane has
+  nothing to fetch a catalog with, not an error). Dedupes by (provider,
+  credential) so two lanes sharing one credential (e.g. a future
+  multi-account setup) don't double-fetch. For each, calls the matching
+  hdl-mc-02 list function, computes hdl-mc-03's default set ONLY for
+  entries not already known to the store (store.getModelCatalog already
+  covers "known" -- new entries get the heuristic-derived default;
+  previously-seen entries get store.upsertModelSeen with whatever default
+  would apply, which the store layer's own contract (hdl-mc-01) guarantees
+  is ignored for already-known pairs). Also exposes
+  getModelCatalog(store, provider?) and setModelEnabled(store, provider,
+  modelId, enabled) as thin re-exports of the state-store functions --
+  this module is the one callers (HTTP/MCP, hdl-mc-05) import from,
+  mirroring how http-server.ts is the shared-function home for lane
+  operations.
+
+acceptance_criteria:
+  - "Given a registry with one Claude lane and a resolved credential, when refreshModelCatalog runs, then the store's model_catalog table has one row per model Claude's live list returned"
+  - "Given the SAME registry refreshed a second time with an unchanged live model list, when refreshModelCatalog runs again, then no existing row's enabled value changes -- only last_seen_at advances"
+  - "Given an operator has explicitly set a model's enabled to false via setModelEnabled, when refreshModelCatalog runs again and that model is still present in the live list, then it remains disabled -- the operator's choice survives the refresh"
+  - "Given two lanes share the same provider AND the same credential_ref, when refreshModelCatalog runs, then that provider's list-models endpoint is called only ONCE, not once per lane"
+  - "Given a lane whose credential did not resolve (unconfigured), when refreshModelCatalog runs, then that lane is skipped silently -- no error, no crash, no attempted fetch"
+  - "Given a lane whose provider is openrouter/ollama (not gated), when refreshModelCatalog runs, then that lane is skipped -- confirmed no fetch attempted for it"
+  - "Given a provider's list-models call fails (network error, non-2xx), when refreshModelCatalog runs, then the rest of the providers/lanes still get processed -- one provider's failure doesn't abort the whole refresh"
+
+steps:
+  - id: implement
+    description: Implement refreshModelCatalog, getModelCatalog, setModelEnabled in model-catalog.ts
+    agent: developer
+  - id: test
+    description: Unit tests covering every acceptance criterion, including the shared-credential dedup and operator-choice-survives-refresh properties
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that a single provider/lane failure never aborts the whole refresh, and that the dedup-by-credential logic is correct
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch; run full local test suite + tsc build as final gate before PR
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/core/lane-registry.ts
+      purpose: "LaneRegistry.list() -- the source of configured lanes/credentials this orchestration iterates."
+    - path: src/api/http-server.ts
+      purpose: "getLaneStatuses's shared-function role -- the exact pattern model-catalog.ts's exported functions mirror for HTTP/MCP dual-surface reuse."
+
+files_to_modify:
+  - file: src/core/model-catalog.ts
+    change: "New file -- refreshModelCatalog, getModelCatalog, setModelEnabled."
+  - file: src/core/model-catalog.test.ts
+    change: "New file -- unit tests for every acceptance criterion."
+
+design_decisions:
+  - decision: Dedup fetches by (provider, credential_ref), not by lane.
+    rationale: "Mirrors hdl-openrouter-signals's nested-gateway precedent -- multiple lanes can legitimately share one credential; refetching the same provider's list once per lane would be wasteful and, for rate-limited providers, needlessly risky."
+  - decision: One provider's fetch failure never aborts the whole refresh.
+    rationale: "Per-lane/per-provider failure isolation is an established, repeated pattern in this codebase (MulticaAutopilotScheduler's per-lane try/catch, LanePipeline's per-lane resolution) -- a model catalog refresh across multiple providers should have the same isolation."
+
+risks:
+  - severity: low
+    description: None beyond the standard orchestration-layer risk class already covered by LanePipeline's own precedent for per-lane isolation.
+    mitigation: "Direct test coverage for the failure-isolation and dedup properties specifically."
+
+references:
+  - path: .pHive/epics/hdl-model-catalog/docs/design-discussion.md
+    relevant_excerpt: |
+      refreshModelCatalog(store, registry, fetchImpl?) iterates every
+      declared lane with a resolved credential and a gated provider ...
+      applies the recency default for genuinely-new (provider, model_id)
+      pairs ... leaves existing operator enabled choices untouched.
