@@ -1,0 +1,66 @@
+id: hdl-rr-03-scored-strategy-port
+epic: hdl-routing-reconciliation
+title: Port dev's scorer/ledger/experiment/rationale system as the "scored" strategy
+status: pending
+complexity: high
+methodology: classic
+depends_on: [hdl-rr-02-routing-strategy-interface-refactor]
+
+description: |
+  Port dev's src/core/routing/{scorer,policy-loader,experiment-assigner,
+  rationale-generator,route-ledger}.ts unchanged (already tested, already additive —
+  no file collision with main). Add a new src/core/routing-strategies/scored-strategy.ts
+  implementing the widened RoutingStrategy interface: constructs PolicyLoader +
+  RouteLedger once (module scope, mirroring round-robin's existing singleton-registry
+  pattern), and on selectRoute() calls scorer+experiment-assigner+rationale-generator,
+  writes to the ledger (best-effort, never throws on ledger I/O failure per dev's
+  existing pattern), returns {lane, detail: {rationale, decisionId, experimentArm,
+  rankedCandidates, policyVersion}}. Register it in routing-strategies/registry.ts
+  alongside priority/round-robin/off.
+
+  Add dev's headroom/cost_tier fields to LaneDeclaration/Lane in lane-registry.ts
+  (HEIMDALL_LANE_N_HEADROOM / _COST_TIER env vars, same defaults dev used: 10000 /
+  "medium") — additive, no collision with main's existing priority field.
+
+  Preserve POST /route, CLI `route`, and MCP route_selection as backward-compatible
+  surfaces for Auriga/Minerva (named consumers per dev-assessment.md): each becomes a
+  thin wrapper that forces strategy=scored for that call and reshapes
+  RouteSelectionResult into dev's existing RouteResult response contract — replacing
+  dev's copy-pasted 3x construction with this repo's established shared-function
+  pattern (one function, three thin transport wrappers).
+
+  Add config/routing-policy.yaml (dev's existing file, ported unchanged) and the yaml
+  dependency (already merged in story 01).
+
+acceptance_criteria:
+  - "Given strategy=scored is active, when GET /available-route is called, then the response includes populated rationale/decision_id/experiment_arm/ranked_candidates fields"
+  - "Given POST /route is called regardless of the globally active strategy, then it always uses the scored strategy and returns dev's existing RouteResult shape unchanged"
+  - "Given a lane with no HEIMDALL_LANE_N_HEADROOM/_COST_TIER declared, when scored strategy runs, then it defaults to 10000/medium exactly as dev's implementation did"
+  - "Given the ledger write fails, when scored strategy runs, then selectRoute still returns a valid result — ledger failure never breaks routing"
+
+steps:
+  - id: research
+    description: Re-confirm dev's routing/*.ts exact current contracts post-merge (story 01 may have shifted line numbers)
+    agent: researcher
+  - id: implement
+    description: Build scored-strategy.ts, wire headroom/cost_tier fields, rebuild POST /route + CLI + MCP as shared-function wrappers
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Port dev's route-selector.select.test.ts scenarios to the new scored-strategy.ts, verify against real policy fixtures
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Confirm shared-function pattern applied correctly, no logic duplicated across HTTP/CLI/MCP
+    agent: reviewer
+    depends_on: [test]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - path: src/core/routing/route-ledger.ts
+      purpose: own DatabaseSync connection to the same DB file as StateStore — confirmed coexists safely
+    - path: src/core/routing/scorer.ts
+      purpose: weighted candidate ranking, needs headroom/cost_tier on Lane
+    - path: config/routing-policy.yaml
+      purpose: policy file PolicyLoader reads

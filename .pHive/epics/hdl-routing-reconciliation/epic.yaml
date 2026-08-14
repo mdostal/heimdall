@@ -1,0 +1,61 @@
+name: hdl-routing-reconciliation
+title: Reconcile dev/main — pluggable routing strategies + scored strategy + rotation-controller
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: dev
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [architecture-refactor, branch-reconciliation, large-scope]
+  roster: [technical-writer]
+  per_tag_reasoning:
+    architecture-refactor: routing-strategies interface must widen to carry a scored strategy's rationale/ledger output without breaking priority/round-robin/off.
+    branch-reconciliation: 12 files conflict between origin/main and origin/dev; merge-tree confirmed via direct investigation, not assumed.
+    large-scope: real interface redesign + two independently-tested subsystems merging + new integration work (rotation-controller wiring).
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (autonomous loop; operator already resolved the routing-philosophy decision via artifact, Option B)
+    hv_planning: not_applicable (single-operator execution; research-brief + design-discussion cover the same ground this repo's prior large-ish epics used)
+    structured_outline: not_applicable (same as above)
+
+description: >
+  Reconciles origin/dev and origin/main, which diverged into two genuinely different
+  bodies of work from a shared 2026-08-07 base. Per operator decision (Option B in the
+  routing-reconciliation artifact): main's routing-strategies/ pluggable-selection
+  interface stays canonical, refactored to carry a richer optional result so a new
+  "scored" strategy (dev's scorer/policy-loader/experiment-assigner/rationale-generator
+  /route-ledger) can implement it without forcing priority/round-robin/off to change
+  behavior. rotation-controller.ts + error-parser.ts port forward and get wired into
+  the live service for the first time (previously built but never instantiated on
+  either branch). token-registry.ts is explicitly NOT ported — confirmed orphaned,
+  unwired, superseded by the existing credential_ref model. Every other capability from
+  both branches (6-provider signal adapters, model-catalog trilogy, dashboard,
+  lane-management on main; org-tree, argus/minerva adapters, bot handlers, OSS
+  scaffolding on dev) folds forward as-is via git merge. Runs on dev per the corrected
+  branch convention (feature -> dev -> main-for-release).
+
+stories:
+  - id: hdl-rr-01-merge-and-resolve-conflicts
+    title: Merge origin/main into the epic branch, resolve the 12 conflicted files
+    complexity: medium
+    depends_on: []
+  - id: hdl-rr-02-routing-strategy-interface-refactor
+    title: Widen RoutingStrategy to RouteSelectionContext/Result; zero behavior change
+    complexity: medium
+    depends_on: [hdl-rr-01-merge-and-resolve-conflicts]
+  - id: hdl-rr-03-scored-strategy-port
+    title: Port dev's scorer/ledger/experiment/rationale system as the "scored" strategy
+    complexity: high
+    depends_on: [hdl-rr-02-routing-strategy-interface-refactor]
+  - id: hdl-rr-04-rotation-controller-wiring
+    title: Wire rotation-controller + error-parser into composeService(), expose API
+    complexity: medium
+    depends_on: [hdl-rr-02-routing-strategy-interface-refactor]
+  - id: hdl-rr-05-verify-and-ship
+    title: Zero-test-change verification, CHANGELOG, hive-verify, merge to dev
+    complexity: low
+    depends_on: [hdl-rr-03-scored-strategy-port, hdl-rr-04-rotation-controller-wiring]

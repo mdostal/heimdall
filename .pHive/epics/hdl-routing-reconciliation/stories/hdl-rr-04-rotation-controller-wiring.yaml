@@ -1,0 +1,49 @@
+id: hdl-rr-04-rotation-controller-wiring
+epic: hdl-routing-reconciliation
+title: Wire rotation-controller + error-parser into composeService(), expose API
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [hdl-rr-02-routing-strategy-interface-refactor]
+
+description: |
+  Port src/core/rotation-controller.ts + error-parser.ts unchanged (zero schema needs,
+  confirmed). Instantiate RotationController in src/main.ts's composeService() for any
+  provider with 2+ credentialed lanes (mirrors hdl-actuation's "every lane always gets
+  a ControlAdapter" precedent -- never a silent no-op for eligible providers). Wire
+  src/core/background-jobs.ts's startCapResetRecoveryJob alongside the existing
+  scheduler startup. Add GET /rotation/:provider (active account + capped accounts) and
+  POST /rotation/:provider/rotate (manual rotate-now), mirroring the existing
+  override-endpoint shape and shared-function pattern.
+
+  Explicitly do NOT port token-registry.ts -- confirmed orphaned (unwired on dev,
+  nothing imports it outside its own test), superseded by the credential_ref model.
+  Explicitly do NOT wrap the live Claude completion call path through
+  RotationController.request() in this story -- that's a deeper change to the
+  active-probe/signal-source call path, deferred to a follow-up epic. Document this
+  gap in the epic's design-discussion.md (already recorded) and in CHANGELOG.md.
+
+acceptance_criteria:
+  - "Given a provider with only 1 credentialed lane, when composeService() runs, then no RotationController is instantiated for it (nothing to rotate between)"
+  - "Given a provider with 2+ credentialed lanes, when composeService() runs, then RotationController is instantiated and the cap-reset job is scheduled"
+  - "Given GET /rotation/:provider for an unmapped provider, when called, then it returns a structured 404, never throws"
+  - "Given token-registry.ts, when this story lands, then it remains unported and is not referenced anywhere in src/main.ts or composeService()"
+
+steps:
+  - id: implement
+    description: Port the two files, wire instantiation + background job, add the two new endpoints as shared functions + thin HTTP wrappers
+    agent: developer
+  - id: test
+    description: Port rotation-controller.test.ts unchanged, add composeService() wiring test (0 lanes -> no controller, 2+ -> controller present)
+    agent: tester
+    depends_on: [implement]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - path: src/core/rotation-controller.ts
+      purpose: ported unchanged, depends only on LaneRegistry + StateStore
+    - path: src/core/error-parser.ts
+      purpose: pure function, Claude-specific cap-signal detection
+    - path: src/main.ts
+      purpose: composeService() wiring point, mirrors existing ControlAdapter-per-lane pattern

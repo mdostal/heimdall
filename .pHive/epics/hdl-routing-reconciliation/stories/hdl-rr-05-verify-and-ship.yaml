@@ -1,0 +1,39 @@
+id: hdl-rr-05-verify-and-ship
+epic: hdl-routing-reconciliation
+title: Zero-test-change verification, CHANGELOG, hive-verify, merge to dev
+status: pending
+complexity: low
+methodology: classic
+depends_on: [hdl-rr-03-scored-strategy-port, hdl-rr-04-rotation-controller-wiring]
+
+description: |
+  Full npm test + npm run build pass locally. Update CHANGELOG.md with this epic's
+  entry (version bump 0.19.0 -> 0.20.0), noting: the branch reconciliation itself, the
+  widened routing-strategies interface, the scored strategy + its backward-compatible
+  POST /route surface, rotation-controller wiring (and the explicit token-registry
+  drop + live-call-path integration deferral). Push the branch, run
+  scripts/hive-verify.sh (or the remote hive-box equivalent per this project's
+  standing merge gate) against the branch SHA, confirm PASS, open and merge the PR
+  into dev (not main), then re-verify against merged dev.
+
+acceptance_criteria:
+  - "Given the full test suite, when run, then it passes with zero unexpected failures"
+  - "Given the hive box verify script, when run against the branch SHA, then it returns PASS before merge"
+  - "Given the merge to dev completes, when the verify script re-runs against merged dev, then it also returns PASS"
+  - "Given CHANGELOG.md, when inspected, then it documents the token-registry drop and the rotation-controller live-call-path deferral explicitly, not silently"
+
+steps:
+  - id: test
+    description: Full local verification pass
+    agent: tester
+  - id: review
+    description: Final review of the merged diff for anything silently dropped from either branch
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Push, hive-verify, open PR, merge to dev, re-verify merged dev
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall

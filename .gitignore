@@ -30,3 +30,5 @@ npm-debug.log*
 !.pHive/epics/hdl-actuation/**
 !.pHive/epics/routing-dispatch-handoff/
 !.pHive/epics/routing-dispatch-handoff/**
+!.pHive/epics/hdl-routing-reconciliation/
+!.pHive/epics/hdl-routing-reconciliation/**
