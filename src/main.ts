@@ -200,7 +200,7 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     await pipeline.refresh(lane);
   };
 
-  const httpServer = createHttpServer(registry, store, refreshLane);
+  const httpServer = createHttpServer(registry, store, refreshLane, undefined, options.fetchImpl);
   if (!options.skipHttpListen) {
     httpServer.listen(port, () => {
       console.log(`heimdall service listening on http://localhost:${port}`);

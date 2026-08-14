@@ -12,6 +12,9 @@ import {
   callAddLaneTool,
   callRoutingStrategyGetTool,
   callRoutingStrategySetTool,
+  callModelsListTool,
+  callModelsRefreshTool,
+  callModelsSetEnabledTool,
   buildToolDispatch,
   dispatchToolCall,
   LANES_LIST_TOOL_NAME,
@@ -20,6 +23,9 @@ import {
   LANES_ADD_TOOL_NAME,
   ROUTING_STRATEGY_GET_TOOL_NAME,
   ROUTING_STRATEGY_SET_TOOL_NAME,
+  MODELS_LIST_TOOL_NAME,
+  MODELS_REFRESH_TOOL_NAME,
+  MODELS_SET_ENABLED_TOOL_NAME,
 } from "./mcp-server.js";
 import { getLaneStatuses } from "./http-server.js";
 import { LaneRegistry } from "../core/lane-registry.js";
@@ -38,9 +44,9 @@ function tmpEnvPath(): string {
   return path.join(os.tmpdir(), `heimdall-mcp-server-test-${Date.now()}-${Math.random().toString(36).slice(2)}.env`);
 }
 
-test("listLaneToolsDescriptor exposes 6 tools: list, override, setResetAt, add, routingStrategy.get, routingStrategy.set (hdl-mrs-01)", () => {
+test("listLaneToolsDescriptor exposes 9 tools: list, override, setResetAt, add, routingStrategy.get/set, models.list/refresh/setEnabled (hdl-mc-05)", () => {
   const tools = listLaneToolsDescriptor();
-  assert.equal(tools.length, 6);
+  assert.equal(tools.length, 9);
   const names = tools.map((t) => t.name);
   assert.deepEqual(
     names.sort(),
@@ -51,12 +57,18 @@ test("listLaneToolsDescriptor exposes 6 tools: list, override, setResetAt, add, 
       LANES_SET_RESET_AT_TOOL_NAME,
       ROUTING_STRATEGY_GET_TOOL_NAME,
       ROUTING_STRATEGY_SET_TOOL_NAME,
+      MODELS_LIST_TOOL_NAME,
+      MODELS_REFRESH_TOOL_NAME,
+      MODELS_SET_ENABLED_TOOL_NAME,
     ].sort(),
   );
   assert.equal(LANES_LIST_TOOL_NAME, "heimdall.lanes.list");
   assert.equal(LANES_OVERRIDE_TOOL_NAME, "heimdall.lanes.override");
   assert.equal(LANES_SET_RESET_AT_TOOL_NAME, "heimdall.lanes.setResetAt");
   assert.equal(LANES_ADD_TOOL_NAME, "heimdall.lanes.add");
+  assert.equal(MODELS_LIST_TOOL_NAME, "heimdall.models.list");
+  assert.equal(MODELS_REFRESH_TOOL_NAME, "heimdall.models.refresh");
+  assert.equal(MODELS_SET_ENABLED_TOOL_NAME, "heimdall.models.setEnabled");
   assert.equal(ROUTING_STRATEGY_GET_TOOL_NAME, "heimdall.routingStrategy.get");
   assert.equal(ROUTING_STRATEGY_SET_TOOL_NAME, "heimdall.routingStrategy.set");
 });
@@ -255,7 +267,7 @@ test("hdl-mcp-02: dispatchToolCall throws for a genuinely unknown tool name", ()
   }
 });
 
-test("hdl-mcp-02: dispatchToolCall does NOT throw for any of the 6 known tools, even on their own validation failures", () => {
+test("hdl-mcp-02: dispatchToolCall does NOT throw for any of the 9 known tools, even on their own validation failures", () => {
   const registry = registryWithOneConfiguredLane();
   const store = new StateStore(":memory:");
   const envPath = tmpEnvPath();
@@ -267,13 +279,38 @@ test("hdl-mcp-02: dispatchToolCall does NOT throw for any of the 6 known tools, 
     assert.doesNotThrow(() => dispatchToolCall(dispatch, LANES_ADD_TOOL_NAME, { lane_id: "claude@mathew.dostal", provider: "x", model: "y", token: "z" }));
     assert.doesNotThrow(() => dispatchToolCall(dispatch, ROUTING_STRATEGY_GET_TOOL_NAME, {}));
     assert.doesNotThrow(() => dispatchToolCall(dispatch, ROUTING_STRATEGY_SET_TOOL_NAME, { strategy: "not-a-real-strategy" }));
+    assert.doesNotThrow(() => dispatchToolCall(dispatch, MODELS_LIST_TOOL_NAME, {}));
+    assert.doesNotThrow(() => dispatchToolCall(dispatch, MODELS_SET_ENABLED_TOOL_NAME, { provider: "claude", model_id: "never-seen", enabled: true }));
   } finally {
     store.close();
     fs.rmSync(envPath, { force: true });
   }
 });
 
-test("hdl-mcp-02: createMcpServer still constructs a connectable Server instance with all 6 tools wired", () => {
+test("hdl-mc-05: heimdall.models.list/.setEnabled/.refresh never throw on validation failure or a genuine refresh", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const fetchImpl: typeof fetch = (async () =>
+    ({ ok: true, status: 200, json: async () => ({ data: [{ id: "claude-opus-5", created_at: "2026-02-04T00:00:00Z" }] }) }) as unknown as Response) as typeof fetch;
+  try {
+    const listResult = callModelsListTool(store, {});
+    assert.deepEqual(JSON.parse(listResult.content[0].text), []);
+
+    const refreshResult = await callModelsRefreshTool(store, registry, fetchImpl);
+    const refreshBody = JSON.parse(refreshResult.content[0].text);
+    assert.equal(refreshBody.modelsSeen, 1);
+
+    const setEnabledResult = callModelsSetEnabledTool(store, { provider: "claude", model_id: "claude-opus-5", enabled: false });
+    assert.deepEqual(JSON.parse(setEnabledResult.content[0].text), { provider: "claude", model_id: "claude-opus-5", enabled: false });
+
+    const unknownResult = callModelsSetEnabledTool(store, { provider: "claude", model_id: "never-seen", enabled: true });
+    assert.deepEqual(JSON.parse(unknownResult.content[0].text), { error: "unknown_model" });
+  } finally {
+    store.close();
+  }
+});
+
+test("hdl-mcp-02: createMcpServer still constructs a connectable Server instance with all 9 tools wired", () => {
   const registry = registryWithOneConfiguredLane();
   const store = new StateStore(":memory:");
   try {

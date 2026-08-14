@@ -1,0 +1,86 @@
+id: hdl-mc-05-http-mcp-query-surface
+epic: hdl-model-catalog
+title: GET/POST /models HTTP routes + heimdall.models.* MCP tools
+status: completed
+complexity: low
+methodology: classic
+depends_on: [hdl-mc-04-catalog-refresh-orchestration]
+
+description: |
+  Adds three HTTP routes to http-server.ts, mirroring the existing
+  GET/POST /routing-strategy pattern exactly: GET /models (optional
+  ?provider= filter, calls getModelCatalog), POST /models/refresh (calls
+  refreshModelCatalog, needs registry access which http-server.ts already
+  has), POST /models/:provider/:modelId (body { enabled: boolean }, calls
+  setModelEnabled). Adds three MCP tools mirroring hdl-mrs-01's
+  heimdall.routingStrategy.get/.set pattern: heimdall.models.list,
+  heimdall.models.refresh, heimdall.models.setEnabled -- each a thin
+  wrapper calling the exact same model-catalog.ts functions the HTTP
+  routes call, zero duplicated logic. This is the surface that directly
+  answers the operator's original ask: "what are my available models to
+  call, what are my available tokens and routes?"
+
+acceptance_criteria:
+  - "Given GET /models with no query param, when called, then it returns the full catalog (all gated providers) with each entry's enabled state"
+  - "Given GET /models?provider=gemini, when called, then it returns only Gemini's catalog entries"
+  - "Given POST /models/refresh, when called, then it triggers refreshModelCatalog and the response confirms completion (e.g. count of models seen)"
+  - "Given POST /models/gemini/some-model-id with { enabled: false }, when called, then a subsequent GET /models?provider=gemini shows that entry's enabled as false"
+  - "Given POST /models/:provider/:modelId with a model_id that has never been seen (not yet in the catalog), when called, then it returns a structured error (e.g. 'unknown_model'), never a silent no-op or a crash"
+  - "Given heimdall.models.list is called via MCP, when compared to GET /models's response, then the data is identical -- no duplicated query logic between the two surfaces"
+  - "Given heimdall.models.setEnabled is called via MCP with an unknown model_id, when the tool handler runs, then it returns a structured {ok:false, error} result, never throws -- matching every other MCP tool's validation-failure contract"
+  - "Every existing http-server.test.ts and mcp-server.test.ts case passes with ZERO test changes to prior cases"
+
+steps:
+  - id: implement
+    description: Add the three HTTP routes and three MCP tools, both calling model-catalog.ts's shared functions
+    agent: developer
+  - id: test
+    description: Add tests for every acceptance criterion, confirming zero changes to existing HTTP/MCP test cases
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that HTTP and MCP surfaces call the exact same underlying functions with no duplicated validation/query logic
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch; run full local test suite + tsc build as final gate before PR
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/api/http-server.ts
+      purpose: "GET/POST /routing-strategy (lines ~319-345) -- the exact route-handling pattern to mirror for GET/POST /models."
+    - path: src/api/mcp-server.ts
+      purpose: "heimdall.routingStrategy.get/.set (hdl-mrs-01) -- the exact MCP tool pattern to mirror for heimdall.models.*."
+
+files_to_modify:
+  - file: src/api/http-server.ts
+    change: "Add GET /models, POST /models/refresh, POST /models/:provider/:modelId routes, importing from model-catalog.ts."
+  - file: src/api/http-server.test.ts
+    change: "Add tests for every acceptance criterion."
+  - file: src/api/mcp-server.ts
+    change: "Add heimdall.models.list/.refresh/.setEnabled tools + dispatch entries."
+  - file: src/api/mcp-server.test.ts
+    change: "Add tests for every acceptance criterion."
+
+design_decisions:
+  - decision: HTTP and MCP both call model-catalog.ts's exported functions directly -- no route-specific or tool-specific query logic.
+    rationale: "Established, repeated pattern in this codebase (getLaneStatuses, setRoutingStrategy, etc.) -- one implementation, two thin transport-layer wrappers."
+
+risks:
+  - severity: low
+    description: None beyond the standard new-route/new-tool risk class already covered by every prior HTTP+MCP epic in this session.
+    mitigation: "Direct mirroring of hdl-mrs-01's just-shipped routing-strategy pattern, the most recent precedent."
+
+references:
+  - path: .pHive/epics/hdl-model-catalog/docs/design-discussion.md
+    relevant_excerpt: |
+      GET /models (optional ?provider= filter) ... POST /models/refresh
+      ... POST /models/:provider/:modelId ... MCP -- heimdall.models.list,
+      heimdall.models.refresh, heimdall.models.setEnabled.

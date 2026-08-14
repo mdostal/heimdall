@@ -1446,3 +1446,90 @@ test("GET / does not change existing routes' behavior", async () => {
     store.close();
   }
 });
+
+test("hdl-mc-05: GET /models returns the catalog after a refresh, optionally filtered by provider", async () => {
+  const registry = registryWithOneConfiguredLane(); // provider: claude, credential_ref: CLAUDE_TOKEN
+  const store = new StateStore(":memory:");
+  const fetchImpl: typeof fetch = (async () =>
+    ({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: [{ id: "claude-opus-5", created_at: "2026-02-04T00:00:00Z" }] }),
+    }) as unknown as Response) as typeof fetch;
+  const server = createHttpServer(registry, store, undefined, undefined, fetchImpl);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const refreshRes = await fetch(`http://localhost:${port}/models/refresh`, { method: "POST" });
+    assert.equal(refreshRes.status, 200);
+    const refreshBody = await refreshRes.json();
+    assert.equal(refreshBody.modelsSeen, 1);
+
+    const listRes = await fetch(`http://localhost:${port}/models`);
+    const catalog = await listRes.json();
+    assert.equal(catalog.length, 1);
+    assert.equal(catalog[0].model_id, "claude-opus-5");
+
+    const filteredRes = await fetch(`http://localhost:${port}/models?provider=gemini`);
+    const filtered = await filteredRes.json();
+    assert.deepEqual(filtered, []);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-mc-05: POST /models/:provider/:modelId toggles enabled, reflected in a subsequent GET /models", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const fetchImpl: typeof fetch = (async () =>
+    ({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: [{ id: "claude-opus-5", created_at: "2026-02-04T00:00:00Z" }] }),
+    }) as unknown as Response) as typeof fetch;
+  const server = createHttpServer(registry, store, undefined, undefined, fetchImpl);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    await fetch(`http://localhost:${port}/models/refresh`, { method: "POST" });
+
+    const toggleRes = await fetch(`http://localhost:${port}/models/claude/claude-opus-5`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: false }),
+    });
+    assert.equal(toggleRes.status, 200);
+
+    const listRes = await fetch(`http://localhost:${port}/models?provider=claude`);
+    const catalog = await listRes.json();
+    assert.equal(catalog[0].enabled, false);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-mc-05: POST /models/:provider/:modelId for a never-seen model returns 404 unknown_model, never a silent no-op", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/models/claude/never-seen-model`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(res.status, 404);
+    const body = await res.json();
+    assert.equal(body.error, "unknown_model");
+  } finally {
+    server.close();
+    store.close();
+  }
+});

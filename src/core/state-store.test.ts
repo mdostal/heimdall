@@ -348,3 +348,115 @@ test("hdl-rs-03: settings is a generic table — independent keys don't collide"
   assert.equal(store.getSetting("some_other_future_setting"), "value-x");
   store.close();
 });
+
+test("hdl-mc-01: upsertModelSeen on a new (provider, model_id) pair sets enabled to the given default", () => {
+  const store = new StateStore(":memory:");
+  store.upsertModelSeen({
+    provider: "claude",
+    model_id: "claude-opus-5",
+    default_enabled: true,
+    provider_created_at: "2026-02-04T00:00:00.000Z",
+    seen_at: "2026-08-13T00:00:00.000Z",
+  });
+  const [entry] = store.getModelCatalog("claude");
+  assert.equal(entry.enabled, true);
+  assert.equal(entry.provider_created_at, "2026-02-04T00:00:00.000Z");
+  assert.equal(entry.first_seen_at, "2026-08-13T00:00:00.000Z");
+  assert.equal(entry.last_seen_at, "2026-08-13T00:00:00.000Z");
+  store.close();
+});
+
+test("hdl-mc-01: upsertModelSeen on an ALREADY-KNOWN pair never touches enabled, only advances last_seen_at", () => {
+  const store = new StateStore(":memory:");
+  store.upsertModelSeen({
+    provider: "gemini",
+    model_id: "gemini-2.5-pro",
+    default_enabled: false,
+    provider_created_at: null,
+    seen_at: "2026-08-01T00:00:00.000Z",
+  });
+
+  // A second sighting passes default_enabled: true — must NOT flip the stored value.
+  store.upsertModelSeen({
+    provider: "gemini",
+    model_id: "gemini-2.5-pro",
+    default_enabled: true,
+    provider_created_at: null,
+    seen_at: "2026-08-13T00:00:00.000Z",
+  });
+
+  const [entry] = store.getModelCatalog("gemini");
+  assert.equal(entry.enabled, false, "enabled must be preserved from first sight, not reset by the second call's default");
+  assert.equal(entry.first_seen_at, "2026-08-01T00:00:00.000Z", "first_seen_at never changes after the first sighting");
+  assert.equal(entry.last_seen_at, "2026-08-13T00:00:00.000Z", "last_seen_at advances on every sighting");
+  store.close();
+});
+
+test("hdl-mc-01: setModelEnabled overrides enabled and survives a subsequent upsertModelSeen call", () => {
+  const store = new StateStore(":memory:");
+  store.upsertModelSeen({
+    provider: "codex",
+    model_id: "gpt-codex",
+    default_enabled: true,
+    provider_created_at: null,
+    seen_at: "2026-08-01T00:00:00.000Z",
+  });
+
+  const updated = store.setModelEnabled("codex", "gpt-codex", false);
+  assert.equal(updated, true);
+  assert.equal(store.getModelCatalog("codex")[0].enabled, false);
+
+  // A later refresh sighting must not undo the operator's explicit choice.
+  store.upsertModelSeen({
+    provider: "codex",
+    model_id: "gpt-codex",
+    default_enabled: true,
+    provider_created_at: null,
+    seen_at: "2026-08-13T00:00:00.000Z",
+  });
+  assert.equal(store.getModelCatalog("codex")[0].enabled, false, "operator override survives refresh");
+  store.close();
+});
+
+test("hdl-mc-01: setModelEnabled returns false for an unknown (provider, model_id) pair — no row to update", () => {
+  const store = new StateStore(":memory:");
+  const updated = store.setModelEnabled("claude", "never-seen-model", true);
+  assert.equal(updated, false);
+  store.close();
+});
+
+test("hdl-mc-01: getModelCatalog with a provider filter returns only that provider's entries", () => {
+  const store = new StateStore(":memory:");
+  store.upsertModelSeen({ provider: "claude", model_id: "claude-opus-5", default_enabled: true, provider_created_at: null, seen_at: "2026-08-13T00:00:00.000Z" });
+  store.upsertModelSeen({ provider: "gemini", model_id: "gemini-3-pro-preview", default_enabled: true, provider_created_at: null, seen_at: "2026-08-13T00:00:00.000Z" });
+
+  const claudeOnly = store.getModelCatalog("claude");
+  assert.equal(claudeOnly.length, 1);
+  assert.equal(claudeOnly[0].provider, "claude");
+
+  const all = store.getModelCatalog();
+  assert.equal(all.length, 2);
+  store.close();
+});
+
+test("hdl-mc-01: a StateStore opened against a DB file created before model_catalog existed does not crash (defensive migration)", () => {
+  // model_catalog is a new TABLE (not a new column on an existing table),
+  // so CREATE TABLE IF NOT EXISTS in SCHEMA already covers a pre-existing
+  // DB file with no defensive ALTER TABLE needed — this test documents
+  // that the constructor still succeeds against a DB file that predates
+  // this table's existence (a real .env-adjacent DB from before this
+  // epic), not just a fresh :memory: store.
+  const dbPath = path.join(os.tmpdir(), `hdl-mc-01-pre-existing-${Date.now()}.db`);
+  try {
+    const legacyStore = new StateStore(dbPath);
+    legacyStore.upsertLane({ lane_id: "claude@test", provider: "claude", credential_ref: "T" });
+    legacyStore.close();
+
+    const store = new StateStore(dbPath);
+    store.upsertModelSeen({ provider: "claude", model_id: "claude-opus-5", default_enabled: true, provider_created_at: null, seen_at: "2026-08-13T00:00:00.000Z" });
+    assert.equal(store.getModelCatalog("claude").length, 1);
+    store.close();
+  } finally {
+    fs.rmSync(dbPath, { force: true });
+  }
+});
