@@ -1,0 +1,39 @@
+name: hdl-model-catalog-routing
+title: Auto-substituting model selection — slice 3 of 3 (the actual fix)
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [backend, routing, small-scope]
+  roster: [technical-writer]
+  per_tag_reasoning:
+    backend: one new function in model-catalog.ts, one call-site change in route-selector.ts.
+    routing: directly closes the operator's original complaint -- agents stop being handed a deprecated/disabled model string.
+    small-scope: no schema changes, no new query surface (already shipped in hdl-model-catalog slice 1), one new response field.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (autonomous loop; direct continuation of an already-operator-directed 3-slice epic, this is the explicitly-planned slice 3)
+    hv_planning: not_applicable (small scope)
+    structured_outline: not_applicable (small scope)
+
+description: >
+  Wires hdl-model-catalog's live catalog into actual route selection.
+  GET /available-route now returns a model that's confirmed usable --
+  substituting the newest enabled model for a lane's provider when the
+  declared HEIMDALL_LANE_N_MODEL is disabled or has vanished from the live
+  catalog. "No catalog data yet" falls back to the declared model
+  unchanged (byte-identical to pre-epic behavior) -- substitution only
+  activates once an operator has refreshed at least once. Never silent:
+  AvailableRoute gains a model_substituted boolean.
+
+stories:
+  - id: hdl-mcr-01-resolve-effective-model
+    title: resolveEffectiveModel + wire into getAvailableRoute
+    complexity: low
+    depends_on: []

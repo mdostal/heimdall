@@ -57,3 +57,5 @@ npm-debug.log*
 !.pHive/epics/hdl-claude-subscription-lanes/**
 !.pHive/epics/hdl-model-catalog/
 !.pHive/epics/hdl-model-catalog/**
+!.pHive/epics/hdl-model-catalog-routing/
+!.pHive/epics/hdl-model-catalog-routing/**
