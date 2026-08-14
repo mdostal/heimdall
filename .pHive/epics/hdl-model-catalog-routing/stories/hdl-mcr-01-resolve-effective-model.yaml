@@ -1,0 +1,83 @@
+id: hdl-mcr-01-resolve-effective-model
+epic: hdl-model-catalog-routing
+title: resolveEffectiveModel + wire into getAvailableRoute
+status: completed
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  Adds resolveEffectiveModel(store, provider, declaredModel) to
+  model-catalog.ts. Ungated provider or no catalog data for this provider
+  -> declared model unchanged (byte-identical fallback). Declared model
+  present and enabled -> unchanged. Declared model disabled or absent from
+  a non-empty catalog -> substitute the most recently-created ENABLED
+  model for that provider (provider_created_at desc), substituted: true.
+  No enabled alternative at all -> fall back to declared model rather than
+  returning nothing. route-selector.ts's getAvailableRoute calls this
+  right before building its response; AvailableRoute gains
+  model_substituted: boolean -- never silent, matching every other
+  override/priority feature's visibility precedent in this codebase.
+
+acceptance_criteria:
+  - "Given a lane whose provider has NO catalog data at all (never refreshed), when getAvailableRoute resolves it, then model equals the declared HEIMDALL_LANE_N_MODEL exactly and model_substituted is false -- byte-identical to pre-this-epic behavior"
+  - "Given a lane whose declared model IS in the catalog and enabled, when getAvailableRoute resolves it, then model is unchanged and model_substituted is false"
+  - "Given a lane whose declared model is in the catalog but disabled, when getAvailableRoute resolves it, then model is substituted with the most recently-created ENABLED model for that provider, and model_substituted is true"
+  - "Given a lane whose declared model is absent from a non-empty catalog for its provider (a real 'this model no longer exists' signal), when getAvailableRoute resolves it, then the same substitution behavior applies as the disabled case"
+  - "Given a provider's catalog has data but NO enabled entries at all, when getAvailableRoute resolves a lane whose declared model isn't usable, then it falls back to the declared model unchanged rather than returning null/nothing"
+  - "Given a lane on an ungated provider (openrouter/ollama), when getAvailableRoute resolves it, then model is always the declared value, model_substituted always false, regardless of any model_catalog state"
+  - "Given the existing GET /available-route http-server.test.ts case with an exact-shape assertion, when updated to include model_substituted: false, then it passes -- confirming zero behavior change for the no-catalog-data case"
+
+steps:
+  - id: implement
+    description: Add resolveEffectiveModel to model-catalog.ts; wire it into route-selector.ts's getAvailableRoute
+    agent: developer
+  - id: test
+    description: Unit tests for resolveEffectiveModel covering every acceptance criterion; update the one existing exact-shape http-server.test.ts assertion
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that the no-catalog-data fallback is provably byte-identical to pre-epic behavior, and that ungated providers are never touched
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch; run full local test suite + tsc build as final gate before PR
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/core/route-selector.ts
+      purpose: "getAvailableRoute (lines 45-86) -- the response-building code being changed, `model: lane.model` becomes the resolved effective model."
+    - path: src/core/model-catalog.ts
+      purpose: "GATED_PROVIDER_LIST_FNS and getModelCatalog -- what resolveEffectiveModel is built on top of."
+
+files_to_modify:
+  - file: src/core/model-catalog.ts
+    change: "Add resolveEffectiveModel(store, provider, declaredModel)."
+  - file: src/core/model-catalog.test.ts
+    change: "Add tests for every acceptance criterion covering resolveEffectiveModel directly."
+  - file: src/core/route-selector.ts
+    change: "Call resolveEffectiveModel when building AvailableRoute; add model_substituted to the AvailableRoute interface and response."
+  - file: src/api/http-server.test.ts
+    change: "Update the one existing exact-shape /available-route assertion to include model_substituted: false."
+
+design_decisions:
+  - decision: "'No catalog data' (empty array) is treated distinctly from 'catalog data exists but this model isn't in it.'"
+    rationale: "The former means 'never refreshed, we have no opinion' (must stay byte-identical to pre-epic behavior); the latter means 'we checked, and this model is either disabled or gone' -- a real signal worth acting on. Conflating them would either break every lane before its first refresh, or silently disable substitution forever."
+
+risks:
+  - severity: low
+    description: A caller expecting /available-route's model to always equal the lane's raw declared value would see it change once catalog data exists and the declared model is disabled/gone.
+    mitigation: "This is the explicit, operator-requested behavior (design-discussion.md's goal). GET /lanes still reports the raw declared model unchanged for any caller that needs it."
+
+references:
+  - path: .pHive/epics/hdl-model-catalog-routing/docs/design-discussion.md
+    relevant_excerpt: |
+      No catalog data at all for this provider ... declared model,
+      unchanged. No data means no opinion.

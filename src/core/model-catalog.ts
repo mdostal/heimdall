@@ -123,3 +123,50 @@ export function setModelEnabled(
   }
   return { ok: true, provider, model_id: modelId, enabled };
 }
+
+export interface EffectiveModelResolution {
+  model: string;
+  substituted: boolean;
+}
+
+/**
+ * hdl-mcr-01 — "what should I actually use right now," not just "what was
+ * declared." Ungated providers and providers with no catalog data at all
+ * (never refreshed) pass the declared model through unchanged — the latter
+ * is a deliberate byte-identical fallback, not an oversight: no data means
+ * no opinion. Only once a refresh has actually run for this provider does
+ * substitution ever activate, and only when there's positive evidence the
+ * declared model isn't usable (disabled, or missing from a non-empty
+ * catalog — the live "this model is gone" signal).
+ */
+export function resolveEffectiveModel(
+  store: StateStore,
+  provider: string,
+  declaredModel: string,
+): EffectiveModelResolution {
+  if (!(provider in GATED_PROVIDER_LIST_FNS)) {
+    return { model: declaredModel, substituted: false };
+  }
+
+  const catalog = store.getModelCatalog(provider);
+  if (catalog.length === 0) {
+    return { model: declaredModel, substituted: false };
+  }
+
+  const declaredEntry = catalog.find((entry) => entry.model_id === declaredModel);
+  if (declaredEntry?.enabled) {
+    return { model: declaredModel, substituted: false };
+  }
+
+  const enabledCandidates = catalog.filter((entry) => entry.enabled);
+  if (enabledCandidates.length === 0) {
+    // No usable alternative — a wrong-but-present model beats returning
+    // nothing at all.
+    return { model: declaredModel, substituted: false };
+  }
+
+  const best = [...enabledCandidates].sort((a, b) =>
+    (b.provider_created_at ?? "").localeCompare(a.provider_created_at ?? ""),
+  )[0];
+  return { model: best.model_id, substituted: true };
+}
