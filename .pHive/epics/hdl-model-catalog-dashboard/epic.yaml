@@ -1,0 +1,35 @@
+name: hdl-model-catalog-dashboard
+title: Dashboard model-catalog panel — slice 2 of 3 (visibility)
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [ui, small-scope]
+  roster: [technical-writer]
+  per_tag_reasoning:
+    ui: one new dashboard panel, no backend changes.
+    small-scope: mirrors the existing routing-strategy panel's load-once/toggle-via-fetch pattern exactly.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (autonomous loop; direct continuation of the already-operator-directed 3-slice model-catalog epic)
+    hv_planning: not_applicable (small scope)
+    structured_outline: not_applicable (small scope)
+
+description: >
+  Closes the model-catalog trilogy's remaining slice: a dashboard panel
+  showing the live model catalog grouped by provider, per-model
+  enable/disable toggles, and a Refresh button — pure UI on top of the
+  GET/POST /models surface hdl-model-catalog already shipped. Mirrors the
+  routing-strategy panel's load-once-not-on-poll pattern exactly.
+
+stories:
+  - id: hdl-mcd-01-dashboard-model-catalog-panel
+    title: Dashboard model-catalog panel — list, toggle, refresh
+    complexity: low
+    depends_on: []

@@ -1534,3 +1534,42 @@ test("hdl-mc-05: POST /models/:provider/:modelId for a never-seen model returns 
     store.close();
   }
 });
+
+test("hdl-mcd-01: GET / (dashboard) includes a Model catalog panel with a Refresh button and a container for the rendered catalog", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /id="model-catalog-refresh"/);
+    assert.match(body, /id="model-catalog-root"/);
+    assert.match(body, /id="model-catalog-banner"/);
+    assert.match(body, /fetch\("\/models"\)/, "the panel must load its state from GET /models");
+    assert.match(body, /fetch\("\/models\/refresh"/, "the Refresh button must POST to /models/refresh");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-mcd-01: GET / does not change existing routes' behavior (model-catalog panel is additive only)", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const lanesRes = await fetch(`http://localhost:${port}/lanes`);
+    assert.equal(lanesRes.status, 200);
+    const routingRes = await fetch(`http://localhost:${port}/routing-strategy`);
+    assert.equal(routingRes.status, 200);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
