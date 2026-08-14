@@ -10,6 +10,7 @@ import { StateStore } from "../core/state-store.js";
 import { EnvCredentialSource } from "../core/credential-source.js";
 import { LANE_STATUS_VALUES, SIGNAL_SOURCES } from "../core/status-model.js";
 import { LanePipeline, claudeAdapters } from "../core/lane-pipeline.js";
+import { RotationController, ProviderScopedLaneRegistry } from "../core/rotation-controller.js";
 
 /** Never the real repo .env — every POST /lanes test uses one of these, cleaned up after. */
 function tmpEnvPath(): string {
@@ -1568,6 +1569,91 @@ test("hdl-mcd-01: GET / does not change existing routes' behavior (model-catalog
     assert.equal(lanesRes.status, 200);
     const routingRes = await fetch(`http://localhost:${port}/routing-strategy`);
     assert.equal(routingRes.status, 200);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+function registryWithTwoClaudeLanes(): LaneRegistry {
+  return new LaneRegistry(
+    [
+      { lane_id: "claude-a", provider: "claude", model: "claude-sonnet", credential_ref: "CLAUDE_A" },
+      { lane_id: "claude-b", provider: "claude", model: "claude-sonnet", credential_ref: "CLAUDE_B" },
+    ],
+    new EnvCredentialSource({ CLAUDE_A: "secret-a", CLAUDE_B: "secret-b" }),
+  );
+}
+
+test("hdl-rr-04: GET /rotation/:provider for an unmapped provider returns a structured 404, never throws", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/rotation/claude`);
+    assert.equal(res.status, 404);
+    const body = await res.json();
+    assert.equal(body.error, "unknown_provider");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-rr-04: GET /rotation/:provider reports the active lane, never the resolved credential", async () => {
+  const registry = registryWithTwoClaudeLanes();
+  const store = new StateStore(":memory:");
+  store.recordStatus({ lane_id: "claude-a", status: "up", reset_at: null, reason: null, signal_source: "active_probe", observed_at: new Date().toISOString() });
+  store.recordStatus({ lane_id: "claude-b", status: "up", reset_at: null, reason: null, signal_source: "active_probe", observed_at: new Date().toISOString() });
+  const controller = new RotationController(new ProviderScopedLaneRegistry(registry, "claude"), store);
+  const rotationControllers = new Map([["claude", controller]]);
+  const server = createHttpServer(registry, store, undefined, undefined, undefined, rotationControllers);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/rotation/claude`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.active_lane_id, "claude-a");
+    assert.equal(JSON.stringify(body).includes("secret-a"), false, "the resolved credential must never appear in the response");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-rr-04: POST /rotation/:provider/rotate advances to the next healthy lane, reflected in a subsequent GET", async () => {
+  const registry = registryWithTwoClaudeLanes();
+  const store = new StateStore(":memory:");
+  store.recordStatus({ lane_id: "claude-a", status: "up", reset_at: null, reason: null, signal_source: "active_probe", observed_at: new Date().toISOString() });
+  store.recordStatus({ lane_id: "claude-b", status: "up", reset_at: null, reason: null, signal_source: "active_probe", observed_at: new Date().toISOString() });
+  const controller = new RotationController(new ProviderScopedLaneRegistry(registry, "claude"), store);
+  const rotationControllers = new Map([["claude", controller]]);
+  const server = createHttpServer(registry, store, undefined, undefined, undefined, rotationControllers);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    // Establishes the active lane first — rotateToNextHealthy() with no
+    // active lane set yet picks the first healthy lane, not "the next one
+    // after nothing," matching RotationController's existing, already-tested
+    // fromLaneId=null semantics (rotation-controller.test.ts).
+    const initialRes = await fetch(`http://localhost:${port}/rotation/claude`);
+    const initialBody = await initialRes.json();
+    assert.equal(initialBody.active_lane_id, "claude-a");
+
+    const rotateRes = await fetch(`http://localhost:${port}/rotation/claude/rotate`, { method: "POST" });
+    assert.equal(rotateRes.status, 200);
+    const rotateBody = await rotateRes.json();
+    assert.equal(rotateBody.active_lane_id, "claude-b");
+
+    const getRes = await fetch(`http://localhost:${port}/rotation/claude`);
+    const getBody = await getRes.json();
+    assert.equal(getBody.active_lane_id, "claude-b");
   } finally {
     server.close();
     store.close();

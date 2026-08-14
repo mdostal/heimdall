@@ -74,6 +74,40 @@ test("composeService wires one MulticaAutopilotScheduler + one InProcessSchedule
   service.stopAll();
 });
 
+test("hdl-rr-04: a provider with only 1 credentialed lane gets no RotationController", () => {
+  const service = composeService({
+    env: testEnv(), // one claude lane, one codex lane — 1 each
+    commandRunner: mockCommandRunner(),
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port: 0,
+  });
+
+  assert.equal(service.rotationControllers.size, 0);
+
+  service.stopAll();
+});
+
+test("hdl-rr-04: a provider with 2+ credentialed lanes gets a RotationController, wired with a cap-reset job", () => {
+  const service = composeService({
+    env: {
+      ...testEnv(),
+      HEIMDALL_LANE_3_ID: "claude-b",
+      HEIMDALL_LANE_3_PROVIDER: "claude",
+      HEIMDALL_LANE_3_CREDENTIAL_REF: "CLAUDE_TOKEN_B",
+      CLAUDE_TOKEN_B: "sk-ant-fake-b",
+    },
+    commandRunner: mockCommandRunner(),
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port: 0,
+  });
+
+  assert.deepEqual([...service.rotationControllers.keys()], ["claude"]);
+
+  service.stopAll();
+});
+
 test("a lane seeded as degraded gets engaged by its InProcessScheduler end-to-end", async () => {
   const service = composeService({
     env: testEnv(),

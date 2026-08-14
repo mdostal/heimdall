@@ -20,6 +20,7 @@ import type { LaneStatus } from "../core/status-model.js";
 import { renderDashboardHtml } from "./ui/dashboard.js";
 import { appendLane, deriveCredentialRef, laneIdAlreadyDeclared } from "../core/env-file.js";
 import { refreshModelCatalog, getModelCatalog, setModelEnabled } from "../core/model-catalog.js";
+import { NoHealthyAccountsAvailableError, type RotationController } from "../core/rotation-controller.js";
 
 const DEFAULT_ENV_FILE_PATH = ".env";
 
@@ -190,6 +191,37 @@ export function buildLaneRegistry(env: NodeJS.ProcessEnv = process.env): LaneReg
   return new LaneRegistry(loadLaneDeclarations(env), new EnvCredentialSource(env));
 }
 
+// hdl-rr-04: rotation status/action for one provider — never returns the
+// resolved credential (ActiveClaudeAccount.token), matching every other
+// credential-handling path in this codebase.
+export type RotationStatusResult =
+  | { ok: true; active_lane_id: string }
+  | { ok: false; error: "unknown_provider" }
+  | { ok: false; error: "no_healthy_accounts" };
+
+export function getRotationStatus(rotationControllers: Map<string, RotationController> | undefined, provider: string): RotationStatusResult {
+  const controller = rotationControllers?.get(provider);
+  if (!controller) return { ok: false, error: "unknown_provider" };
+  try {
+    return { ok: true, active_lane_id: controller.getActiveAccount().lane_id };
+  } catch (error) {
+    if (error instanceof NoHealthyAccountsAvailableError) return { ok: false, error: "no_healthy_accounts" };
+    throw error;
+  }
+}
+
+export function rotateProvider(rotationControllers: Map<string, RotationController> | undefined, provider: string): RotationStatusResult {
+  const controller = rotationControllers?.get(provider);
+  if (!controller) return { ok: false, error: "unknown_provider" };
+  try {
+    const account = controller.rotateToNextHealthy();
+    return { ok: true, active_lane_id: account.lane_id };
+  } catch (error) {
+    if (error instanceof NoHealthyAccountsAvailableError) return { ok: false, error: "no_healthy_accounts" };
+    throw error;
+  }
+}
+
 export function getLaneStatuses(registry: LaneRegistry, store: StateStore): LaneStatusWithOverride[] {
   // Ensure every declared lane is present in the store (REQ-07: a lane with a
   // missing/invalid credential is still known — it just resolves to
@@ -231,6 +263,7 @@ export function createHttpServer(
   refreshLane?: RefreshLaneFn,
   envFilePath: string = DEFAULT_ENV_FILE_PATH,
   fetchImpl?: typeof fetch,
+  rotationControllers?: Map<string, RotationController>,
 ): Server {
   return createServer((req, res) => {
     // Liveness alias — distinct from /lanes on purpose: a monitor (e.g.
@@ -524,6 +557,32 @@ export function createHttpServer(
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(wire));
       });
+      return;
+    }
+
+    // hdl-rr-04: multi-account rotation status/action, one provider at a
+    // time. Only present for providers with 2+ credentialed lanes — a
+    // provider with 0 or 1 (or entirely unrecognized) reports
+    // unknown_provider, never a crash.
+    const rotationStatusMatch = req.method === "GET" && req.url?.match(/^\/rotation\/([^/]+)$/);
+    if (rotationStatusMatch) {
+      const provider = decodeURIComponent(rotationStatusMatch[1]);
+      const result = getRotationStatus(rotationControllers, provider);
+      const status = result.ok ? 200 : result.error === "unknown_provider" ? 404 : 409;
+      const { ok: _ok, ...wire } = result;
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(wire));
+      return;
+    }
+
+    const rotationRotateMatch = req.method === "POST" && req.url?.match(/^\/rotation\/([^/]+)\/rotate$/);
+    if (rotationRotateMatch) {
+      const provider = decodeURIComponent(rotationRotateMatch[1]);
+      const result = rotateProvider(rotationControllers, provider);
+      const status = result.ok ? 200 : result.error === "unknown_provider" ? 404 : 409;
+      const { ok: _ok, ...wire } = result;
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(wire));
       return;
     }
 

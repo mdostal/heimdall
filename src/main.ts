@@ -18,6 +18,7 @@
 import { buildLaneRegistry, createHttpServer, type RefreshLaneFn } from "./api/http-server.js";
 import type { Server } from "node:http";
 import { StateStore } from "./core/state-store.js";
+import type { LaneRegistry } from "./core/lane-registry.js";
 import {
   LanePipeline,
   claudeAdapters,
@@ -37,6 +38,8 @@ import { CircuitBreaker } from "./core/actuation/circuit-breaker.js";
 import { StaticLaneAgentResolver, type LaneAgentResolver } from "./core/actuation/lane-agent-resolver.js";
 import { StubControlAdapter, type ControlAdapter } from "./core/actuation/control-adapter.js";
 import { MulticaControlAdapter } from "./core/actuation/multica-control-adapter.js";
+import { RotationController, ProviderScopedLaneRegistry } from "./core/rotation-controller.js";
+import { startCapResetRecoveryJob, type RunningBackgroundJob } from "./core/background-jobs.js";
 
 const PROVIDER_ADAPTERS: Record<string, () => ProviderAdapters> = {
   claude: claudeAdapters,
@@ -69,7 +72,29 @@ export interface ComposedService {
   multicaSchedulers: MulticaAutopilotScheduler[];
   inProcessSchedulers: InProcessScheduler[];
   controlAdapters: Map<string, ControlAdapter>;
+  /** hdl-rr-04 — keyed by provider, only present for providers with 2+ credentialed lanes (nothing to rotate between otherwise). */
+  rotationControllers: Map<string, RotationController>;
   stopAll: () => void;
+}
+
+// hdl-rr-04: mirrors PROVIDER_ADAPTERS' "every lane always gets a real
+// mechanism, never a silent no-op" precedent from hdl-actuation — but
+// rotation only makes sense with 2+ credentialed lanes on the SAME
+// provider to rotate between, so a single-lane provider correctly gets
+// none rather than a controller with nowhere to rotate to.
+function buildRotationControllers(registry: LaneRegistry, store: StateStore): Map<string, RotationController> {
+  const credentialedByProvider = new Map<string, number>();
+  for (const lane of registry.list()) {
+    if (lane.credential === null) continue;
+    credentialedByProvider.set(lane.provider, (credentialedByProvider.get(lane.provider) ?? 0) + 1);
+  }
+
+  const controllers = new Map<string, RotationController>();
+  for (const [provider, count] of credentialedByProvider) {
+    if (count < 2) continue;
+    controllers.set(provider, new RotationController(new ProviderScopedLaneRegistry(registry, provider), store));
+  }
+  return controllers;
 }
 
 /**
@@ -200,7 +225,20 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     await pipeline.refresh(lane);
   };
 
-  const httpServer = createHttpServer(registry, store, refreshLane, undefined, options.fetchImpl);
+  // hdl-rr-04: rotation is a credential-selection concern orthogonal to
+  // which lane routing picks — it decides which account backs a given
+  // provider's calls, not which provider/lane serves a task. Never wired
+  // into the live Claude completion call path yet (documented follow-up,
+  // see design-discussion.md §4); this wires the controller + cap-reset
+  // background job for the first time on either branch and exposes it for
+  // manual inspection/rotation via GET/POST /rotation/:provider.
+  const rotationControllers = buildRotationControllers(registry, store);
+  const rotationJobs: RunningBackgroundJob[] = [];
+  for (const controller of rotationControllers.values()) {
+    rotationJobs.push(startCapResetRecoveryJob(controller));
+  }
+
+  const httpServer = createHttpServer(registry, store, refreshLane, undefined, options.fetchImpl, rotationControllers);
   if (!options.skipHttpListen) {
     httpServer.listen(port, () => {
       console.log(`heimdall service listening on http://localhost:${port}`);
@@ -214,10 +252,12 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     multicaSchedulers,
     inProcessSchedulers,
     controlAdapters,
+    rotationControllers,
     stopAll: () => {
       clearInterval(statusWatcher);
       for (const s of multicaSchedulers) s.stop();
       for (const s of inProcessSchedulers) s.stop();
+      for (const job of rotationJobs) job.stop();
       httpServer.close();
       store.close();
     },
