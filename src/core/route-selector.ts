@@ -149,6 +149,11 @@ export interface RouteResult {
 // endpoint is explicitly asking for the scored contract).
 const scoredStrategyForRouteEndpoint = new ScoredStrategy();
 
+/** hdl-ot-03: reuses the exact same module-level ledger connection getScoredRoute() writes to — GET /metrics reads through this, no second connection opened. */
+export function getRoutingDecisionCounts(): ReturnType<ScoredStrategy["getDecisionCounts"]> {
+  return scoredStrategyForRouteEndpoint.getDecisionCounts();
+}
+
 export function getScoredRoute(request: RouteRequest, registry: LaneRegistry, store: StateStore): RouteResult {
   const candidates = getRoutingCandidates(registry, store);
   const { lane, detail } = scoredStrategyForRouteEndpoint.selectRoute({

@@ -1706,3 +1706,51 @@ test("hdl-rr-04: POST /rotation/:provider/rotate advances to the next healthy la
     store.close();
   }
 });
+
+test("hdl-ot-03: GET /metrics returns 200 with valid Prometheus text format on an empty store, never a crash", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/metrics`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /^text\/plain/);
+    const body = await res.text();
+    assert.match(body, /^# HELP heimdall_lanes /m);
+    assert.match(body, /^# TYPE heimdall_lanes gauge$/m);
+    // A declared-but-never-probed lane still counts as a lane (status
+    // defaults to "down" — same fallback GET /lanes already uses).
+    assert.match(body, /heimdall_lanes\{provider="claude",status="down"\} 1/);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-ot-03: GET /metrics reflects real telemetry_events counts with correct labels", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  store.recordTelemetryEvent("actuation_result", { provider: "claude", action: "disable", success: "true" });
+  store.recordTelemetryEvent("actuation_result", { provider: "claude", action: "disable", success: "true" });
+  store.recordTelemetryEvent("actuation_result", { provider: "claude", action: "enable", success: "false" });
+  store.recordTelemetryEvent("rotation_event", { provider: "claude", kind: "capped" });
+  store.recordTelemetryEvent("model_substitution", { provider: "claude" });
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/metrics`);
+    const body = await res.text();
+    assert.match(body, /heimdall_actuation_results_total\{provider="claude",action="disable",success="true"\} 2/);
+    assert.match(body, /heimdall_actuation_results_total\{provider="claude",action="enable",success="false"\} 1/);
+    assert.match(body, /heimdall_rotation_events_total\{provider="claude",kind="capped"\} 1/);
+    assert.match(body, /heimdall_model_substitutions_total\{provider="claude"\} 1/);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
