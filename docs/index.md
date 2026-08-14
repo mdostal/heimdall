@@ -67,4 +67,13 @@ Heimdall is open-source (MIT). We welcome contributions!
 
 - **Vision:** [vision.md](vision.md)
 - **Contribute:** See [CONTRIBUTING.md](../CONTRIBUTING.md)
-- **Support:** Sponsor on [GitHub](https://github.com/sponsors/mdostal) or [Buy Me a Coffee](https://www.buymeacoffee.com/mdostal)
+
+### Support this project
+
+Heimdall is free and built in the open by [Mathew Dostal](https://github.com/mdostal). If it's useful to you, here's how to help out:
+
+- **Use it** — run Heimdall, open issues, send PRs.
+- **Hire me to consult** — multi-agent orchestration, LLM infra, or anything adjacent: [mathew.dostal@gmail.com](mailto:mathew.dostal@gmail.com).
+- **Work with me** — open to collaborating on Pantheon or related projects, same email.
+- **Buy a coffee** — if you just like the tools or the content, that's appreciated too: [Buy Me a Coffee](https://www.buymeacoffee.com/mdostal).
+- **Sponsor** — [GitHub Sponsors](https://github.com/sponsors/mdostal).
