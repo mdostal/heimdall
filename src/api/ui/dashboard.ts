@@ -143,6 +143,18 @@ export function renderDashboardHtml(): string {
     flex: 0 0 auto;
   }
   .strategy-status { font-size: 0.85rem; color: #888; margin-bottom: 0.6rem; }
+  .model-provider-heading {
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: #888;
+    margin: 0.9rem 0 0.35rem;
+  }
+  .model-provider-heading:first-child { margin-top: 0; }
+  .model-catalog-table td { padding: 0.3rem 0.5rem; font-size: 0.85rem; }
+  .model-catalog-table label { display: flex; align-items: center; gap: 0.35rem; cursor: pointer; }
+  .model-created-at { color: #888; font-size: 0.78rem; margin-left: 0.4rem; }
   .banner {
     margin-top: 0.75rem;
     padding: 0.6rem 0.8rem;
@@ -171,6 +183,16 @@ export function renderDashboardHtml(): string {
       <button type="button" id="routing-strategy-save">Save</button>
     </div>
     <div id="routing-strategy-banner"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Model catalog</h2>
+    <div class="strategy-status">What's actually callable right now, per provider — <code>GET /available-route</code> substitutes the newest enabled model when a lane's declared one is disabled or gone.</div>
+    <div class="row">
+      <button type="button" id="model-catalog-refresh">Refresh from providers</button>
+    </div>
+    <div id="model-catalog-banner"></div>
+    <div id="model-catalog-root">Loading…</div>
   </div>
 
   <div class="panel">
@@ -495,7 +517,93 @@ export function renderDashboardHtml(): string {
       });
   });
 
+  // Model catalog panel (hdl-mcd-01) — loaded once on page load, same
+  // reasoning as the routing-strategy panel just above: a config-browsing/
+  // editing surface, not a live status row, so it's not on the 5s poll.
+  function renderModelCatalog(entries) {
+    var root = document.getElementById("model-catalog-root");
+    if (!entries || entries.length === 0) {
+      root.innerHTML = "<div class=\\"empty-state\\">No models seen yet — click Refresh to fetch from your configured providers.</div>";
+      return;
+    }
+    var byProvider = {};
+    entries.forEach(function (entry) {
+      var list = byProvider[entry.provider] || (byProvider[entry.provider] = []);
+      list.push(entry);
+    });
+    var html = "";
+    Object.keys(byProvider).sort().forEach(function (provider) {
+      html += "<div class=\\"model-provider-heading\\">" + escapeHtml(provider) + "</div>";
+      html += "<table class=\\"model-catalog-table\\"><tbody>";
+      byProvider[provider].forEach(function (entry) {
+        var checked = entry.enabled ? " checked" : "";
+        var createdAt = entry.provider_created_at
+          ? "<span class=\\"model-created-at\\">" + escapeHtml(entry.provider_created_at) + "</span>"
+          : "";
+        html +=
+          "<tr><td><label>" +
+          "<input type=\\"checkbox\\" data-provider=\\"" + escapeHtml(entry.provider) + "\\" data-model=\\"" + escapeHtml(entry.model_id) + "\\"" + checked + ">" +
+          escapeHtml(entry.model_id) + createdAt +
+          "</label></td></tr>";
+      });
+      html += "</tbody></table>";
+    });
+    root.innerHTML = html;
+  }
+
+  function loadModelCatalog() {
+    fetch("/models")
+      .then(function (res) { return res.json(); })
+      .then(renderModelCatalog)
+      .catch(function (err) {
+        document.getElementById("model-catalog-root").innerHTML =
+          "<div class=\\"empty-state\\">Failed to load model catalog: " + escapeHtml(err) + "</div>";
+      });
+  }
+
+  document.getElementById("model-catalog-refresh").addEventListener("click", function () {
+    var btn = document.getElementById("model-catalog-refresh");
+    var banner = document.getElementById("model-catalog-banner");
+    banner.innerHTML = "";
+    btn.disabled = true;
+    fetch("/models/refresh", { method: "POST" })
+      .then(function (res) { return res.json(); })
+      .then(function (result) {
+        var providerCount = (result.providersRefreshed || []).length;
+        banner.innerHTML =
+          "<div class=\\"banner banner-ok\\">Refreshed " + escapeHtml(String(result.modelsSeen)) +
+          " model(s) across " + escapeHtml(String(providerCount)) + " provider(s).</div>";
+        loadModelCatalog();
+      })
+      .catch(function (err) {
+        banner.innerHTML = "<div class=\\"banner banner-error\\">" + escapeHtml(err) + "</div>";
+      })
+      .then(function () { btn.disabled = false; });
+  });
+
+  // Dedicated listener — this panel's own root, not the page-wide #root
+  // delegation used for lane rows.
+  document.getElementById("model-catalog-root").addEventListener("change", function (event) {
+    var checkbox = event.target.closest("input[type=\\"checkbox\\"][data-provider]");
+    if (!checkbox) return;
+    var provider = checkbox.getAttribute("data-provider");
+    var modelId = checkbox.getAttribute("data-model");
+    var enabled = checkbox.checked;
+    checkbox.disabled = true;
+    fetch("/models/" + encodeURIComponent(provider) + "/" + encodeURIComponent(modelId), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: enabled })
+    })
+      .then(function () { checkbox.disabled = false; })
+      .catch(function () {
+        checkbox.checked = !enabled;
+        checkbox.disabled = false;
+      });
+  });
+
   loadRoutingStrategy();
+  loadModelCatalog();
   poll();
   setInterval(poll, 5000);
 })();

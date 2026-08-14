@@ -1,7 +1,7 @@
 id: hdl-mcd-01-dashboard-model-catalog-panel
 epic: hdl-model-catalog-dashboard
 title: Dashboard model-catalog panel — list, toggle, refresh
-status: pending
+status: completed
 complexity: low
 methodology: classic
 depends_on: []
