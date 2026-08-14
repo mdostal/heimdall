@@ -1,0 +1,62 @@
+name: hdl-model-catalog
+title: Live, local model catalog — slice 1 of 3 (fetch, store, defaults, query)
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [backend, signal-sources, state, mcp, medium-scope]
+  roster: [researcher, technical-writer]
+  per_tag_reasoning:
+    backend: new orchestration + recency-heuristic modules.
+    signal-sources: four new list-models functions, one per gated provider, parallel to active-probe.
+    state: new model_catalog StateStore table, same local/gitignored pattern as manual_override/routing_strategy.
+    mcp: new heimdall.models.* tool trio, mirrors every prior MCP-tool epic.
+    medium-scope: real surface area (4 providers, new table, HTTP+MCP) but every piece mirrors an established pattern from this session.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (autonomous loop; operator gave two rounds of explicit direction, second round correcting the first artifact's git-tracked-file proposal after seeing it -- this design-discussion implements the corrected, operator-confirmed shape)
+    hv_planning: not_applicable (medium scope, every story mirrors an established pattern)
+    structured_outline: not_applicable (medium scope)
+
+description: >
+  Slice 1 of a 3-slice epic (dashboard toggles and auto-substituting route
+  selection are slices 2/3, explicitly deferred). Operator-corrected design
+  (see research-brief.md's two-round record): a live, per-installation,
+  locally-stored model catalog -- NOT a git-tracked file, since Heimdall is
+  OSS and each installation's real model access differs. Fetches each
+  configured lane's provider's actual live model list using that
+  installation's own credentials, stores it in StateStore (same
+  local/gitignored pattern as manual_override/routing_strategy), applies a
+  per-provider "newest models" default heuristic on first sight of a model
+  (operator freely overridable), and exposes it via GET/POST /models and
+  three new MCP tools. Directly closes the operator's complaint: agents
+  calling Heimdall can now ask "what models can I actually call" instead of
+  guessing/hardcoding names that turn out deprecated.
+
+stories:
+  - id: hdl-mc-01-model-catalog-state-store
+    title: model_catalog StateStore table + CRUD functions
+    complexity: low
+    depends_on: []
+  - id: hdl-mc-02-provider-list-models
+    title: Per-provider list-models functions (Claude, Codex, Kimi, Gemini)
+    complexity: medium
+    depends_on: []
+  - id: hdl-mc-03-recency-heuristic
+    title: Per-provider "newest models" default-enable heuristic
+    complexity: medium
+    depends_on: []
+  - id: hdl-mc-04-catalog-refresh-orchestration
+    title: refreshModelCatalog orchestration — fetch, diff, apply defaults, preserve operator choices
+    complexity: medium
+    depends_on: [hdl-mc-01-model-catalog-state-store, hdl-mc-02-provider-list-models, hdl-mc-03-recency-heuristic]
+  - id: hdl-mc-05-http-mcp-query-surface
+    title: GET/POST /models HTTP routes + heimdall.models.* MCP tools
+    complexity: low
+    depends_on: [hdl-mc-04-catalog-refresh-orchestration]

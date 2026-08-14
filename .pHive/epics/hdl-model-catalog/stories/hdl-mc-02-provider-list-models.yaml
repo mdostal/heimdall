@@ -1,0 +1,95 @@
+id: hdl-mc-02-provider-list-models
+epic: hdl-model-catalog
+title: Per-provider list-models functions (Claude, Codex, Kimi, Gemini)
+status: pending
+complexity: medium
+methodology: classic
+depends_on: []
+
+description: |
+  New src/core/signal-sources/model-list/{claude,codex,kimi,gemini}.ts,
+  parallel to the existing active-probe directory. Each hits the exact same
+  list-models endpoint its active-probe sibling already calls (same URL,
+  same auth header), but returns RawModelEntry[] ({ id, createdAt: string |
+  null }) instead of a liveness verdict. Never throws -- an unreachable/
+  error response returns an empty array (the catalog refresh orchestration,
+  hdl-mc-04, is what decides what an empty result means; these functions
+  are pure data-fetchers). createdAt is null when the provider's response
+  doesn't include a usable recency field for that entry (confirmed absent
+  for Gemini entirely; Kimi's presence is unconfirmed and defensively
+  treated as absent if the field isn't there).
+
+acceptance_criteria:
+  - "Given a successful Claude models-list response, when listClaudeModels is called, then it returns one RawModelEntry per model with id and createdAt populated from the response's own id/created_at fields"
+  - "Given a successful Codex models-list response, when listCodexModels is called, then it returns entries with createdAt derived from the response's created Unix timestamp, converted to an ISO-8601 string"
+  - "Given a successful Kimi models-list response, when listKimiModels is called, then it returns entries with createdAt populated when the response includes a created-like field, or null when it doesn't -- never throws either way"
+  - "Given a successful Gemini models-list response, when listGeminiModels is called, then it returns entries with createdAt always null (confirmed: no date field exists in this API's response), and id populated from the response's name/baseModelId field"
+  - "Given a network failure or non-2xx response for any of the four, when the corresponding list function is called, then it returns [] rather than throwing"
+  - "Given each function's request, when the request is inspected, then it uses the exact same URL and auth header its active-probe sibling already uses (no new endpoint invented)"
+
+steps:
+  - id: research
+    description: Confirm each provider's exact list-models response field names against research-brief.md and each existing active-probe adapter's URL/auth
+    agent: researcher
+  - id: implement
+    description: Implement the four list-models functions
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Unit tests covering every acceptance criterion using fixture responses matching each provider's real documented shape
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that no function throws on any input, and that Gemini's createdAt is always null (not guessed from version string at this layer -- that's hdl-mc-03's job)
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/core/signal-sources/active-probe/claude.ts
+      purpose: "Source of the exact URL (api.anthropic.com/v1/models) and auth header (x-api-key, anthropic-version) to reuse."
+    - path: src/core/signal-sources/active-probe/codex.ts
+      purpose: "Source of the exact URL (api.openai.com/v1/models) and auth header (Bearer) to reuse."
+    - path: src/core/signal-sources/active-probe/kimi.ts
+      purpose: "Source of the exact URL (api.moonshot.ai/v1/models) and auth header (Bearer) to reuse."
+    - path: src/core/signal-sources/active-probe/gemini.ts
+      purpose: "Source of the exact URL (generativelanguage.googleapis.com/v1beta/models) and auth header (x-goog-api-key) to reuse."
+
+files_to_modify:
+  - file: src/core/signal-sources/model-list/claude.ts
+    change: "New file -- listClaudeModels(credential, fetchImpl?)."
+  - file: src/core/signal-sources/model-list/codex.ts
+    change: "New file -- listCodexModels(credential, fetchImpl?)."
+  - file: src/core/signal-sources/model-list/kimi.ts
+    change: "New file -- listKimiModels(credential, fetchImpl?)."
+  - file: src/core/signal-sources/model-list/gemini.ts
+    change: "New file -- listGeminiModels(credential, fetchImpl?)."
+  - file: src/core/signal-sources/model-list/*.test.ts
+    change: "New files -- unit tests per provider."
+
+design_decisions:
+  - decision: A separate function per provider rather than reusing the active-probe function's response.
+    rationale: "Probe calls run on a health-polling cadence; catalog refresh is a coarser, separate cadence (design-discussion.md). Coupling them would mean every health poll also does catalog-diff work, or every catalog refresh piggybacks on health polling's timing -- neither is right. Small, acceptable duplication of the HTTP call itself, not of any logic."
+  - decision: These functions never throw, returning [] on any failure.
+    rationale: "Matches the never-throws contract every signal-source function in this codebase already follows; the orchestration layer (hdl-mc-04) decides what an empty result means for that provider's catalog state, not this layer."
+
+risks:
+  - severity: low
+    description: Kimi's created-field presence is unconfirmed against a live response.
+    mitigation: "Defensive optional-field read -- null when absent, never a crash. Same accepted-gap posture as every other unconfirmed field in this codebase's provider adapters."
+
+references:
+  - path: .pHive/epics/hdl-model-catalog/docs/research-brief.md
+    relevant_excerpt: |
+      Claude: created_at (RFC 3339) ... Codex/OpenAI: created (Unix
+      timestamp) ... Gemini: no date field at all ... Kimi: assumed
+      OpenAI-compatible, unconfirmed live.

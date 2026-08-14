@@ -1,0 +1,87 @@
+id: hdl-mc-03-recency-heuristic
+epic: hdl-model-catalog
+title: Per-provider "newest models" default-enable heuristic
+status: pending
+complexity: medium
+methodology: classic
+depends_on: []
+
+description: |
+  New src/core/model-recency.ts. Exports
+  defaultEnabledModelIds(provider, entries: RawModelEntry[]): Set<string>
+  -- pure function, no I/O, easily unit-testable in isolation from the
+  fetch layer (hdl-mc-02) and the storage layer (hdl-mc-01). Per
+  research-brief.md's table:
+  - claude/codex: sort by createdAt descending (nulls last), take a
+    top-N window (N small enough to be "newest", large enough that an
+    operator's own explicitly-declared model is very likely included --
+    not just the single latest).
+  - kimi: same as claude/codex when createdAt is present on enough
+    entries to be meaningful; if createdAt is absent/null across the
+    board, fall back to enabling ALL entries (never guess a subset when
+    there's no real signal to rank by).
+  - gemini: extract the leading generation number from id (regex on
+    patterns like "gemini-3", "gemini-2.5"), keep entries matching the
+    HIGHEST generation number found across all entries, with a
+    -preview/-latest suffix as a same-generation tiebreak toward
+    "include." Unparseable ids default to INCLUDED (safe-open, never
+    silently hidden), logged as unrecognized.
+
+acceptance_criteria:
+  - "Given a list of Claude/Codex entries with distinct createdAt values, when defaultEnabledModelIds is called, then the returned set contains the top-N most recently created entries by createdAt, not an arbitrary subset"
+  - "Given Kimi entries where every createdAt is null, when defaultEnabledModelIds is called, then the returned set contains ALL entries (no real signal to rank by -- enable everything rather than guess)"
+  - "Given Kimi entries where createdAt IS present, when defaultEnabledModelIds is called, then it behaves like the Claude/Codex case (sort + top-N)"
+  - "Given Gemini entries mixing generation numbers (e.g. some ids matching gemini-2.5-*, others gemini-3-*), when defaultEnabledModelIds is called, then only the highest-generation entries are included, never the older generation"
+  - "Given a Gemini entry whose id doesn't match the expected generation-number pattern at all, when defaultEnabledModelIds is called, then it defaults to INCLUDED, not silently excluded"
+  - "Given an empty entries array for any provider, when defaultEnabledModelIds is called, then it returns an empty set without throwing"
+
+steps:
+  - id: implement
+    description: Implement defaultEnabledModelIds with the per-provider branches described above
+    agent: developer
+  - id: test
+    description: Unit tests covering every acceptance criterion with realistic fixture data per provider
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that every "no clear signal" case defaults to the SAFE-OPEN choice (include), never silently excludes a model the operator might need
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  tech_stack:
+    language: typescript
+    runtime: node
+    test_runner: "node:test via tsx"
+  key_files:
+    - path: src/core/signal-sources/model-list/claude.ts
+      purpose: "The RawModelEntry type this function consumes (hdl-mc-02)."
+
+files_to_modify:
+  - file: src/core/model-recency.ts
+    change: "New file -- defaultEnabledModelIds(provider, entries) with the four per-provider branches."
+  - file: src/core/model-recency.test.ts
+    change: "New file -- unit tests for every acceptance criterion."
+
+design_decisions:
+  - decision: Every ambiguous/no-signal case defaults to INCLUDED (safe-open), never excluded.
+    rationale: "The failure mode of over-including a slightly-older model (operator sees one extra option, can disable it) is far less harmful than under-including and silently hiding a model the operator's own lane already declares -- matches this codebase's consistent 'never silently hide/deny on ambiguity' posture (e.g. public-status adapters defaulting to degraded, never up, on unrecognized input -- same principle, opposite direction, because the harm direction is reversed here)."
+  - decision: Top-N (not top-1) for the createdAt-sortable providers.
+    rationale: "design-discussion.md's resolved question 2 -- an operator's own explicitly-declared HEIMDALL_LANE_N_MODEL should very likely land inside the default-enabled set on first boot, not just Anthropic's/OpenAI's single newest release."
+
+risks:
+  - severity: low
+    description: The Gemini generation-number regex could misparse a genuinely novel future naming convention.
+    mitigation: "Unparseable ids default to included, not excluded -- worst case is a slightly noisier default set, never a silently missing model."
+
+references:
+  - path: .pHive/epics/hdl-model-catalog/docs/research-brief.md
+    relevant_excerpt: |
+      Gemini: no reliable field exists ... extract the leading version
+      number from baseModelId/name, prefer highest; treat -preview/-latest
+      suffixes as a tiebreak signal.
