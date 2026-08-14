@@ -1,6 +1,10 @@
 # Changelog
 
-## [Unreleased]
+## [0.20.0] - 2026-08-14
+
+First tagged release. Everything below accumulated in `[Unreleased]` prior to this
+cut — each entry documents its own version bump inline, so this section is left as a
+single chronological narrative rather than split into synthetic per-bump releases.
 
 ### Added
 
