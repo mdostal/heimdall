@@ -1,7 +1,7 @@
 id: hdl-mcr-01-resolve-effective-model
 epic: hdl-model-catalog-routing
 title: resolveEffectiveModel + wire into getAvailableRoute
-status: pending
+status: completed
 complexity: low
 methodology: classic
 depends_on: []

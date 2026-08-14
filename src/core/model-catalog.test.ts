@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { refreshModelCatalog, getModelCatalog, setModelEnabled } from "./model-catalog.js";
+import { refreshModelCatalog, getModelCatalog, setModelEnabled, resolveEffectiveModel } from "./model-catalog.js";
 import { LaneRegistry } from "./lane-registry.js";
 import { EnvCredentialSource } from "./credential-source.js";
 import { StateStore } from "./state-store.js";
@@ -162,5 +162,63 @@ test("hdl-mc-04: setModelEnabled returns {ok:false, error:'unknown_model'} for a
   const store = new StateStore(":memory:");
   const result = setModelEnabled(store, "claude", "never-seen-model", true);
   assert.deepEqual(result, { ok: false, error: "unknown_model" });
+  store.close();
+});
+
+test("hdl-mcr-01: resolveEffectiveModel with NO catalog data at all falls back to the declared model unchanged (byte-identical to pre-epic behavior)", () => {
+  const store = new StateStore(":memory:");
+  const result = resolveEffectiveModel(store, "claude", "claude-opus-5");
+  assert.deepEqual(result, { model: "claude-opus-5", substituted: false });
+  store.close();
+});
+
+test("hdl-mcr-01: resolveEffectiveModel with the declared model present AND enabled returns it unchanged", () => {
+  const store = new StateStore(":memory:");
+  store.upsertModelSeen({ provider: "claude", model_id: "claude-opus-5", default_enabled: true, provider_created_at: "2026-02-04T00:00:00Z", seen_at: "2026-08-14T00:00:00Z" });
+  const result = resolveEffectiveModel(store, "claude", "claude-opus-5");
+  assert.deepEqual(result, { model: "claude-opus-5", substituted: false });
+  store.close();
+});
+
+test("hdl-mcr-01: resolveEffectiveModel substitutes the newest ENABLED model when the declared one is disabled", () => {
+  const store = new StateStore(":memory:");
+  store.upsertModelSeen({ provider: "claude", model_id: "claude-old", default_enabled: false, provider_created_at: "2024-01-01T00:00:00Z", seen_at: "2026-08-14T00:00:00Z" });
+  store.upsertModelSeen({ provider: "claude", model_id: "claude-newer", default_enabled: true, provider_created_at: "2026-06-01T00:00:00Z", seen_at: "2026-08-14T00:00:00Z" });
+  store.upsertModelSeen({ provider: "claude", model_id: "claude-newest", default_enabled: true, provider_created_at: "2026-08-01T00:00:00Z", seen_at: "2026-08-14T00:00:00Z" });
+
+  const result = resolveEffectiveModel(store, "claude", "claude-old");
+  assert.deepEqual(result, { model: "claude-newest", substituted: true });
+  store.close();
+});
+
+test("hdl-mcr-01: resolveEffectiveModel substitutes when the declared model is absent from a non-empty catalog (the 'gone' signal)", () => {
+  const store = new StateStore(":memory:");
+  store.upsertModelSeen({ provider: "claude", model_id: "claude-current", default_enabled: true, provider_created_at: "2026-06-01T00:00:00Z", seen_at: "2026-08-14T00:00:00Z" });
+
+  const result = resolveEffectiveModel(store, "claude", "claude-retired-model-not-in-catalog");
+  assert.deepEqual(result, { model: "claude-current", substituted: true });
+  store.close();
+});
+
+test("hdl-mcr-01: resolveEffectiveModel falls back to the declared model when NO enabled alternative exists", () => {
+  const store = new StateStore(":memory:");
+  store.upsertModelSeen({ provider: "claude", model_id: "claude-old", default_enabled: false, provider_created_at: "2024-01-01T00:00:00Z", seen_at: "2026-08-14T00:00:00Z" });
+
+  const result = resolveEffectiveModel(store, "claude", "claude-old");
+  assert.deepEqual(result, { model: "claude-old", substituted: false }, "a wrong-but-present model beats returning nothing");
+  store.close();
+});
+
+test("hdl-mcr-01: resolveEffectiveModel never substitutes for an ungated provider (openrouter/ollama), regardless of model_catalog state", () => {
+  const store = new StateStore(":memory:");
+  // Even with catalog data present under a different provider key, an
+  // ungated provider must never be affected.
+  store.upsertModelSeen({ provider: "claude", model_id: "claude-newest", default_enabled: true, provider_created_at: "2026-08-01T00:00:00Z", seen_at: "2026-08-14T00:00:00Z" });
+
+  const openrouterResult = resolveEffectiveModel(store, "openrouter", "moonshotai/kimi-k3");
+  assert.deepEqual(openrouterResult, { model: "moonshotai/kimi-k3", substituted: false });
+
+  const ollamaResult = resolveEffectiveModel(store, "ollama", "llama3");
+  assert.deepEqual(ollamaResult, { model: "llama3", substituted: false });
   store.close();
 });

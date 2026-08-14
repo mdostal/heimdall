@@ -1,6 +1,7 @@
 import type { LaneRegistry } from "./lane-registry.js";
 import type { StateStore } from "./state-store.js";
 import { createRoutingStrategyRegistry, DEFAULT_ROUTING_STRATEGY_NAME } from "./routing-strategies/registry.js";
+import { resolveEffectiveModel } from "./model-catalog.js";
 
 export const TASK_TYPES = ["planning", "build", "review"] as const;
 
@@ -13,6 +14,12 @@ export interface AvailableRoute {
   lane_id: string;
   task_type: TaskType;
   headroom: true;
+  /** hdl-mcr-01 — true when `model` isn't the lane's raw declared
+   * HEIMDALL_LANE_N_MODEL, because the model-catalog (hdl-model-catalog)
+   * found it disabled or gone and substituted the newest enabled
+   * alternative instead. Never silent — GET /lanes still reports the raw
+   * declared value unchanged for any caller that needs it. */
+  model_substituted: boolean;
 }
 
 // hdl-rs-02: one module-level registry, created once for the process
@@ -75,12 +82,15 @@ export function getAvailableRoute(
   const lane = strategy.selectRoute(taskType, candidates);
   if (!lane) return null;
 
+  const { model, substituted } = resolveEffectiveModel(store, lane.provider, lane.model);
+
   return {
     runtime: lane.provider,
-    model: lane.model,
+    model,
     "token-ref": lane.credential_ref,
     lane_id: lane.lane_id,
     task_type: taskType,
     headroom: true,
+    model_substituted: substituted,
   };
 }

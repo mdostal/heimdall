@@ -263,6 +263,7 @@ test("GET /available-route returns an up lane with headroom and a token ref for 
       lane_id: "codex",
       task_type: "build",
       headroom: true,
+      model_substituted: false, // hdl-mcr-01 — no model_catalog data for this test's provider, so byte-identical to pre-epic behavior
     });
     assert.equal(JSON.stringify(body).includes("secret-codex"), false);
   } finally {
