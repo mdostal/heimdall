@@ -269,6 +269,17 @@ We welcome contributions and value community involvement!
 - Read our [Contributing Guide](CONTRIBUTING.md) to get started.
 - See the [Vision & Roadmap](docs/vision.md) to understand where Heimdall is headed.
 
-If Heimdall helps your agent infrastructure, please consider supporting the project:
-- ❤️ **[Sponsor on GitHub](https://github.com/sponsors/mdostal)**
-- ☕ **[Buy Me A Coffee](https://www.buymeacoffee.com/mdostal)**
+### Support this project
+
+Heimdall is free, open-source, and built in the open by [Mathew Dostal](https://github.com/mdostal). If it — or anything else in this stack — is useful to you, here's how to help out, in whatever way fits:
+
+- 🛠️ **Use it.** Run Heimdall, open issues, send PRs — real usage is its own kind of support.
+- 💼 **Hire me to consult.** Multi-agent orchestration, LLM infra, or anything adjacent — [get in touch](mailto:mathew.dostal@gmail.com).
+- 🤝 **Work with me.** Open to collaborating on Pantheon or related projects — same [email](mailto:mathew.dostal@gmail.com) works.
+- ☕ **Buy a coffee.** If you just like the tools or the content, that's genuinely appreciated too.
+
+| | |
+|---|---|
+| ❤️ Sponsor | **[github.com/sponsors/mdostal](https://github.com/sponsors/mdostal)** |
+| ☕ Buy Me A Coffee | **[buymeacoffee.com/mdostal](https://www.buymeacoffee.com/mdostal)** |
+| 📬 Consulting / collab | **[mathew.dostal@gmail.com](mailto:mathew.dostal@gmail.com)** |
