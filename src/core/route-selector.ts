@@ -95,6 +95,17 @@ export function getAvailableRoute(
   if (!lane) return null;
 
   const { model, substituted } = resolveEffectiveModel(store, lane.provider, lane.model);
+  if (substituted) {
+    // hdl-ot-02: Heimdall's own local record — this fact previously existed
+    // only as the response's model_substituted:true field for whoever
+    // happened to make THIS specific call; no local history of it existed.
+    store.recordTelemetryEvent("model_substitution", {
+      provider: lane.provider,
+      laneId: lane.lane_id,
+      declaredModel: lane.model,
+      effectiveModel: model,
+    });
+  }
 
   return {
     runtime: lane.provider,

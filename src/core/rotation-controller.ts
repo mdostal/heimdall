@@ -83,12 +83,24 @@ export class RotationController {
       signal_source: "passive",
       observed_at: this.now().toISOString(),
     });
+    // hdl-ot-02: Heimdall's own local record — rotation-controller never
+    // emitted telemetry of any kind before this (not even to Argus).
+    this.store.recordTelemetryEvent("rotation_event", {
+      laneId,
+      provider: this.registry.get(laneId)?.provider ?? "unknown",
+      kind: "capped",
+    }, this.now().toISOString());
   }
 
   rotateToNextHealthy(fromLaneId: string | null = this.activeLaneId): ActiveClaudeAccount {
     const next = this.nextHealthyLane(fromLaneId);
     if (!next) throw new NoHealthyAccountsAvailableError();
     this.activeLaneId = next.lane_id;
+    this.store.recordTelemetryEvent("rotation_event", {
+      laneId: next.lane_id,
+      provider: next.provider,
+      kind: "rotated",
+    }, this.now().toISOString());
     return toActiveAccount(next);
   }
 
