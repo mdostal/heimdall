@@ -2,9 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createRoutingStrategyRegistry, DEFAULT_ROUTING_STRATEGY_NAME } from "./registry.js";
 
-test("hdl-rs-02: the registry exposes exactly 3 named strategies", () => {
+test("hdl-rr-03: the registry exposes exactly 4 named strategies", () => {
   const registry = createRoutingStrategyRegistry();
-  assert.deepEqual(Object.keys(registry).sort(), ["off", "priority", "round-robin"]);
+  assert.deepEqual(Object.keys(registry).sort(), ["off", "priority", "round-robin", "scored"]);
 });
 
 test("hdl-rs-02: every registered strategy's .name matches its registry key", () => {

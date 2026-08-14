@@ -9,6 +9,7 @@ import { EnvCredentialSource } from "../core/credential-source.js";
 import { loadLaneDeclarations, LaneRegistry } from "../core/lane-registry.js";
 import {
   getAvailableRoute,
+  getScoredRoute,
   parseTaskType,
   getActiveRoutingStrategyName,
   getRoutingStrategyNames,
@@ -346,6 +347,39 @@ export function createHttpServer(
         const { ok: _ok, ...wire } = result;
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(wire));
+      });
+      return;
+    }
+
+    // hdl-rr-03: always scored, regardless of the globally active strategy —
+    // a caller hitting this endpoint is explicitly asking for the scored
+    // contract (Auriga/Minerva's existing dispatch shape). GET
+    // /available-route is the strategy-driven surface; this is not that.
+    if (req.method === "POST" && req.url === "/route") {
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+        const data = body.data as { task_id?: unknown; task_type?: unknown; estimated_cost?: unknown };
+        const taskId = typeof data.task_id === "string" ? data.task_id : null;
+        const taskType = parseTaskType(typeof data.task_type === "string" ? data.task_type : null);
+        if (!taskId || !taskType) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: "invalid_request",
+              required: ["task_id", "task_type"],
+              allowed_task_types: ["planning", "build", "review"],
+            }),
+          );
+          return;
+        }
+        const estimatedCost = typeof data.estimated_cost === "number" ? data.estimated_cost : undefined;
+        const result = getScoredRoute({ task_id: taskId, task_type: taskType, estimated_cost: estimatedCost }, registry, store);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(result));
       });
       return;
     }

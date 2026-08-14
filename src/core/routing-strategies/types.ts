@@ -14,13 +14,20 @@
 // should be required to add another strategy later.
 
 import type { Lane } from "../lane-registry.js";
-import type { TaskType } from "../route-selector.js";
+import type { TaskType } from "../task-type.js";
 import type { StateStore } from "../state-store.js";
 
 export interface RouteSelectionContext {
   readonly taskType: TaskType;
   readonly candidates: readonly Lane[];
   readonly store: StateStore;
+  /** hdl-rr-03 — only the scored strategy's experiment-arm assignment reads
+   * this; every other strategy ignores it. GET /available-route has no
+   * concept of a task id, so it's left undefined there — the scored
+   * strategy falls back to a fresh random id per call (documented: it means
+   * experiment bucketing isn't sticky for /available-route callers, only
+   * for POST /route callers who supply one). */
+  readonly taskId?: string;
 }
 
 export interface RouteSelectionDetail {

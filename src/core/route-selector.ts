@@ -1,11 +1,11 @@
-import type { LaneRegistry } from "./lane-registry.js";
+import type { Lane, LaneRegistry } from "./lane-registry.js";
 import type { StateStore } from "./state-store.js";
 import { createRoutingStrategyRegistry, DEFAULT_ROUTING_STRATEGY_NAME } from "./routing-strategies/registry.js";
+import { ScoredStrategy } from "./routing-strategies/scored-strategy.js";
 import { resolveEffectiveModel } from "./model-catalog.js";
+import { TASK_TYPES, type TaskType, parseTaskType } from "./task-type.js";
 
-export const TASK_TYPES = ["planning", "build", "review"] as const;
-
-export type TaskType = (typeof TASK_TYPES)[number];
+export { TASK_TYPES, type TaskType, parseTaskType };
 
 export interface AvailableRoute {
   runtime: string;
@@ -53,15 +53,11 @@ export function getActiveRoutingStrategyName(store: StateStore): string {
   return stored && routingStrategies[stored] ? stored : DEFAULT_ROUTING_STRATEGY_NAME;
 }
 
-export function parseTaskType(value: string | null): TaskType | null {
-  return TASK_TYPES.find((taskType) => taskType === value) ?? null;
-}
-
-export function getAvailableRoute(
-  taskType: TaskType,
-  registry: LaneRegistry,
-  store: StateStore,
-): AvailableRoute | null {
+// hdl-rr-03: shared candidacy filtering — used by both getAvailableRoute
+// (active-strategy-driven) and getScoredRoute (always-scored, bypasses the
+// active-strategy setting). One definition of "which lanes are even
+// eligible to be routed to" for every routing surface.
+function getRoutingCandidates(registry: LaneRegistry, store: StateStore): Lane[] {
   for (const lane of registry.list()) {
     store.upsertLane({
       lane_id: lane.lane_id,
@@ -71,7 +67,7 @@ export function getAvailableRoute(
   }
 
   const statuses = new Map(store.getAllCurrentStatuses().map((status) => [status.lane_id, status]));
-  const candidates = registry
+  return registry
     .list()
     .filter((lane) => lane.credential !== null)
     .filter((lane) => {
@@ -85,6 +81,14 @@ export function getAvailableRoute(
       if (override === "enabled") return true;
       return statuses.get(lane.lane_id)?.status === "up";
     });
+}
+
+export function getAvailableRoute(
+  taskType: TaskType,
+  registry: LaneRegistry,
+  store: StateStore,
+): AvailableRoute | null {
+  const candidates = getRoutingCandidates(registry, store);
 
   const strategy = routingStrategies[getActiveRoutingStrategyName(store)];
   const { lane, detail } = strategy.selectRoute({ taskType, candidates, store });
@@ -105,5 +109,50 @@ export function getAvailableRoute(
     ...(detail?.experimentArm !== undefined ? { experiment_arm: detail.experimentArm } : {}),
     ...(detail?.rankedCandidates !== undefined ? { ranked_candidates: detail.rankedCandidates } : {}),
     ...(detail?.policyVersion !== undefined ? { policy_version: detail.policyVersion } : {}),
+  };
+}
+
+// hdl-rr-03: dev's original RouteResult contract, preserved for the
+// backward-compatible POST /route / CLI route / MCP route_selection surfaces
+// (Auriga/Minerva's existing dispatch contract per dev-assessment.md) — a
+// thin reshape of RouteSelectionResult.detail, not a second implementation.
+export interface RouteRequest {
+  task_id: string;
+  task_type: TaskType;
+  estimated_cost?: number;
+}
+
+export interface RouteResult {
+  decision_id: string | null;
+  chosen_lane: string | null;
+  ranked_candidates: ReadonlyArray<{ laneId: string; score: number }>;
+  rationale: string;
+  experiment_arm: string | null;
+  policy_version: string | null;
+}
+
+// hdl-rr-03: one module-level ScoredStrategy instance — mirrors
+// routingStrategies' own module-level lifetime, so the policy file and
+// ledger DB connection load once, not per call. Always used for POST /route
+// regardless of the globally active strategy (a caller hitting this
+// endpoint is explicitly asking for the scored contract).
+const scoredStrategyForRouteEndpoint = new ScoredStrategy();
+
+export function getScoredRoute(request: RouteRequest, registry: LaneRegistry, store: StateStore): RouteResult {
+  const candidates = getRoutingCandidates(registry, store);
+  const { lane, detail } = scoredStrategyForRouteEndpoint.selectRoute({
+    taskType: request.task_type,
+    candidates,
+    store,
+    taskId: request.task_id,
+  });
+
+  return {
+    decision_id: detail?.decisionId ?? null,
+    chosen_lane: lane?.lane_id ?? null,
+    ranked_candidates: detail?.rankedCandidates ?? [],
+    rationale: detail?.rationale ?? "",
+    experiment_arm: detail?.experimentArm ?? null,
+    policy_version: detail?.policyVersion ?? null,
   };
 }

@@ -7,9 +7,7 @@
 import { buildLaneRegistry, getLaneStatuses } from "./http-server.js";
 import { StateStore } from "../core/state-store.js";
 import type { LaneStatus } from "../core/status-model.js";
-// `route` subcommand temporarily removed during hdl-routing-reconciliation —
-// restored against the refactored routing-strategies interface in
-// hdl-rr-03-scored-strategy-port.
+import { runRouteCommand } from "../cli/route-command.js";
 
 export function formatAsTable(lanes: readonly LaneStatus[]): string {
   if (lanes.length === 0) return "No lanes configured.";
@@ -60,8 +58,7 @@ if (isMainModule) {
   
   try {
     if (command === "route") {
-      console.error("`route` subcommand is temporarily unavailable during branch reconciliation — coming back in hdl-rr-03-scored-strategy-port.");
-      process.exitCode = 1;
+      runRouteCommand(args.slice(1), registry, store);
     } else {
       const lanes = getLaneStatuses(registry, store);
       console.log(renderLanes(lanes, parseFormatFlag(args)));

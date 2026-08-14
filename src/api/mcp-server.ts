@@ -42,7 +42,7 @@ import {
   setRoutingStrategy,
   type AddLaneInput,
 } from "./http-server.js";
-import { getActiveRoutingStrategyName, getRoutingStrategyNames } from "../core/route-selector.js";
+import { getActiveRoutingStrategyName, getRoutingStrategyNames, getScoredRoute, parseTaskType } from "../core/route-selector.js";
 import { refreshModelCatalog, getModelCatalog, setModelEnabled } from "../core/model-catalog.js";
 import { StateStore } from "../core/state-store.js";
 import type { LaneRegistry } from "../core/lane-registry.js";
@@ -56,6 +56,7 @@ export const ROUTING_STRATEGY_SET_TOOL_NAME = "heimdall.routingStrategy.set";
 export const MODELS_LIST_TOOL_NAME = "heimdall.models.list";
 export const MODELS_REFRESH_TOOL_NAME = "heimdall.models.refresh";
 export const MODELS_SET_ENABLED_TOOL_NAME = "heimdall.models.setEnabled";
+export const ROUTE_SELECTION_TOOL_NAME = "route_selection";
 
 const DEFAULT_ENV_FILE_PATH = ".env";
 
@@ -165,6 +166,20 @@ export function listLaneToolsDescriptor() {
         required: ["provider", "model_id", "enabled"],
       },
     },
+    {
+      name: ROUTE_SELECTION_TOOL_NAME,
+      description:
+        "Get a scored route recommendation for a task — weighted candidate scoring, deterministic A/B experiment arm, generated rationale, and a decision ledger entry. Always uses the 'scored' strategy regardless of the globally active routing strategy (the same contract as POST /route).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          task_id: { type: "string" as const, description: "Caller-supplied identifier — also the deterministic key for experiment-arm assignment." },
+          task_type: { type: "string" as const, enum: ["planning", "build", "review"] },
+          estimated_cost: { type: "number" as const },
+        },
+        required: ["task_id", "task_type"],
+      },
+    },
   ];
 }
 
@@ -226,6 +241,17 @@ export function callModelsSetEnabledTool(store: StateStore, args: unknown) {
   return textResult(wire);
 }
 
+export function callRouteSelectionTool(registry: LaneRegistry, store: StateStore, args: unknown) {
+  const input = (args ?? {}) as { task_id?: unknown; task_type?: unknown; estimated_cost?: unknown };
+  const taskId = typeof input.task_id === "string" ? input.task_id : "";
+  const taskType = parseTaskType(typeof input.task_type === "string" ? input.task_type : null);
+  if (!taskId || !taskType) {
+    return textResult({ ok: false, error: "invalid_request", required: ["task_id", "task_type"], allowed_task_types: ["planning", "build", "review"] });
+  }
+  const estimatedCost = typeof input.estimated_cost === "number" ? input.estimated_cost : undefined;
+  return textResult(getScoredRoute({ task_id: taskId, task_type: taskType, estimated_cost: estimatedCost }, registry, store));
+}
+
 /**
  * Builds the tool-name -> handler dispatch table. Exported separately from
  * createMcpServer so the dispatch behavior (in particular: throws for a
@@ -251,6 +277,7 @@ export function buildToolDispatch(
     [MODELS_LIST_TOOL_NAME]: (args) => callModelsListTool(store, args),
     [MODELS_REFRESH_TOOL_NAME]: () => callModelsRefreshTool(store, registry, fetchImpl),
     [MODELS_SET_ENABLED_TOOL_NAME]: (args) => callModelsSetEnabledTool(store, args),
+    [ROUTE_SELECTION_TOOL_NAME]: (args) => callRouteSelectionTool(registry, store, args),
   };
 }
 

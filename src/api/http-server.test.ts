@@ -488,7 +488,7 @@ test("GET /available-route returns 404 when no usable lane has headroom and a va
   }
 });
 
-test("hdl-rs-03: GET /routing-strategy defaults to 'priority' active with all 3 strategies listed as available", async () => {
+test("hdl-rr-03: GET /routing-strategy defaults to 'priority' active with all 4 strategies listed as available", async () => {
   const registry = registryWithOneConfiguredLane();
   const store = new StateStore(":memory:");
   const server = createHttpServer(registry, store);
@@ -500,7 +500,7 @@ test("hdl-rs-03: GET /routing-strategy defaults to 'priority' active with all 3 
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.active, "priority");
-    assert.deepEqual(body.available.sort(), ["off", "priority", "round-robin"]);
+    assert.deepEqual(body.available.sort(), ["off", "priority", "round-robin", "scored"]);
   } finally {
     server.close();
     store.close();

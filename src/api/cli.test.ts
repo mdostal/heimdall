@@ -63,7 +63,37 @@ test("renderLanes dispatches to the right formatter", () => {
   store.close();
 });
 
-// `runRouteCommand` test intentionally removed during hdl-routing-reconciliation —
-// the `route` subcommand is rebuilt against the refactored routing-strategies
-// interface in hdl-rr-03-scored-strategy-port, with its test restored there.
+test("runRouteCommand prints JSON output for --json flag", async () => {
+  const { runRouteCommand } = await import("../cli/route-command.js");
+  const { LaneRegistry } = await import("../core/lane-registry.js");
+  const { StateStore } = await import("../core/state-store.js");
+
+  const registry = new LaneRegistry([], { resolve: () => "secret" });
+  const store = new StateStore(":memory:");
+  const args = ["--task-type=build", "--task-id=test", "--json"];
+
+  const originalWrite = process.stdout.write;
+  const originalError = console.error;
+  let stdoutData = "";
+  let stderrData = "";
+  process.stdout.write = (chunk: string | Uint8Array) => {
+    stdoutData += chunk.toString();
+    return true;
+  };
+  console.error = (msg: string) => {
+    stderrData += msg + "\n";
+  };
+
+  try {
+    runRouteCommand(args, registry, store);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ERR_INVALID_STATE') throw err;
+  } finally {
+    process.stdout.write = originalWrite;
+    console.error = originalError;
+  }
+
+  assert.ok(stdoutData.includes("null\n"));
+  assert.ok(stderrData.includes('"chosen_lane": null'));
+});
 
