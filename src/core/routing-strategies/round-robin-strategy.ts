@@ -5,22 +5,21 @@
 // codebase's existing precedent for exactly this class of state (e.g.
 // MulticaControlAdapter's AgentState map, LanePipeline's corroboration map).
 
-import type { Lane } from "../lane-registry.js";
 import type { TaskType } from "../route-selector.js";
-import type { RoutingStrategy } from "./types.js";
+import type { RouteSelectionContext, RouteSelectionResult, RoutingStrategy } from "./types.js";
 
 export class RoundRobinStrategy implements RoutingStrategy {
   readonly name = "round-robin";
 
   private readonly cursorByTaskType = new Map<TaskType, number>();
 
-  selectRoute(taskType: TaskType, candidates: readonly Lane[]): Lane | null {
-    if (candidates.length === 0) return null;
+  selectRoute({ taskType, candidates }: RouteSelectionContext): RouteSelectionResult {
+    if (candidates.length === 0) return { lane: null };
 
     const sorted = [...candidates].sort((a, b) => a.lane_id.localeCompare(b.lane_id));
     const cursor = this.cursorByTaskType.get(taskType) ?? 0;
     const index = cursor % sorted.length;
     this.cursorByTaskType.set(taskType, cursor + 1);
-    return sorted[index];
+    return { lane: sorted[index] };
   }
 }

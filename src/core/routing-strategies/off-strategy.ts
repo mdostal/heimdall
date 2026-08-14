@@ -7,14 +7,12 @@
 // test/e2e/route-selection-handshake.test.ts's selectRoutableLane() already
 // demonstrates as a supported path, not a new invention.
 
-import type { Lane } from "../lane-registry.js";
-import type { TaskType } from "../route-selector.js";
-import type { RoutingStrategy } from "./types.js";
+import type { RouteSelectionContext, RouteSelectionResult, RoutingStrategy } from "./types.js";
 
 export class OffStrategy implements RoutingStrategy {
   readonly name = "off";
 
-  selectRoute(_taskType: TaskType, _candidates: readonly Lane[]): Lane | null {
-    return null;
+  selectRoute(_ctx: RouteSelectionContext): RouteSelectionResult {
+    return { lane: null };
   }
 }

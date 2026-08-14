@@ -5,7 +5,7 @@
 
 import type { Lane } from "../lane-registry.js";
 import type { TaskType } from "../route-selector.js";
-import type { RoutingStrategy } from "./types.js";
+import type { RouteSelectionContext, RouteSelectionResult, RoutingStrategy } from "./types.js";
 
 const RUNTIME_PRIORITY: Record<TaskType, readonly string[]> = {
   planning: ["claude", "gemini", "codex", "kimi"],
@@ -31,11 +31,11 @@ function effectiveRank(taskType: TaskType, lane: Lane): number {
 export class PriorityStrategy implements RoutingStrategy {
   readonly name = "priority";
 
-  selectRoute(taskType: TaskType, candidates: readonly Lane[]): Lane | null {
+  selectRoute({ taskType, candidates }: RouteSelectionContext): RouteSelectionResult {
     const sorted = [...candidates].sort((a, b) => {
       const rankDelta = effectiveRank(taskType, a) - effectiveRank(taskType, b);
       return rankDelta === 0 ? a.lane_id.localeCompare(b.lane_id) : rankDelta;
     });
-    return sorted[0] ?? null;
+    return { lane: sorted[0] ?? null };
   }
 }

@@ -20,6 +20,14 @@ export interface AvailableRoute {
    * alternative instead. Never silent — GET /lanes still reports the raw
    * declared value unchanged for any caller that needs it. */
   model_substituted: boolean;
+  /** hdl-rr-02 — populated only when the active strategy's selectRoute()
+   * returns a `detail` (today, only the "scored" strategy does); absent
+   * for priority/round-robin/off, exactly as before this field existed. */
+  rationale?: string;
+  decision_id?: string;
+  experiment_arm?: string;
+  ranked_candidates?: ReadonlyArray<{ laneId: string; score: number }>;
+  policy_version?: string;
 }
 
 // hdl-rs-02: one module-level registry, created once for the process
@@ -79,7 +87,7 @@ export function getAvailableRoute(
     });
 
   const strategy = routingStrategies[getActiveRoutingStrategyName(store)];
-  const lane = strategy.selectRoute(taskType, candidates);
+  const { lane, detail } = strategy.selectRoute({ taskType, candidates, store });
   if (!lane) return null;
 
   const { model, substituted } = resolveEffectiveModel(store, lane.provider, lane.model);
@@ -92,5 +100,10 @@ export function getAvailableRoute(
     task_type: taskType,
     headroom: true,
     model_substituted: substituted,
+    ...(detail?.rationale !== undefined ? { rationale: detail.rationale } : {}),
+    ...(detail?.decisionId !== undefined ? { decision_id: detail.decisionId } : {}),
+    ...(detail?.experimentArm !== undefined ? { experiment_arm: detail.experimentArm } : {}),
+    ...(detail?.rankedCandidates !== undefined ? { ranked_candidates: detail.rankedCandidates } : {}),
+    ...(detail?.policyVersion !== undefined ? { policy_version: detail.policyVersion } : {}),
   };
 }
