@@ -460,3 +460,36 @@ test("hdl-mc-01: a StateStore opened against a DB file created before model_cata
     fs.rmSync(dbPath, { force: true });
   }
 });
+
+test("hdl-ot-01: recordTelemetryEvent + listRecentTelemetryEvents round-trip labels as an object, newest first", () => {
+  const store = new StateStore(":memory:");
+  store.recordTelemetryEvent("rotation_event", { provider: "claude", kind: "capped" }, "2026-08-14T00:00:00.000Z");
+  store.recordTelemetryEvent("rotation_event", { provider: "claude", kind: "rotated" }, "2026-08-14T00:00:01.000Z");
+
+  const events = store.listRecentTelemetryEvents();
+  assert.equal(events.length, 2);
+  assert.equal(events[0].labels.kind, "rotated", "newest first");
+  assert.equal(events[1].labels.kind, "capped");
+  store.close();
+});
+
+test("hdl-ot-01: getTelemetryEventCounts groups by distinct label combination within one event type", () => {
+  const store = new StateStore(":memory:");
+  store.recordTelemetryEvent("actuation_result", { provider: "claude", success: "true" });
+  store.recordTelemetryEvent("actuation_result", { provider: "claude", success: "true" });
+  store.recordTelemetryEvent("actuation_result", { provider: "claude", success: "false" });
+  store.recordTelemetryEvent("model_substitution", { provider: "gemini" }); // different event_type, must not leak in
+
+  const counts = store.getTelemetryEventCounts("actuation_result");
+  assert.equal(counts.length, 2);
+  const bySuccess = Object.fromEntries(counts.map((c) => [c.labels.success, c.count]));
+  assert.equal(bySuccess.true, 2);
+  assert.equal(bySuccess.false, 1);
+  store.close();
+});
+
+test("hdl-ot-01: getTelemetryEventCounts for an event type with zero events returns an empty array, never a crash", () => {
+  const store = new StateStore(":memory:");
+  assert.deepEqual(store.getTelemetryEventCounts("rotation_event"), []);
+  store.close();
+});

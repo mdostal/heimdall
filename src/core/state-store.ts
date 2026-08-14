@@ -40,6 +40,13 @@ CREATE TABLE IF NOT EXISTS model_catalog (
   last_seen_at TEXT NOT NULL,
   PRIMARY KEY (provider, model_id)
 );
+CREATE TABLE IF NOT EXISTS telemetry_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_type TEXT NOT NULL,
+  labels TEXT NOT NULL,
+  occurred_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_telemetry_events_type_time ON telemetry_events(event_type, occurred_at DESC);
 `;
 
 export type ManualOverride = "enabled" | "disabled" | null;
@@ -74,6 +81,18 @@ export interface ModelCatalogEntry {
   provider_created_at: string | null;
   first_seen_at: string;
   last_seen_at: string;
+}
+
+interface TelemetryEventRow {
+  event_type: string;
+  labels: string;
+  occurred_at: string;
+}
+
+export interface TelemetryEvent {
+  event_type: string;
+  labels: Record<string, string>;
+  occurred_at: string;
 }
 
 export class StateStore {
@@ -358,6 +377,36 @@ export class StateStore {
       provider_created_at: row.provider_created_at,
       first_seen_at: row.first_seen_at,
       last_seen_at: row.last_seen_at,
+    }));
+  }
+
+  // hdl-ot-01: Heimdall's own local record of events that previously only
+  // existed as Argus OTEL spans (fire-and-forget, no local trace). Labels
+  // are stored as a JSON object — small, finite label sets in practice
+  // (provider, success, kind, ...), same simplicity precedent as
+  // model_catalog's flat columns.
+  recordTelemetryEvent(eventType: string, labels: Record<string, string>, occurredAt?: string): void {
+    this.db
+      .prepare(`INSERT INTO telemetry_events (event_type, labels, occurred_at) VALUES (?, ?, ?)`)
+      .run(eventType, JSON.stringify(labels), occurredAt ?? new Date().toISOString());
+  }
+
+  /** Grouped counts for one event type — one row per distinct label combination seen. Used by GET /metrics. */
+  getTelemetryEventCounts(eventType: string): Array<{ labels: Record<string, string>; count: number }> {
+    const rows = this.db
+      .prepare(`SELECT labels, COUNT(*) as count FROM telemetry_events WHERE event_type = ? GROUP BY labels`)
+      .all(eventType) as unknown as Array<{ labels: string; count: number }>;
+    return rows.map((row) => ({ labels: JSON.parse(row.labels) as Record<string, string>, count: row.count }));
+  }
+
+  listRecentTelemetryEvents(limit: number = 50): TelemetryEvent[] {
+    const rows = this.db
+      .prepare(`SELECT event_type, labels, occurred_at FROM telemetry_events ORDER BY occurred_at DESC LIMIT ?`)
+      .all(limit) as unknown as TelemetryEventRow[];
+    return rows.map((row) => ({
+      event_type: row.event_type,
+      labels: JSON.parse(row.labels) as Record<string, string>,
+      occurred_at: row.occurred_at,
     }));
   }
 
