@@ -1,6 +1,6 @@
 {
   "name": "heimdall",
-  "version": "0.25.0",
+  "version": "0.26.0",
   "private": true,
   "description": "Pantheon's health-aware LLM/lane router \u2014 v1 sense (lane health/status) + v2 actuate (Multica control).",
   "type": "module",
