@@ -36,7 +36,7 @@ import {
   DEFAULT_PASSIVE_STALENESS_MS,
   DEFAULT_PUBLIC_STATUS_STALENESS_MS,
 } from "./signal-sources/escalation.js";
-import { resolveStatus, type LaneStatusValue, type SignalSource } from "./status-model.js";
+import { resolveStatus, type ErrorCode, type LaneStatusValue, type SignalSource } from "./status-model.js";
 import type { StateStore } from "./state-store.js";
 import type { Lane } from "./lane-registry.js";
 
@@ -59,7 +59,12 @@ export interface ProviderAdapters {
   probe(
     credential: string,
     fetchImpl?: typeof fetch,
-  ): Promise<{ status: LaneStatusValue; reset_at: string | null; reason: string | null }>;
+  ): Promise<{
+    status: LaneStatusValue;
+    reset_at: string | null;
+    reason: string | null;
+    error_code?: ErrorCode | null;
+  }>;
 }
 
 export function claudeAdapters(): ProviderAdapters {
@@ -177,7 +182,12 @@ export class LanePipeline {
 
   private persistResolved(
     laneId: string,
-    resolved: { status: LaneStatusValue; reset_at: string | null; reason: string | null },
+    resolved: {
+      status: LaneStatusValue;
+      reset_at: string | null;
+      reason: string | null;
+      error_code?: ErrorCode | null;
+    },
     source: SignalSource,
     now: string,
   ): void {
@@ -188,13 +198,21 @@ export class LanePipeline {
     });
     this.lastRawVerdictByLane.set(laneId, resolved.status);
 
+    // hdl-error-taxonomy fix: reset_at/error_code are diagnostic DETAIL, not
+    // themselves a verdict — they used to be dropped (reset_at → null)
+    // pending corroboration, discarding real timer/classification info for
+    // a full extra cycle even though the underlying signal was real. Only
+    // the STATUS stays conservative (downgraded to `degraded` until
+    // corroborated) — "OUR state could be one of the 3 [suspect states] ...
+    // but then with full details underneath" (operator, 2026-08-16).
     this.store.recordStatus({
       lane_id: laneId,
       status: corroboration.verdict,
-      reset_at: corroboration.corroborated ? resolved.reset_at : null,
+      reset_at: resolved.reset_at,
       reason: corroboration.corroborated
         ? resolved.reason
         : `${resolved.reason ?? "signal received"} (awaiting corroboration before treating as ${resolved.status})`,
+      error_code: resolved.error_code ?? null,
       signal_source: source,
       observed_at: now,
     });

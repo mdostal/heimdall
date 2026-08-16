@@ -42,6 +42,44 @@ test("recordStatus() never violates the lanes FK, even without a prior upsertLan
   store.close();
 });
 
+test("hdl-error-taxonomy: error_code round-trips through recordStatus/getCurrentStatus", () => {
+  const store = new StateStore(":memory:");
+  store.recordStatus({
+    lane_id: "claude@mathew.dostal",
+    status: "degraded",
+    reset_at: null,
+    reason: "rate limited",
+    error_code: "rate_limit",
+    signal_source: "active_probe",
+    observed_at: "2026-07-25T12:00:00.000Z",
+  });
+
+  assert.equal(store.getCurrentStatus("claude@mathew.dostal")?.error_code, "rate_limit");
+  store.close();
+});
+
+test("hdl-error-taxonomy: error_code defaults to null when the caller omits it entirely (backward-compatible call sites)", () => {
+  const store = new StateStore(":memory:");
+  store.recordStatus({
+    lane_id: "claude@mathew.dostal",
+    status: "up",
+    reset_at: null,
+    reason: null,
+    signal_source: "active_probe",
+    observed_at: "2026-07-25T12:00:00.000Z",
+  });
+
+  assert.equal(store.getCurrentStatus("claude@mathew.dostal")?.error_code, null);
+  store.close();
+});
+
+test("hdl-error-taxonomy: a lane with no status recorded yet reports error_code: null (REQ-07 unconfigured fallback)", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+  assert.equal(store.getCurrentStatus("claude@mathew.dostal")?.error_code, null);
+  store.close();
+});
+
 test("recordStatus()'s FK guard does not clobber a lane's real provider/credential_ref already on file", () => {
   const store = new StateStore(":memory:");
   store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
@@ -316,6 +354,48 @@ test("a StateStore opened against a DB file created before manual_reset_at exist
       store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
       store.setManualResetAt("claude@mathew.dostal", "2026-08-13T18:00:00.000Z");
       assert.equal(store.getManualResetAt("claude@mathew.dostal"), "2026-08-13T18:00:00.000Z");
+      store.close();
+    });
+  } finally {
+    fs.rmSync(dbPath, { force: true });
+  }
+});
+
+test("hdl-error-taxonomy: a StateStore opened against a DB file created before error_code existed does not crash (defensive migration)", () => {
+  // Simulate a pre-hdl-error-taxonomy database — lane_status_history exists
+  // but has no error_code column yet.
+  const dbPath = path.join(os.tmpdir(), `heimdall-migration-test-error-code-${Date.now()}.sqlite`);
+  const legacyDb = new DatabaseSync(dbPath);
+  legacyDb.exec(`
+    CREATE TABLE lanes (
+      lane_id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      credential_ref TEXT NOT NULL
+    );
+    CREATE TABLE lane_status_history (
+      lane_id TEXT NOT NULL REFERENCES lanes(lane_id),
+      status TEXT NOT NULL,
+      reset_at TEXT,
+      reason TEXT,
+      signal_source TEXT NOT NULL,
+      observed_at TEXT NOT NULL
+    );
+  `);
+  legacyDb.close();
+
+  try {
+    assert.doesNotThrow(() => {
+      const store = new StateStore(dbPath);
+      store.recordStatus({
+        lane_id: "claude@mathew.dostal",
+        status: "degraded",
+        reset_at: null,
+        reason: "rate limited",
+        error_code: "rate_limit",
+        signal_source: "active_probe",
+        observed_at: "2026-08-16T00:00:00.000Z",
+      });
+      assert.equal(store.getCurrentStatus("claude@mathew.dostal")?.error_code, "rate_limit");
       store.close();
     });
   } finally {

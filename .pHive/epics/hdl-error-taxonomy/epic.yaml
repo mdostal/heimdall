@@ -1,0 +1,59 @@
+name: hdl-error-taxonomy
+title: Normalized error codes + native detail across every provider, real timer/action-taking
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: dev
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [large-scope, cross-provider, scheduler]
+  roster: [technical-writer]
+  per_tag_reasoning:
+    large-scope: touches status-model, state-store, lane-pipeline, all 6 provider adapters, the dashboard, and the scheduler.
+    cross-provider: every active-probe adapter needed research-grounded error-code mapping, not a single-provider fix.
+    scheduler: real action-taking (auth_failed backoff) required a careful SLA-preserving design, not just data plumbing.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (autonomous loop; operator resolved the one genuine design fork via AskUserQuestion before implementation)
+    hv_planning: not_applicable (single-operator execution; two research passes substituted for H/V's normal role)
+    structured_outline: not_applicable (same)
+
+description: >
+  Generalizes hdl-429-corroboration (Claude-only) into a real cross-provider
+  architecture per operator direction: "we have FULL error codes and responses
+  and give it back... we have to internally know the action to take and OUR
+  state could be one of the 3 but then with full details underneath." Adds a
+  normalized ErrorCode alongside the existing free-text reason (both kept, per
+  operator's explicit choice among three options). Two real research/audit
+  passes found and fixed actual bugs (Codex/Kimi's raw retry-after passthrough,
+  lane-pipeline.ts dropping reset_at pre-corroboration, OpenRouter's
+  undocumented-format guess) rather than just adding a new field. Extends
+  InProcessScheduler to use error_code for real scheduling action: auth_failed
+  lanes back off safely (no self-healing event exists to miss within the SLA),
+  every other error class keeps the SLA-driven fine cadence unchanged.
+
+stories:
+  - id: hdl-et-01-foundation
+    title: ErrorCode type + state-store schema + lane-pipeline plumbing (incl. reset_at-drop fix)
+    complexity: high
+    depends_on: []
+  - id: hdl-et-02-claude-and-codex
+    title: Claude (fill remaining branches) + Codex (real research, fix retry-after bug)
+    complexity: medium
+    depends_on: [hdl-et-01-foundation]
+  - id: hdl-et-03-kimi-gemini-openrouter-ollama
+    title: Kimi (fix retry-after bug) + Gemini + OpenRouter (real research) + Ollama
+    complexity: medium
+    depends_on: [hdl-et-01-foundation]
+  - id: hdl-et-04-dashboard-and-scheduler-action
+    title: Dashboard error-code chip + InProcessScheduler auth_failed backoff
+    complexity: medium
+    depends_on: [hdl-et-02-claude-and-codex, hdl-et-03-kimi-gemini-openrouter-ollama]
+  - id: hdl-et-05-verify-and-ship
+    title: Verify, CHANGELOG, hive-verify, merge to dev
+    complexity: low
+    depends_on: [hdl-et-04-dashboard-and-scheduler-action]

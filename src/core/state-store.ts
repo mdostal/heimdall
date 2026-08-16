@@ -8,7 +8,7 @@
 // pipeline (lane-pipeline.ts, lhs-03f).
 
 import { DatabaseSync } from "node:sqlite";
-import type { LaneStatus, LaneStatusValue, SignalSource } from "./status-model.js";
+import type { ErrorCode, LaneStatus, LaneStatusValue, SignalSource } from "./status-model.js";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS lanes (
@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS lane_status_history (
   status TEXT NOT NULL CHECK (status IN ('up','down','out_of_credit','degraded')),
   reset_at TEXT,
   reason TEXT,
+  error_code TEXT,
   signal_source TEXT NOT NULL CHECK (signal_source IN ('passive','public_status','active_probe')),
   observed_at TEXT NOT NULL
 );
@@ -61,6 +62,7 @@ interface StatusRow {
   status: LaneStatusValue;
   reset_at: string | null;
   reason: string | null;
+  error_code: ErrorCode | null;
   signal_source: SignalSource;
   observed_at: string;
 }
@@ -123,6 +125,12 @@ export class StateStore {
     } catch {
       // Column already exists — same reasoning as manual_override above.
     }
+    // hdl-error-taxonomy: same defensive migration pattern, on lane_status_history this time.
+    try {
+      this.db.exec(`ALTER TABLE lane_status_history ADD COLUMN error_code TEXT`);
+    } catch {
+      // Column already exists — same reasoning as manual_override above.
+    }
   }
 
   get database(): DatabaseSync {
@@ -145,6 +153,8 @@ export class StateStore {
     status: LaneStatusValue;
     reset_at: string | null;
     reason: string | null;
+    /** hdl-error-taxonomy — optional, defaults to null. Most call sites (tests, a genuine "up" status) have no error to classify. */
+    error_code?: ErrorCode | null;
     signal_source: SignalSource;
     observed_at: string;
   }): void {
@@ -161,14 +171,15 @@ export class StateStore {
     this.db
       .prepare(
         `INSERT INTO lane_status_history
-           (lane_id, status, reset_at, reason, signal_source, observed_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+           (lane_id, status, reset_at, reason, error_code, signal_source, observed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         entry.lane_id,
         entry.status,
         entry.reset_at,
         entry.reason,
+        entry.error_code ?? null,
         entry.signal_source,
         entry.observed_at,
       );
@@ -188,7 +199,7 @@ export class StateStore {
 
     const row = this.db
       .prepare(
-        `SELECT status, reset_at, reason, signal_source, observed_at
+        `SELECT status, reset_at, reason, error_code, signal_source, observed_at
          FROM lane_status_history
          WHERE lane_id = ?
          ORDER BY observed_at DESC, rowid DESC
@@ -206,6 +217,7 @@ export class StateStore {
         status: "down",
         reset_at: null,
         reason: "unconfigured — no status recorded yet",
+        error_code: null,
         last_updated: new Date(0).toISOString(),
         signal_source: "passive",
       };
@@ -217,6 +229,7 @@ export class StateStore {
       status: row.status,
       reset_at: row.reset_at,
       reason: row.reason,
+      error_code: row.error_code,
       last_updated: row.observed_at,
       signal_source: row.signal_source,
     };

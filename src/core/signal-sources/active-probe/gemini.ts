@@ -24,12 +24,15 @@
 // conservative-default posture codex.ts already uses for its own
 // unconfirmed 429 body shape.
 
+import type { ErrorCode } from "../../status-model.js";
+
 export type ProbeStatusValue = "up" | "down" | "out_of_credit" | "degraded";
 
 export interface ProbeResult {
   status: ProbeStatusValue;
   reset_at: string | null;
   reason: string | null;
+  error_code: ErrorCode | null;
 }
 
 const GEMINI_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -53,11 +56,12 @@ export async function probeGeminiLane(
       status: "down",
       reset_at: null,
       reason: `probe request failed: ${err instanceof Error ? err.message : String(err)}`,
+      error_code: "network_error",
     };
   }
 
   if (response.status === 401 || response.status === 403) {
-    return { status: "down", reset_at: null, reason: `auth failed (${response.status})` };
+    return { status: "down", reset_at: null, reason: `auth failed (${response.status})`, error_code: "auth_failed" };
   }
 
   if (response.status === 429) {
@@ -74,22 +78,24 @@ export async function probeGeminiLane(
         status: "out_of_credit",
         reset_at: null,
         reason: body.error?.message ?? "quota exceeded (429)",
+        error_code: "quota_exceeded",
       };
     }
     return {
       status: "degraded",
       reset_at: null,
       reason: body.error?.message ?? "rate limited (429)",
+      error_code: "rate_limit",
     };
   }
 
   if (response.status >= 500) {
-    return { status: "down", reset_at: null, reason: `server error (${response.status})` };
+    return { status: "down", reset_at: null, reason: `server error (${response.status})`, error_code: "server_error" };
   }
 
   if (response.ok) {
-    return { status: "up", reset_at: null, reason: null };
+    return { status: "up", reset_at: null, reason: null, error_code: null };
   }
 
-  return { status: "degraded", reset_at: null, reason: `unexpected status ${response.status}` };
+  return { status: "degraded", reset_at: null, reason: `unexpected status ${response.status}`, error_code: "unknown" };
 }
