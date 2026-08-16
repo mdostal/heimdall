@@ -27,6 +27,7 @@ import { refreshModelCatalog, getModelCatalog, setModelEnabled } from "../core/m
 import { NoHealthyAccountsAvailableError, type RotationController } from "../core/rotation-controller.js";
 import { renderMetrics } from "./metrics.js";
 import type { JsonValue } from "../core/routing/route-ledger.js";
+import { PolicyLoader } from "../core/routing/policy-loader.js";
 
 const DEFAULT_ENV_FILE_PATH = ".env";
 
@@ -449,6 +450,23 @@ export function createHttpServer(
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(wire));
       });
+      return;
+    }
+
+    // Read-only view of config/routing-policy.yaml (the scored strategy's
+    // hand-edited policy file) so the dashboard doesn't require reading YAML
+    // to see the active task-type weights/experiments. Loaded fresh on every
+    // request (never cached) so a hand-edit is reflected immediately.
+    if (req.method === "GET" && req.url === "/routing-policy") {
+      try {
+        const policy = PolicyLoader.load();
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(policy));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        res.writeHead(503, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "policy_unavailable", message }));
+      }
       return;
     }
 

@@ -83,3 +83,5 @@ app/src-tauri/gen/
 !.pHive/epics/hdl-model-catalog-dashboard/**
 !.pHive/epics/hdl-desktop-app/
 !.pHive/epics/hdl-desktop-app/**
+!.pHive/epics/hdl-routing-policy-dashboard/
+!.pHive/epics/hdl-routing-policy-dashboard/**

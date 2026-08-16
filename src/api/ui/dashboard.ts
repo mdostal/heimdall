@@ -211,6 +211,12 @@ export function renderDashboardHtml(): string {
   </div>
 
   <div class="panel">
+    <h2>Routing policy</h2>
+    <div class="strategy-status">Read-only view of <code>config/routing-policy.yaml</code> — hand-edit the file to change it, this just makes the active weights/experiments visible without reading YAML.</div>
+    <div id="routing-policy-root">Loading…</div>
+  </div>
+
+  <div class="panel">
     <h2>Add lane</h2>
     <form id="add-lane-form">
       <div class="row">
@@ -682,9 +688,56 @@ export function renderDashboardHtml(): string {
       });
   }
 
+  // Routing policy panel — read-only view of config/routing-policy.yaml via
+  // GET /routing-policy, same "summary surface loaded once on page load"
+  // pattern as telemetry/model-catalog above.
+  function renderRoutingPolicy(policy) {
+    var root = document.getElementById("routing-policy-root");
+    var html = "<div class=\\"strategy-status\\">cost preference: <strong>" +
+      escapeHtml(policy.cost_preference) + "</strong> · headroom floor: <strong>" +
+      escapeHtml(String(policy.headroom_floor)) + "</strong></div>";
+    html += "<table><thead><tr><th>Task type</th><th>Provider weights</th></tr></thead><tbody>";
+    Object.keys(policy.task_type_weights).forEach(function (taskType) {
+      var weights = policy.task_type_weights[taskType];
+      var parts = Object.keys(weights).map(function (provider) {
+        return escapeHtml(provider) + ": " + escapeHtml(String(weights[provider]));
+      });
+      html += "<tr><td>" + escapeHtml(taskType) + "</td><td>" + parts.join(", ") + "</td></tr>";
+    });
+    html += "</tbody></table>";
+    if (policy.experiments && policy.experiments.enabled) {
+      var armParts = Object.keys(policy.experiments.arms).map(function (arm) {
+        return escapeHtml(arm) + ": " + escapeHtml(String(policy.experiments.arms[arm].split));
+      });
+      html += "<div class=\\"reason\\">experiments enabled — arms: " + armParts.join(", ") + "</div>";
+    } else {
+      html += "<div class=\\"reason\\">experiments disabled</div>";
+    }
+    root.innerHTML = html;
+  }
+
+  function loadRoutingPolicy() {
+    fetch("/routing-policy")
+      .then(function (res) { return res.json().then(function (body) { return { ok: res.ok, body: body }; }); })
+      .then(function (result) {
+        if (!result.ok) {
+          document.getElementById("routing-policy-root").innerHTML =
+            "<div class=\\"empty-state\\">Failed to load routing policy: " +
+            escapeHtml(result.body.message || result.body.error || "unknown error") + "</div>";
+          return;
+        }
+        renderRoutingPolicy(result.body);
+      })
+      .catch(function (err) {
+        document.getElementById("routing-policy-root").innerHTML =
+          "<div class=\\"empty-state\\">Failed to load routing policy: " + escapeHtml(err) + "</div>";
+      });
+  }
+
   loadRoutingStrategy();
   loadModelCatalog();
   loadTelemetry();
+  loadRoutingPolicy();
   poll();
   setInterval(poll, 5000);
 })();
