@@ -1,0 +1,44 @@
+name: hdl-route-outcome-feedback
+title: Routing decision outcome-feedback surface
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: dev
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [small-scope, api-surface]
+  roster: [technical-writer]
+  per_tag_reasoning:
+    small-scope: one shared function, one HTTP route, two thin transport wrappers, no schema change.
+    api-surface: closes a named docs/vision.md gap (RouteLedger.reportOutcome() exists, unwired).
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (autonomous loop, no ambiguous design question)
+    hv_planning: not_applicable (small scope)
+    structured_outline: not_applicable (small scope)
+
+description: >
+  RouteLedger.reportOutcome() exists and is tested but nothing calls it.
+  docs/vision.md names this explicitly: "callers need an outcome-feedback
+  surface." Adds a shared reportRouteOutcome() function, POST
+  /route/:decisionId/outcome, CLI route-outcome, and MCP
+  heimdall.route.reportOutcome — one implementation, three thin transports,
+  matching every prior mutation surface in this codebase.
+
+stories:
+  - id: hdl-rof-01-shared-function-and-http
+    title: reportRouteOutcome shared function + POST /route/:decisionId/outcome
+    complexity: low
+    depends_on: []
+  - id: hdl-rof-02-cli-and-mcp
+    title: CLI route-outcome + MCP heimdall.route.reportOutcome
+    complexity: low
+    depends_on: [hdl-rof-01-shared-function-and-http]
+  - id: hdl-rof-03-verify-and-ship
+    title: Verify, CHANGELOG, hive-verify, merge to dev
+    complexity: low
+    depends_on: [hdl-rof-02-cli-and-mcp]
