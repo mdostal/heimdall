@@ -10,6 +10,7 @@ import { loadLaneDeclarations, LaneRegistry } from "../core/lane-registry.js";
 import {
   getAvailableRoute,
   getScoredRoute,
+  reportRouteOutcome,
   parseTaskType,
   getActiveRoutingStrategyName,
   getRoutingStrategyNames,
@@ -22,6 +23,7 @@ import { appendLane, deriveCredentialRef, laneIdAlreadyDeclared } from "../core/
 import { refreshModelCatalog, getModelCatalog, setModelEnabled } from "../core/model-catalog.js";
 import { NoHealthyAccountsAvailableError, type RotationController } from "../core/rotation-controller.js";
 import { renderMetrics } from "./metrics.js";
+import type { JsonValue } from "../core/routing/route-ledger.js";
 
 const DEFAULT_ENV_FILE_PATH = ".env";
 
@@ -421,6 +423,37 @@ export function createHttpServer(
         }
         const estimatedCost = typeof data.estimated_cost === "number" ? data.estimated_cost : undefined;
         const result = getScoredRoute({ task_id: taskId, task_type: taskType, estimated_cost: estimatedCost }, registry, store);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(result));
+      });
+      return;
+    }
+
+    // hdl-rof-01: closes the loop RouteLedger was always designed for — a
+    // caller that got a decision_id from POST /route reports back what
+    // actually happened. 404 for an unrecognized decision id, never a crash.
+    const routeOutcomeMatch = req.method === "POST" && req.url?.match(/^\/route\/([^/]+)\/outcome$/);
+    if (routeOutcomeMatch) {
+      const decisionId = decodeURIComponent(routeOutcomeMatch[1]);
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+        const data = body.data as { outcome?: unknown; actual_cost?: unknown; metadata?: unknown };
+        const outcome = typeof data.outcome === "string" ? data.outcome : undefined;
+        const actualCost = typeof data.actual_cost === "number" ? data.actual_cost : undefined;
+        const metadata =
+          typeof data.metadata === "object" && data.metadata !== null && !Array.isArray(data.metadata)
+            ? (data.metadata as Record<string, JsonValue>)
+            : undefined;
+        const result = reportRouteOutcome({ decisionId, outcome, actualCost, metadata });
+        if (!result.ok) {
+          res.writeHead(404, { "content-type": "application/json" });
+          res.end(JSON.stringify(result));
+          return;
+        }
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(result));
       });
