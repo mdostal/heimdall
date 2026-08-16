@@ -1862,3 +1862,99 @@ test("hdl-rof-01: POST /route/:decisionId/outcome with malformed JSON returns 40
     store.close();
   }
 });
+
+test("hdl-docs-viewer: GET /docs returns the index with links to every doc", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/docs`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /text\/html/);
+    const body = await res.text();
+    assert.match(body, /href="\/docs\/architecture"/);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-docs-viewer: GET /docs/:slug renders a real doc, including a live Mermaid diagram", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/docs/architecture`);
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    assert.match(body, /Heimdall Architecture/);
+    assert.match(body, /<pre class="mermaid">/);
+    assert.match(body, /\/vendor\/mermaid\.min\.js/);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-docs-viewer: GET /docs/:slug for an unknown slug returns 404, never a crash", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/docs/nonexistent`);
+    assert.equal(res.status, 404);
+    const body = await res.json();
+    assert.equal(body.error, "unknown_doc");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-docs-viewer: GET /vendor/mermaid.min.js serves the real vendored bundle locally, no redirect/CDN", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/vendor/mermaid.min.js`, { redirect: "manual" });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /javascript/);
+    const body = await res.text();
+    assert.ok(body.length > 100_000, "expected the real mermaid bundle, not a stub");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-docs-viewer: GET / (dashboard) links to /docs, and existing routes are unaffected (additive only)", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const dashRes = await fetch(`http://localhost:${port}/`);
+    const dashBody = await dashRes.text();
+    assert.match(dashBody, /href="\/docs"/);
+
+    const lanesRes = await fetch(`http://localhost:${port}/lanes`);
+    assert.equal(lanesRes.status, 200);
+  } finally {
+    server.close();
+    store.close();
+  }
+});

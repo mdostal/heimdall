@@ -19,6 +19,9 @@ import {
 import { StateStore, type ManualOverride } from "../core/state-store.js";
 import type { LaneStatus } from "../core/status-model.js";
 import { renderDashboardHtml } from "./ui/dashboard.js";
+import { DOC_ENTRIES, getDocBySlug, renderDocMarkdown, renderDocsIndexHtml, renderDocPageHtml } from "./ui/docs-viewer.js";
+import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
 import { appendLane, deriveCredentialRef, laneIdAlreadyDeclared } from "../core/env-file.js";
 import { refreshModelCatalog, getModelCatalog, setModelEnabled } from "../core/model-catalog.js";
 import { NoHealthyAccountsAvailableError, type RotationController } from "../core/rotation-controller.js";
@@ -26,6 +29,16 @@ import { renderMetrics } from "./metrics.js";
 import type { JsonValue } from "../core/routing/route-ledger.js";
 
 const DEFAULT_ENV_FILE_PATH = ".env";
+
+// hdl-docs-viewer: resolved once at module load, not per-request.
+// docsRepoRoot assumes cwd === repo root, true for every existing entrypoint
+// (npm run dev/cli/mcp already assume this for .env loading) — the
+// standalone desktop app wrapper sets this explicitly when it bundles docs/
+// alongside the compiled sidecar. mermaidBundlePath uses createRequire so it
+// resolves correctly regardless of node_modules hoisting/layout, not a
+// hardcoded relative path.
+const docsRepoRoot = process.env.HEIMDALL_REPO_ROOT ?? process.cwd();
+const mermaidBundlePath = createRequire(import.meta.url).resolve("mermaid/dist/mermaid.min.js");
 
 /** Collects and JSON-parses a request body. Shared by every mutation route (override, reset-at, add-lane). */
 function readJsonBody(req: import("node:http").IncomingMessage): Promise<{ ok: true; data: unknown } | { ok: false }> {
@@ -293,6 +306,49 @@ export function createHttpServer(
     if (req.method === "GET" && req.url === "/") {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(renderDashboardHtml());
+      return;
+    }
+
+    // hdl-docs-viewer: "see and navigate the docs and work with the
+    // diagrams" from inside the running service itself — the same content
+    // that ships in docs/, rendered locally (markdown server-side, Mermaid
+    // diagrams client-side against the vendored copy below — no CDN, no
+    // network call, matching the dashboard's own "no external calls" bar).
+    if (req.method === "GET" && req.url === "/docs") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(renderDocsIndexHtml());
+      return;
+    }
+
+    const docMatch = req.method === "GET" && req.url?.match(/^\/docs\/([^/]+)$/);
+    if (docMatch) {
+      const doc = getDocBySlug(decodeURIComponent(docMatch[1]));
+      if (!doc) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "unknown_doc" }));
+        return;
+      }
+      const bodyHtml = renderDocMarkdown(doc, docsRepoRoot);
+      if (bodyHtml === null) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "doc_file_missing", path: doc.path }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(renderDocPageHtml(doc, bodyHtml));
+      return;
+    }
+
+    // Vendored locally (see package.json's "marked"/"mermaid" dependencies)
+    // and served from node_modules directly — no build step, no CDN.
+    if (req.method === "GET" && req.url === "/vendor/mermaid.min.js") {
+      try {
+        res.writeHead(200, { "content-type": "text/javascript; charset=utf-8" });
+        res.end(readFileSync(mermaidBundlePath));
+      } catch {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "mermaid_bundle_missing" }));
+      }
       return;
     }
 
