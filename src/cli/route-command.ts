@@ -3,7 +3,7 @@
 // same getScoredRoute() shared function POST /route and MCP route_selection
 // use. No duplicated scoring/ledger/experiment-arm logic.
 
-import { getScoredRoute, parseTaskType } from "../core/route-selector.js";
+import { getScoredRoute, reportRouteOutcome, parseTaskType } from "../core/route-selector.js";
 import type { LaneRegistry } from "../core/lane-registry.js";
 import type { StateStore } from "../core/state-store.js";
 
@@ -52,4 +52,42 @@ export function runRouteCommand(args: string[], registry: LaneRegistry, store: S
     console.log(`Chosen Lane: ${result.chosen_lane ?? "None"}`);
     console.log(`Rationale: ${result.rationale}`);
   }
+}
+
+// hdl-rof-02: thin wrapper around the same reportRouteOutcome() shared
+// function POST /route/:decisionId/outcome and MCP
+// heimdall.route.reportOutcome use. No duplicated ledger logic.
+export function runRouteOutcomeCommand(args: string[]): void {
+  let decisionId = "";
+  let outcome: string | undefined;
+  let actualCost: number | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg.startsWith("--decision-id=")) {
+      decisionId = arg.split("=")[1];
+    } else if (arg === "--decision-id") {
+      decisionId = args[++i];
+    } else if (arg.startsWith("--outcome=")) {
+      outcome = arg.split("=")[1];
+    } else if (arg === "--outcome") {
+      outcome = args[++i];
+    } else if (arg.startsWith("--actual-cost=")) {
+      actualCost = Number(arg.split("=")[1]);
+    } else if (arg === "--actual-cost") {
+      actualCost = Number(args[++i]);
+    }
+  }
+
+  if (!decisionId) {
+    console.error("Usage: heimdall route-outcome --decision-id=<id> [--outcome=<value>] [--actual-cost=<cost>]");
+    process.exit(1);
+  }
+
+  const result = reportRouteOutcome({ decisionId, outcome, actualCost });
+  if (!result.ok) {
+    console.error(`Failed to report outcome: ${result.error}`);
+    process.exit(1);
+  }
+  console.log(`Outcome recorded for decision ${decisionId}.`);
 }
