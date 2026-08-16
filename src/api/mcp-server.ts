@@ -42,7 +42,7 @@ import {
   setRoutingStrategy,
   type AddLaneInput,
 } from "./http-server.js";
-import { getActiveRoutingStrategyName, getRoutingStrategyNames, getScoredRoute, parseTaskType } from "../core/route-selector.js";
+import { getActiveRoutingStrategyName, getRoutingStrategyNames, getScoredRoute, reportRouteOutcome, parseTaskType } from "../core/route-selector.js";
 import { refreshModelCatalog, getModelCatalog, setModelEnabled } from "../core/model-catalog.js";
 import { StateStore } from "../core/state-store.js";
 import type { LaneRegistry } from "../core/lane-registry.js";
@@ -57,6 +57,7 @@ export const MODELS_LIST_TOOL_NAME = "heimdall.models.list";
 export const MODELS_REFRESH_TOOL_NAME = "heimdall.models.refresh";
 export const MODELS_SET_ENABLED_TOOL_NAME = "heimdall.models.setEnabled";
 export const ROUTE_SELECTION_TOOL_NAME = "route_selection";
+export const ROUTE_REPORT_OUTCOME_TOOL_NAME = "heimdall.route.reportOutcome";
 
 const DEFAULT_ENV_FILE_PATH = ".env";
 
@@ -180,6 +181,20 @@ export function listLaneToolsDescriptor() {
         required: ["task_id", "task_type"],
       },
     },
+    {
+      name: ROUTE_REPORT_OUTCOME_TOOL_NAME,
+      description:
+        "Report what actually happened with a routing decision returned by route_selection/POST /route — closes the loop the decision ledger was designed for.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          decision_id: { type: "string" as const, description: "The decision_id returned by route_selection." },
+          outcome: { type: "string" as const, description: "Free-form outcome label, e.g. 'success' or 'failure'." },
+          actual_cost: { type: "number" as const },
+        },
+        required: ["decision_id"],
+      },
+    },
   ];
 }
 
@@ -252,6 +267,17 @@ export function callRouteSelectionTool(registry: LaneRegistry, store: StateStore
   return textResult(getScoredRoute({ task_id: taskId, task_type: taskType, estimated_cost: estimatedCost }, registry, store));
 }
 
+export function callRouteReportOutcomeTool(args: unknown) {
+  const input = (args ?? {}) as { decision_id?: unknown; outcome?: unknown; actual_cost?: unknown };
+  const decisionId = typeof input.decision_id === "string" ? input.decision_id : "";
+  if (!decisionId) {
+    return textResult({ ok: false, error: "invalid_request", required: ["decision_id"] });
+  }
+  const outcome = typeof input.outcome === "string" ? input.outcome : undefined;
+  const actualCost = typeof input.actual_cost === "number" ? input.actual_cost : undefined;
+  return textResult(reportRouteOutcome({ decisionId, outcome, actualCost }));
+}
+
 /**
  * Builds the tool-name -> handler dispatch table. Exported separately from
  * createMcpServer so the dispatch behavior (in particular: throws for a
@@ -278,6 +304,7 @@ export function buildToolDispatch(
     [MODELS_REFRESH_TOOL_NAME]: () => callModelsRefreshTool(store, registry, fetchImpl),
     [MODELS_SET_ENABLED_TOOL_NAME]: (args) => callModelsSetEnabledTool(store, args),
     [ROUTE_SELECTION_TOOL_NAME]: (args) => callRouteSelectionTool(registry, store, args),
+    [ROUTE_REPORT_OUTCOME_TOOL_NAME]: (args) => callRouteReportOutcomeTool(args),
   };
 }
 

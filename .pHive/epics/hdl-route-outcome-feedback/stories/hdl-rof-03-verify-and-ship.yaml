@@ -1,0 +1,29 @@
+id: hdl-rof-03-verify-and-ship
+epic: hdl-route-outcome-feedback
+title: Verify, CHANGELOG, hive-verify, merge to dev
+status: pending
+complexity: low
+methodology: classic
+depends_on: [hdl-rof-02-cli-and-mcp]
+
+description: |
+  Full npm test + npm run build. CHANGELOG.md entry (version bump 0.21.0 ->
+  0.22.0). Push, hive-verify on the hive box (PASS is the merge gate), open
+  PR into dev (not main), merge, re-verify merged dev.
+
+acceptance_criteria:
+  - "Given the full test suite, when run, then it passes with zero unexpected failures"
+  - "Given the hive box verify script, when run against the branch SHA, then it returns PASS before merge"
+  - "Given the merge to dev completes, when the verify script re-runs against merged dev, then it also returns PASS"
+
+steps:
+  - id: test
+    description: Full local verification pass
+    agent: tester
+  - id: integrate
+    description: Push, hive-verify, open PR, merge to dev, re-verify merged dev
+    agent: developer
+    depends_on: [test]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall

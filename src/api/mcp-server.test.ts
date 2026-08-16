@@ -16,6 +16,7 @@ import {
   callModelsRefreshTool,
   callModelsSetEnabledTool,
   callRouteSelectionTool,
+  callRouteReportOutcomeTool,
   buildToolDispatch,
   dispatchToolCall,
   LANES_LIST_TOOL_NAME,
@@ -28,6 +29,7 @@ import {
   MODELS_REFRESH_TOOL_NAME,
   MODELS_SET_ENABLED_TOOL_NAME,
   ROUTE_SELECTION_TOOL_NAME,
+  ROUTE_REPORT_OUTCOME_TOOL_NAME,
 } from "./mcp-server.js";
 import { getLaneStatuses } from "./http-server.js";
 import { LaneRegistry } from "../core/lane-registry.js";
@@ -46,9 +48,9 @@ function tmpEnvPath(): string {
   return path.join(os.tmpdir(), `heimdall-mcp-server-test-${Date.now()}-${Math.random().toString(36).slice(2)}.env`);
 }
 
-test("listLaneToolsDescriptor exposes 10 tools: list, override, setResetAt, add, routingStrategy.get/set, models.list/refresh/setEnabled, route_selection (hdl-rr-03)", () => {
+test("listLaneToolsDescriptor exposes 11 tools: list, override, setResetAt, add, routingStrategy.get/set, models.list/refresh/setEnabled, route_selection, route.reportOutcome (hdl-rof-02)", () => {
   const tools = listLaneToolsDescriptor();
-  assert.equal(tools.length, 10);
+  assert.equal(tools.length, 11);
   const names = tools.map((t) => t.name);
   assert.deepEqual(
     names.sort(),
@@ -63,6 +65,7 @@ test("listLaneToolsDescriptor exposes 10 tools: list, override, setResetAt, add,
       MODELS_REFRESH_TOOL_NAME,
       MODELS_SET_ENABLED_TOOL_NAME,
       ROUTE_SELECTION_TOOL_NAME,
+      ROUTE_REPORT_OUTCOME_TOOL_NAME,
     ].sort(),
   );
   assert.equal(LANES_LIST_TOOL_NAME, "heimdall.lanes.list");
@@ -105,6 +108,31 @@ test("hdl-rr-03: callRouteSelectionTool returns structured invalid_request for a
   assert.equal(payload.ok, false);
   assert.equal(payload.error, "invalid_request");
   store.close();
+});
+
+test("hdl-rof-02: callRouteReportOutcomeTool closes the loop for a real decision_id from callRouteSelectionTool", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const selectResult = callRouteSelectionTool(registry, store, { task_id: "t-mcp-1", task_type: "build" });
+  const decisionId = JSON.parse(selectResult.content[0].text).decision_id;
+
+  const outcomeResult = callRouteReportOutcomeTool({ decision_id: decisionId, outcome: "success" });
+  const payload = JSON.parse(outcomeResult.content[0].text);
+  assert.deepEqual(payload, { ok: true });
+  store.close();
+});
+
+test("hdl-rof-02: callRouteReportOutcomeTool returns structured unknown_decision for an unrecognized id, never throws", () => {
+  const result = callRouteReportOutcomeTool({ decision_id: "never-existed" });
+  const payload = JSON.parse(result.content[0].text);
+  assert.deepEqual(payload, { ok: false, error: "unknown_decision" });
+});
+
+test("hdl-rof-02: callRouteReportOutcomeTool returns structured invalid_request for a missing decision_id, never throws", () => {
+  const result = callRouteReportOutcomeTool({});
+  const payload = JSON.parse(result.content[0].text);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.error, "invalid_request");
 });
 
 test("callLanesListTool returns lane data identical to getLaneStatuses (no duplicated logic)", () => {

@@ -79,6 +79,11 @@ export class ScoredStrategy implements RoutingStrategy {
     return this.getLedger().getDecisionCounts();
   }
 
+  /** hdl-rof-01: same connection reuse as getDecisionCounts() — reportOutcome() writes to the exact ledger row selectRoute() created. */
+  reportOutcome(input: Parameters<RouteLedger["reportOutcome"]>[0]): boolean {
+    return this.getLedger().reportOutcome(input);
+  }
+
   selectRoute({ taskType, candidates, taskId }: RouteSelectionContext): RouteSelectionResult {
     const policy = this.getPolicy();
     const now = this.options.now ?? (() => new Date());

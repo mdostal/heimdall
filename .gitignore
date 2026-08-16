@@ -37,6 +37,8 @@ npm-debug.log*
 !.pHive/epics/hdl-routing-reconciliation/**
 !.pHive/epics/hdl-own-telemetry/
 !.pHive/epics/hdl-own-telemetry/**
+!.pHive/epics/hdl-route-outcome-feedback/
+!.pHive/epics/hdl-route-outcome-feedback/**
 !.pHive/epics/hdl-reason-aware-recovery/
 !.pHive/epics/hdl-reason-aware-recovery/**
 !.pHive/epics/hdl-lane-status-ui/

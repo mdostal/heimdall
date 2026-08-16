@@ -1,0 +1,38 @@
+id: hdl-rof-01-shared-function-and-http
+epic: hdl-route-outcome-feedback
+title: reportRouteOutcome shared function + POST /route/:decisionId/outcome
+status: pending
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  ScoredStrategy gains reportOutcome(input): boolean, delegating to
+  this.getLedger().reportOutcome(input) — same connection getDecisionCounts()
+  already reuses. route-selector.ts exports reportRouteOutcome(input): {ok:
+  true} | {ok: false, error: "unknown_decision"}, delegating to
+  scoredStrategyForRouteEndpoint.reportOutcome(). http-server.ts adds POST
+  /route/:decisionId/outcome, body {outcome?: string, actual_cost?: number,
+  metadata?: object}, 200 on success, 404 unknown_decision otherwise.
+
+acceptance_criteria:
+  - "Given a decision_id returned by a prior POST /route call, when POST /route/:decisionId/outcome is called, then it returns 200 {ok:true} and the outcome is queryable"
+  - "Given an unknown decision_id, when POST /route/:decisionId/outcome is called, then it returns 404 {ok:false, error:'unknown_decision'}, never a crash"
+  - "Given malformed JSON body, when POST /route/:decisionId/outcome is called, then it returns 400 invalid_json"
+
+steps:
+  - id: implement
+    description: Add ScoredStrategy.reportOutcome, route-selector.ts's reportRouteOutcome, and the HTTP route
+    agent: developer
+  - id: test
+    description: Unit + HTTP integration tests
+    agent: tester
+    depends_on: [implement]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - path: src/core/routing/route-ledger.ts
+      purpose: reportOutcome() already exists and is tested — this story only wires it up
+    - path: src/core/routing-strategies/scored-strategy.ts
+      purpose: mirror the getDecisionCounts() delegate pattern

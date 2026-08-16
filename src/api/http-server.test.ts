@@ -1790,3 +1790,75 @@ test("hdl-ot-04: GET / does not change existing routes' behavior (Telemetry pane
     store.close();
   }
 });
+
+test("hdl-rof-01: POST /route/:decisionId/outcome closes the loop for a real decision_id from POST /route", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const routeRes = await fetch(`http://localhost:${port}/route`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ task_id: "rof-test-1", task_type: "build" }),
+    });
+    const routeBody = await routeRes.json();
+    assert.ok(routeBody.decision_id, "POST /route must return a decision_id");
+
+    const outcomeRes = await fetch(`http://localhost:${port}/route/${routeBody.decision_id}/outcome`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ outcome: "success", actual_cost: 0.42 }),
+    });
+    assert.equal(outcomeRes.status, 200);
+    const outcomeBody = await outcomeRes.json();
+    assert.deepEqual(outcomeBody, { ok: true });
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-rof-01: POST /route/:decisionId/outcome for an unknown decision_id returns 404, never a crash", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/route/never-existed/outcome`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ outcome: "failure" }),
+    });
+    assert.equal(res.status, 404);
+    const body = await res.json();
+    assert.deepEqual(body, { ok: false, error: "unknown_decision" });
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-rof-01: POST /route/:decisionId/outcome with malformed JSON returns 400, not a crash", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/route/some-id/outcome`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{not json",
+    });
+    assert.equal(res.status, 400);
+  } finally {
+    server.close();
+    store.close();
+  }
+});

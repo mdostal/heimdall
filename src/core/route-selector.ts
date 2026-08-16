@@ -4,6 +4,7 @@ import { createRoutingStrategyRegistry, DEFAULT_ROUTING_STRATEGY_NAME } from "./
 import { ScoredStrategy } from "./routing-strategies/scored-strategy.js";
 import { resolveEffectiveModel } from "./model-catalog.js";
 import { TASK_TYPES, type TaskType, parseTaskType } from "./task-type.js";
+import type { JsonValue } from "./routing/route-ledger.js";
 
 export { TASK_TYPES, type TaskType, parseTaskType };
 
@@ -152,6 +153,29 @@ const scoredStrategyForRouteEndpoint = new ScoredStrategy();
 /** hdl-ot-03: reuses the exact same module-level ledger connection getScoredRoute() writes to — GET /metrics reads through this, no second connection opened. */
 export function getRoutingDecisionCounts(): ReturnType<ScoredStrategy["getDecisionCounts"]> {
   return scoredStrategyForRouteEndpoint.getDecisionCounts();
+}
+
+export interface RouteOutcomeInput {
+  decisionId: string;
+  outcome?: string;
+  actualCost?: number;
+  metadata?: Record<string, JsonValue>;
+}
+
+export type ReportRouteOutcomeResult = { ok: true } | { ok: false; error: "unknown_decision" };
+
+// hdl-rof-01: closes the loop RouteLedger was always designed for — a
+// caller that got a decision_id from getScoredRoute() reports back what
+// actually happened. Reuses the exact same ledger connection getScoredRoute()
+// wrote the original decision to.
+export function reportRouteOutcome(input: RouteOutcomeInput): ReportRouteOutcomeResult {
+  const recorded = scoredStrategyForRouteEndpoint.reportOutcome({
+    decisionId: input.decisionId,
+    outcome: input.outcome ?? null,
+    actualCost: input.actualCost ?? null,
+    metadata: input.metadata ?? null,
+  });
+  return recorded ? { ok: true } : { ok: false, error: "unknown_decision" };
 }
 
 export function getScoredRoute(request: RouteRequest, registry: LaneRegistry, store: StateStore): RouteResult {
