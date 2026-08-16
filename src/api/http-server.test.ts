@@ -606,6 +606,28 @@ test("hdl-rs-03: POST /routing-strategy with an unrecognized name returns 400 an
   }
 });
 
+test("hdl-da-03: GET /routing-policy returns the real config/routing-policy.yaml, read-only", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/routing-policy`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.version, "1.0");
+    assert.ok(body.task_type_weights.planning, "expected the real policy's planning task-type weights");
+    assert.equal(typeof body.headroom_floor, "number");
+    assert.ok(["quality", "balanced", "economy"].includes(body.cost_preference));
+    assert.equal(typeof body.experiments.enabled, "boolean");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
 test("hdl-rs-03: with the 'off' strategy active, GET /available-route always returns no_available_route, regardless of eligible candidates", async () => {
   const registry = registryWithRouteLanes();
   const store = new StateStore(":memory:");
@@ -1392,6 +1414,24 @@ test("hdl-rs-04: GET / (dashboard) includes a Routing strategy panel that loads 
     assert.match(body, /id="routing-strategy-status"/);
     assert.match(body, /fetch\("\/routing-strategy"\)/, "the panel must load its state from GET /routing-strategy");
     assert.match(body, /"\/routing-strategy"/, "the save control must POST to /routing-strategy");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-da-03: GET / (dashboard) includes a Routing policy panel that loads from /routing-policy", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /id="routing-policy-root"/);
+    assert.match(body, /fetch\("\/routing-policy"\)/, "the panel must load its state from GET /routing-policy");
   } finally {
     server.close();
     store.close();

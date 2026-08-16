@@ -11,7 +11,7 @@ are healthy and to act on that knowledge.
 
 ---
 
-## ① Current — where it is (v0.22.0)
+## ① Current — where it is (v0.27.0)
 
 Heimdall runs as a headless Node/TypeScript service on **`http://localhost:4870`**
 (override with `PORT`). Everything below actually runs today.
@@ -30,6 +30,16 @@ degraded/out_of_credit concept for local inference). State persists to a
 **`node:sqlite`** store (`HEIMDALL_DB_PATH`, default in-memory). SLA-verified:
 status correctness within 10 seconds of an actual state change, *measured* by
 `test/sla-harness/`.
+
+**Full error codes, not just a status.** Every lane carries a normalized
+`ErrorCode` (`rate_limit | quota_exceeded | billing_error | auth_failed |
+server_error | network_error | unknown`) *alongside* the free-text native
+`reason` — never one instead of the other. `GET /lanes` and the dashboard
+surface both. This isn't just richer display: `InProcessScheduler` uses the
+code to take real scheduling action — `auth_failed` lanes back off to a fixed
+5-minute recheck instead of the fine ~5s cadence, since an auth failure has
+no self-healing event to miss (only an operator fixing the credential helps);
+every other error class keeps the SLA-driven cadence unchanged.
 
 **Model catalog.** Each installation fetches its own live model list per
 configured provider and stores a local enable/disable per model — newest
@@ -78,7 +88,24 @@ composed alongside the local recorder, never Heimdall's only source of truth.
 
 **UI.** A self-contained dashboard (no build step, no framework) — live lane
 status, per-lane override/reset-at controls, add-lane form, routing-strategy
-picker, model-catalog toggles, and the telemetry panel.
+picker, model-catalog toggles, a read-only routing-policy panel (per-task-
+type weights, headroom floor, cost preference, experiment status — the same
+`config/routing-policy.yaml` the scored strategy reads, made visible without
+reading YAML), and the telemetry panel. `GET /docs` and `GET /docs/:slug`
+render the project's own markdown docs in-app, with Mermaid diagrams
+rendered client-side against a locally-vendored bundle — no CDN, no network
+call, docs and diagrams browsable from the running service itself.
+
+**Standalone desktop app.** A real, installable macOS app (Tauri v2,
+`app/`) — a genuine single point of install, not just the headless service.
+A Rust shell spawns Heimdall's own compiled service as a sidecar (captures
+the real login-shell PATH, binds a free port, wires a stable per-user
+app-data directory for the SQLite DB and `.env`), health-checks it before
+showing the dashboard, and provides a tray icon with close-to-tray behavior
+and gh-CLI-backed self-update. Ad-hoc signed, single-machine target — no
+Apple Developer Program distribution. Live-verified end to end, including
+the actual release `.app` bundle installed and run standalone, not just the
+dev-mode wrapper.
 
 **Pantheon integration.** Heimdall's real L2 descriptor (capabilities,
 `healthz`, port, transport) is registered in `pantheon-v2`.
@@ -108,11 +135,8 @@ picker, model-catalog toggles, and the telemetry panel.
 - **Headroom/cost-tier defaults.** `HEIMDALL_LANE_N_HEADROOM`/`_COST_TIER` exist
   and feed the scored strategy, but most operators will never set them —
   consider whether a cheap, automatic headroom signal (e.g. inferred from
-  recent `out_of_credit` frequency) beats the current static default.
-- **`config/routing-policy.yaml` UI.** The scored strategy's policy file is
-  hand-edited; the dashboard has no view into it. A read-only policy panel
-  would make the A/B experiment/weight configuration actually visible without
-  reading YAML.
+  recent `out_of_credit` frequency) beats the current static default. Needs an
+  operator call on the actual inference approach, not a routine pass.
 
 ---
 
@@ -139,10 +163,12 @@ outcome feedback.
   cross-account sharing real. Minting and storing them harness-side is blocking
   for cross-account routing and is tracked as a dependency, not owned here.
 - **Two distribution modes, always.** Like every Pantheon god, Heimdall is
-  open-source and ships **standalone** (carrying its own light config UI, usable
-  from any harness that can spin up multiple agents) *and* as a **Pantheon
-  plugin** (config through Vesta/Multica). Same core, two front doors — the
-  descriptor is registered; secret resolution through Portunus is what's still
+  open-source and ships **standalone** — now a real installable desktop app
+  (`app/`), carrying its own dashboard/docs UI, usable from any harness that
+  can spin up multiple agents — *and* as a **Pantheon plugin** (config through
+  Vesta/Multica). Same core, two front doors — the descriptor is registered
+  and the standalone side is real and dogfoodable; secret resolution through
+  Portunus (needed for the plugin side's credential story) is what's still
   blocked.
 
 Platform-wide, this rides Pantheon's core principle: **everything is swappable.**
@@ -160,7 +186,10 @@ health and cost, then route" a first-class, measurable operation.
   scenarios.
 - **Document a real Multica actuation runbook** from `.env.example` — the safe
   operator path to a live end-to-end toggle.
-- **A `config/routing-policy.yaml` dashboard panel** (read-only view first).
+- **Make the routing-policy panel editable**, not just read-only — the current
+  panel (`GET /routing-policy`) is a deliberate read-only-first scope; a
+  `POST` that writes back to `config/routing-policy.yaml` (with the same
+  validation `PolicyLoader` already does) would close the loop.
 - **Harden `resolveStatus()`** against additional malformed-signal shapes with
   new table-driven tests in `src/core/status-model.test.ts`.
 
