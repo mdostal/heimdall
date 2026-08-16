@@ -181,7 +181,7 @@ export function renderDashboardHtml(): string {
 </style>
 </head>
 <body>
-  <h1>Heimdall — Lane Status</h1>
+  <h1>Heimdall — Lane Status <a href="/docs" style="font-size:0.6em;font-weight:400;">Docs &rarr;</a></h1>
   <div class="subtitle">Polls <code>GET /lanes</code> every 5s · manual overrides route through the same ControlAdapter Heimdall already uses for automatic sensing</div>
 
   <div class="panel">
