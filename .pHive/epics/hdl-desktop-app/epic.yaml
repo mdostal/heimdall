@@ -1,0 +1,66 @@
+name: hdl-desktop-app
+title: Standalone Tauri v2 desktop app -- single-point-of-install dogfooding shell
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: dev
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [new-subsystem, packaging, cross-language]
+  roster: [technical-writer]
+  per_tag_reasoning:
+    new-subsystem: an entirely new top-level app/ directory (Rust/Tauri), no prior code to extend.
+    packaging: adapts Portunus's real, shipped desktop-app pattern -- required research into what actually transfers vs. needs genuine rewriting.
+    cross-language: Rust shell spawning and managing Heimdall's own Node process as a sidecar.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (autonomous loop; operator's request itself named the reference pattern to follow -- "just like portunus and the rest")
+    hv_planning: not_applicable (single-operator execution, adapting an existing proven pattern rather than novel design)
+    structured_outline: not_applicable (same)
+
+description: >
+  Packages Heimdall as a standalone, installable macOS desktop app per operator
+  request: "let's get this into a standalone app, test it out and even give it
+  an install and setup to go on an single point of install by itself so we can
+  see and navigate the docs and work with the diagrams etc -- once i can do
+  that, we are fully dogfooding this and i can lock it down." Adapted directly
+  from Portunus's own real, shipped Tauri v2 desktop app (the only reference
+  implementation in the Pantheon ecosystem -- confirmed no shared cross-god
+  template exists). A Rust shell spawns Heimdall's compiled dist/src/main.js
+  as a sidecar subprocess (captures the user's real login-shell PATH, binds an
+  OS-assigned free port, sets cwd + HEIMDALL_DB_PATH + HEIMDALL_REPO_ROOT to a
+  stable per-user app-data directory), polls /healthz before pointing the
+  webview at it, provides a tray icon (Open/Check-for-Updates/Launch-at-Login/
+  Quit) with close-to-tray behavior, and self-updates via the user's own gh
+  CLI (never an embedded token) with a detached relauncher + backup/restore
+  safety pattern. Ad-hoc signed only, single-machine target -- no Apple
+  Developer Program distribution.
+
+  Live-verified end-to-end (not just compiled): a real `cargo tauri dev`
+  launch spawned the sidecar, health-checked it, and the actual native window
+  rendered the live dashboard (screenshotted); /lanes, /docs, /docs/:slug, and
+  /vendor/mermaid.min.js all served correctly through the packaged sidecar;
+  the SQLite DB persisted at the correct macOS Application Support path. Found
+  and fixed a real bug during this verification: Cmd+Q delivered
+  RunEvent::Exit directly on this build, with no preceding ExitRequested (the
+  event Portunus's own pattern -- and this epic's first draft -- relied on
+  exclusively), leaving the sidecar orphaned after quit. Fixed by handling
+  cleanup on both RunEvent variants (idempotent).
+
+stories:
+  - id: hdl-da-01-sidecar-and-shell
+    title: sidecar.rs (PATH capture, port binding, spawn+health-check) + lib.rs/tray.rs/updater.rs adapted from Portunus
+    complexity: high
+    depends_on: []
+  - id: hdl-da-02-build-and-package
+    title: build-resources.sh (stage dist/ + prod node_modules + docs/), relauncher.sh, dist-placeholder, icons
+    complexity: medium
+    depends_on: [hdl-da-01-sidecar-and-shell]
+  - id: hdl-da-03-verify-and-ship
+    title: Real cargo tauri dev launch, live dashboard/docs verification, quit-path bug fix, hive-verify, merge to dev
+    complexity: medium
+    depends_on: [hdl-da-02-build-and-package]

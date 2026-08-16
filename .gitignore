@@ -8,6 +8,14 @@ npm-debug.log*
 # Playwright MCP session artifacts (manual browser smoke-testing)
 .playwright-mcp/
 
+# Tauri desktop app build artifacts -- Rust compile cache and the staged
+# copy of the compiled Heimdall service build-resources.sh produces (dist/,
+# node_modules/, docs/, package.json), all regenerated on demand, never
+# source.
+app/src-tauri/target/
+app/src-tauri/resources/heimdall/
+app/src-tauri/gen/
+
 # Secrets — REQ-07 credential loading reads from this; never commit it
 .env
 .env.*
@@ -73,3 +81,5 @@ npm-debug.log*
 !.pHive/epics/hdl-model-catalog-routing/**
 !.pHive/epics/hdl-model-catalog-dashboard/
 !.pHive/epics/hdl-model-catalog-dashboard/**
+!.pHive/epics/hdl-desktop-app/
+!.pHive/epics/hdl-desktop-app/**
