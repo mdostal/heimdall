@@ -22,7 +22,7 @@ function fakeCommandRunner(succeeds: boolean): CommandRunner {
   };
 }
 
-function fakeFetch(status: number, headers: Record<string, string> = {}): typeof fetch {
+function fakeFetch(status: number, headers: Record<string, string> = {}, body?: unknown): typeof fetch {
   return (async (_url: unknown, init?: RequestInit) => {
     // Sanity: probe must send the auth header, never omit it.
     const h = init?.headers as Record<string, string> | undefined;
@@ -31,6 +31,10 @@ function fakeFetch(status: number, headers: Record<string, string> = {}): typeof
       ok: status >= 200 && status < 300,
       status,
       headers: { get: (name: string) => headers[name] ?? null },
+      json: async () => {
+        if (body === undefined) throw new Error("no body configured on this fake response");
+        return body;
+      },
     } as unknown as Response;
   }) as typeof fetch;
 }
@@ -52,6 +56,63 @@ test("429 resolves to degraded and carries the reset header as reset_at", async 
   );
   assert.equal(result.status, "degraded");
   assert.equal(result.reset_at, "2026-07-25T12:05:00.000Z");
+});
+
+test("hdl-429-corroboration: a 429 with no parseable body falls back to parseClaudeCapSignal's own generic reason, never crashes", async () => {
+  const result = await probeClaudeLane("sk-ant-fake", fakeFetch(429));
+  assert.equal(result.status, "degraded");
+  // parseClaudeCapSignal always classifies a bare 429 as "rate_limit" and
+  // supplies its own fallback reason when no real message is extractable —
+  // this IS the "never have less info than before" floor, just phrased by
+  // the shared error-parser instead of a second hardcoded string here.
+  assert.equal(result.reason, "Claude API limit reached");
+});
+
+test("hdl-429-corroboration: a 429 with a real error.message body surfaces that message as reason, not the generic string", async () => {
+  const result = await probeClaudeLane(
+    "sk-ant-fake",
+    fakeFetch(
+      429,
+      { "anthropic-ratelimit-requests-reset": "2026-07-25T12:05:00.000Z" },
+      { type: "error", error: { type: "rate_limit_error", message: "This request would exceed the rate limit for your organization." } },
+    ),
+  );
+  assert.equal(result.status, "degraded");
+  assert.equal(result.reason, "This request would exceed the rate limit for your organization.");
+});
+
+test("hdl-429-corroboration: a 429 whose message names a weekly limit resolves to out_of_credit, not degraded", async () => {
+  const result = await probeClaudeLane(
+    "sk-ant-fake",
+    fakeFetch(
+      429,
+      {},
+      { type: "error", error: { type: "rate_limit_error", message: "Your weekly limit has been reached." } },
+    ),
+  );
+  assert.equal(result.status, "out_of_credit");
+  assert.equal(result.reason, "Your weekly limit has been reached.");
+});
+
+test("hdl-429-corroboration: reset_at prefers the specific anthropic-ratelimit-requests-reset header over retry-after", async () => {
+  const result = await probeClaudeLane(
+    "sk-ant-fake",
+    fakeFetch(
+      429,
+      { "anthropic-ratelimit-requests-reset": "2026-07-25T12:05:00.000Z", "retry-after": "30" },
+      { type: "error", error: { type: "rate_limit_error", message: "rate limited" } },
+    ),
+  );
+  assert.equal(result.reset_at, "2026-07-25T12:05:00.000Z");
+});
+
+test("hdl-429-corroboration: reset_at falls back to retry-after when the specific header is absent", async () => {
+  const result = await probeClaudeLane(
+    "sk-ant-fake",
+    fakeFetch(429, { "retry-after": "30" }, { type: "error", error: { type: "rate_limit_error", message: "rate limited" } }),
+  );
+  // Not asserting the exact instant (parseClaudeCapSignal uses its own now()) — just that a real timestamp came through, not null.
+  assert.ok(result.reset_at !== null && !Number.isNaN(Date.parse(result.reset_at)), `expected a real timestamp, got ${result.reset_at}`);
 });
 
 test("401/403 resolves to down (auth failure)", async () => {

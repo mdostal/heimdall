@@ -22,6 +22,7 @@
 // subcommand actually validates the token vs. which one merely inspects it.
 
 import { NodeCommandRunner, type CommandRunner } from "../../scheduler/command-runner.js";
+import { parseClaudeCapSignal } from "../../error-parser.js";
 
 export type ProbeStatusValue = "up" | "down" | "out_of_credit" | "degraded";
 
@@ -119,8 +120,7 @@ async function probeClaudeApiKeyLane(
   }
 
   if (response.status === 429) {
-    const resetAt = response.headers.get("anthropic-ratelimit-requests-reset");
-    return { status: "degraded", reset_at: resetAt, reason: "rate limited (429)" };
+    return await interpretRateLimitResponse(response);
   }
 
   if (response.status === 401 || response.status === 403) {
@@ -136,4 +136,39 @@ async function probeClaudeApiKeyLane(
   }
 
   return { status: "degraded", reset_at: null, reason: `unexpected status ${response.status}` };
+}
+
+// DEC-hdl-429-corroboration, resolved (operator, 2026-08-16): keep the
+// immediate verdict on a single 429 (no multi-tick corroboration) — the
+// real reason text already carries enough diagnostic weight on its own.
+// Real research confirmed Anthropic sends far more than a bare status code
+// on a 429: a real `error.message` body and several `anthropic-ratelimit-*`
+// headers (docs.anthropic.com/api/rate-limits). Reuses the same
+// parseClaudeCapSignal() extraction rotation-controller's cap-signal
+// detection already relies on — one implementation for "what does this
+// Claude error actually mean", not a second one. A message naming a
+// "weekly limit" reads as `out_of_credit` (won't recover until reset, same
+// severity class as billing 402) rather than `degraded` (transient) — using
+// the multiple statuses AND the reason field together, as designed.
+async function interpretRateLimitResponse(response: Response): Promise<ProbeResult> {
+  let body: unknown = null;
+  try {
+    body = await response.json();
+  } catch {
+    // Not JSON, or an empty body — parseClaudeCapSignal degrades gracefully
+    // to its own generic fallback reason; never crash the probe over this.
+  }
+
+  const signal = parseClaudeCapSignal({ status: response.status, headers: response.headers, body });
+  const status: ProbeStatusValue = signal?.kind === "weekly_limit" ? "out_of_credit" : "degraded";
+  // The specific Anthropic header first (proven-correct, already shipped
+  // behavior); parseClaudeCapSignal's own reset_at (retry-after-based, per
+  // research) as a fallback when that specific header is absent.
+  const resetAt = response.headers.get("anthropic-ratelimit-requests-reset") ?? signal?.reset_at ?? null;
+
+  return {
+    status,
+    reset_at: resetAt,
+    reason: signal?.reason ?? "rate limited (429)",
+  };
 }
