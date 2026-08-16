@@ -24,7 +24,7 @@ test("a 2xx response with positive limit_remaining resolves to up", async () => 
     "fake-key",
     fakeFetch(200, { data: { limit: 100, limit_remaining: 42 } }),
   );
-  assert.deepEqual(result, { status: "up", reset_at: null, reason: null });
+  assert.deepEqual(result, { status: "up", reset_at: null, reason: null, error_code: null });
 });
 
 test("a 2xx response with null limit_remaining (unlimited) resolves to up", async () => {
@@ -55,13 +55,22 @@ test("401/403 resolves to down (auth failure)", async () => {
   assert.equal(result403.status, "down");
 });
 
-test("429 resolves to degraded and carries raw X-RateLimit-Reset as reset_at", async () => {
+test("hdl-error-taxonomy: 429 resolves to degraded/rate_limit and surfaces the real error.message, never guesses at X-RateLimit-Reset's undocumented format", async () => {
   const result = await probeOpenRouterLane(
     "fake-key",
-    fakeFetch(429, null, { "x-ratelimit-reset": "1755000000" }),
+    fakeFetch(
+      429,
+      { error: { code: 429, message: "Rate limit exceeded", metadata: { error_type: "rate_limit_exceeded" } } },
+      { "x-ratelimit-reset": "1755000000" },
+    ),
   );
   assert.equal(result.status, "degraded");
-  assert.equal(result.reset_at, "1755000000");
+  assert.equal(result.error_code, "rate_limit");
+  assert.equal(result.reason, "Rate limit exceeded");
+  // reset_at intentionally stays null — OpenRouter's own docs don't specify
+  // this header's format (confirmed via research), so a raw passthrough
+  // would be a confidently-wrong guess, not an honest reading.
+  assert.equal(result.reset_at, null);
 });
 
 test("429 with no reset header present resolves to degraded with null reset_at", async () => {

@@ -23,6 +23,7 @@
 
 import { NodeCommandRunner, type CommandRunner } from "../../scheduler/command-runner.js";
 import { parseClaudeCapSignal } from "../../error-parser.js";
+import type { ErrorCode } from "../../status-model.js";
 
 export type ProbeStatusValue = "up" | "down" | "out_of_credit" | "degraded";
 
@@ -30,6 +31,7 @@ export interface ProbeResult {
   status: ProbeStatusValue;
   reset_at: string | null;
   reason: string | null;
+  error_code: ErrorCode | null;
 }
 
 const CLAUDE_MODELS_URL = "https://api.anthropic.com/v1/models";
@@ -85,10 +87,11 @@ export async function probeClaudeSubscriptionLane(
       status: "down",
       reset_at: null,
       reason: `claude CLI auth check failed: ${err instanceof Error ? err.message : String(err)}`,
+      error_code: "auth_failed",
     };
   }
 
-  return { status: "up", reset_at: null, reason: null };
+  return { status: "up", reset_at: null, reason: null, error_code: null };
 }
 
 async function probeClaudeApiKeyLane(
@@ -112,11 +115,12 @@ async function probeClaudeApiKeyLane(
       status: "down",
       reset_at: null,
       reason: `probe request failed: ${err instanceof Error ? err.message : String(err)}`,
+      error_code: "network_error",
     };
   }
 
   if (response.status === 402) {
-    return { status: "out_of_credit", reset_at: null, reason: "billing error (402)" };
+    return { status: "out_of_credit", reset_at: null, reason: "billing error (402)", error_code: "billing_error" };
   }
 
   if (response.status === 429) {
@@ -124,18 +128,18 @@ async function probeClaudeApiKeyLane(
   }
 
   if (response.status === 401 || response.status === 403) {
-    return { status: "down", reset_at: null, reason: `auth failed (${response.status})` };
+    return { status: "down", reset_at: null, reason: `auth failed (${response.status})`, error_code: "auth_failed" };
   }
 
   if (response.status >= 500) {
-    return { status: "down", reset_at: null, reason: `server error (${response.status})` };
+    return { status: "down", reset_at: null, reason: `server error (${response.status})`, error_code: "server_error" };
   }
 
   if (response.ok) {
-    return { status: "up", reset_at: null, reason: null };
+    return { status: "up", reset_at: null, reason: null, error_code: null };
   }
 
-  return { status: "degraded", reset_at: null, reason: `unexpected status ${response.status}` };
+  return { status: "degraded", reset_at: null, reason: `unexpected status ${response.status}`, error_code: "unknown" };
 }
 
 // DEC-hdl-429-corroboration, resolved (operator, 2026-08-16): keep the
@@ -170,5 +174,6 @@ async function interpretRateLimitResponse(response: Response): Promise<ProbeResu
     status,
     reset_at: resetAt,
     reason: signal?.reason ?? "rate limited (429)",
+    error_code: signal?.kind === "weekly_limit" ? "quota_exceeded" : "rate_limit",
   };
 }

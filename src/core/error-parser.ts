@@ -80,7 +80,12 @@ function extractHeaders(input: unknown): HeaderLike | null {
   );
 }
 
-function parseRetryAfter(value: string | null, now: Date): string | null {
+// hdl-error-taxonomy: exported so every provider adapter can convert a raw
+// `retry-after` header (seconds, or occasionally a date string per HTTP
+// spec) into an absolute reset_at timestamp the same way, instead of each
+// one either reimplementing this or — the confirmed bug this was written to
+// fix — passing the raw string straight through unparsed.
+export function parseRetryAfter(value: string | null, now: Date): string | null {
   if (!value) return null;
   const seconds = Number(value);
   if (Number.isFinite(seconds) && seconds >= 0) {

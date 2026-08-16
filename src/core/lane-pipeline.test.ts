@@ -84,6 +84,33 @@ test("end-to-end: a single down probe result downgrades to degraded, uncorrobora
   assert.match(status?.reason ?? "", /awaiting corroboration/);
 });
 
+test("hdl-error-taxonomy: reset_at and error_code survive the FIRST (uncorroborated) tick — only the status stays conservative", async () => {
+  const { store, setup } = seedStore();
+  setup();
+  const fetchWith429 = (async (url: unknown) => {
+    if (typeof url === "string" && url.includes("status.claude.com")) {
+      return { ok: true, status: 200, json: async () => ({ components: [] }) } as Response;
+    }
+    return {
+      ok: false,
+      status: 429,
+      headers: { get: (name: string) => (name === "anthropic-ratelimit-requests-reset" ? "2026-07-25T12:05:00.000Z" : null) },
+      json: async () => ({ type: "error", error: { type: "rate_limit_error", message: "Your weekly limit has been reached." } }),
+    } as unknown as Response;
+  }) as typeof fetch;
+  const pipeline = new LanePipeline(store, baseDeps({ fetchImpl: fetchWith429 }), claudeAdapters());
+
+  await pipeline.refresh(CLAUDE_LANE); // 1st tick — a real out_of_credit-class signal (weekly limit), not yet corroborated
+
+  const status = store.getCurrentStatus(CLAUDE_LANE.lane_id);
+  // Status stays conservative (degraded, not out_of_credit) until corroborated...
+  assert.equal(status?.status, "degraded");
+  // ...but the diagnostic detail is NOT thrown away for a full extra cycle.
+  assert.equal(status?.reset_at, "2026-07-25T12:05:00.000Z");
+  assert.equal(status?.error_code, "quota_exceeded");
+  assert.match(status?.reason ?? "", /Your weekly limit has been reached/);
+});
+
 test("end-to-end: two consecutive down probe results corroborate into a trusted down (REQ-04)", async () => {
   const { store, setup } = seedStore();
   setup();

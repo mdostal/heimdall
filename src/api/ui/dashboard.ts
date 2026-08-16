@@ -73,6 +73,15 @@ export function renderDashboardHtml(): string {
     border: 1px solid rgba(128, 128, 128, 0.4);
   }
   .chip-missing { color: #cf222e; border-color: #cf222e; }
+  .error-code-chip {
+    display: inline-block;
+    padding: 0.05rem 0.4rem;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-family: ui-monospace, monospace;
+    background: rgba(128, 128, 128, 0.15);
+    color: #888;
+  }
   .empty-state { color: #888; padding: 2rem 0; }
   .reason { color: #888; font-size: 0.85rem; }
   .gateway-header td {
@@ -305,6 +314,14 @@ export function renderDashboardHtml(): string {
     );
   }
 
+  function errorCodeChip(lane) {
+    // hdl-error-taxonomy: the normalized code, distinct from the native
+    // reason text — "degraded from X" at a glance, full detail still in the
+    // reason cell right next to it.
+    if (!lane.error_code) return "";
+    return "<span class=\\"error-code-chip\\">" + escapeHtml(lane.error_code) + "</span> ";
+  }
+
   function renderRow(lane) {
     var badgeClass = "badge badge-" + escapeHtml(lane.status);
     var label = BADGE_LABEL[lane.status] || lane.status;
@@ -315,7 +332,7 @@ export function renderDashboardHtml(): string {
       "<td>" + escapeHtml(lane.model || "") + priorityBadge(lane.priority) + "</td>" +
       "<td><span class=\\"" + badgeClass + "\\">" + escapeHtml(label) + "</span>" + overrideBadge(lane.manual_override) + "</td>" +
       "<td>" + tokenChip(lane) + "</td>" +
-      "<td class=\\"reason\\">" + escapeHtml(lane.reason) + "</td>" +
+      "<td class=\\"reason\\">" + errorCodeChip(lane) + escapeHtml(lane.reason) + "</td>" +
       "<td>" + resetAtCell(lane) + "</td>" +
       "<td>" + escapeHtml(lane.last_updated) + "</td>" +
       "<td>" + escapeHtml(lane.signal_source) + "</td>" +

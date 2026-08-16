@@ -41,7 +41,7 @@ function fakeFetch(status: number, headers: Record<string, string> = {}, body?: 
 
 test("a successful probe resolves to up", async () => {
   const result = await probeClaudeLane("sk-ant-fake", fakeFetch(200));
-  assert.deepEqual(result, { status: "up", reset_at: null, reason: null });
+  assert.deepEqual(result, { status: "up", reset_at: null, reason: null, error_code: null });
 });
 
 test("402 resolves to out_of_credit", async () => {
@@ -161,7 +161,7 @@ test("hdl-csl-02: a credential starting with sk-ant-oat01- dispatches to the CLI
 
 test("hdl-csl-02: probeClaudeSubscriptionLane resolves a successful completion (exit 0) to up", async () => {
   const result = await probeClaudeSubscriptionLane("sk-ant-oat01-fake", fakeCommandRunner(true));
-  assert.deepEqual(result, { status: "up", reset_at: null, reason: null });
+  assert.deepEqual(result, { status: "up", reset_at: null, reason: null, error_code: null });
 });
 
 test("hdl-csl-02: probeClaudeSubscriptionLane never throws on a CommandRunner exec failure (invalid token / non-zero exit) — resolves to down", async () => {

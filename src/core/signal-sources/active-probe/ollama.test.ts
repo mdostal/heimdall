@@ -17,7 +17,7 @@ function fakeFetch(status: number, body: unknown = { models: [] }): typeof fetch
 
 test("a 2xx response with parseable JSON resolves to up", async () => {
   const result = await probeOllamaLane("http://localhost:11434", fakeFetch(200));
-  assert.deepEqual(result, { status: "up", reset_at: null, reason: null });
+  assert.deepEqual(result, { status: "up", reset_at: null, reason: null, error_code: null });
 });
 
 test("a non-2xx response resolves to down", async () => {
