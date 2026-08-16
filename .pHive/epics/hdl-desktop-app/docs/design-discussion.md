@@ -95,10 +95,20 @@ specifically asked for is reachable through the packaged app. The SQLite DB
 file was confirmed created at the correct macOS `Application Support` path.
 The quit path was verified twice (buggy, then fixed) via real Cmd+Q.
 
-Not yet done: a full `cargo tauri build` (ad-hoc signed `.app` bundle) and
-installing/running that bundle standalone (outside `cargo tauri dev`'s
-watch-mode wrapper) — `cargo tauri dev` proves the runtime wiring is
-correct, but the release-mode bundle path (resource resolution via
-`resource_dir()` inside a real `.app`, not the dev-mode repo-checkout
-fallback) has not itself been exercised live. Left as an explicit follow-up
-rather than silently claimed as covered.
+## 5. Release-mode bundle, verified live (2026-08-16, same-day fast-follow)
+
+The one gap noted above at merge time: `cargo tauri build` itself, and
+running the resulting bundle standalone (outside `cargo tauri dev`'s
+watch-mode wrapper), had not been exercised. Closed same-day: `cargo tauri
+build` (run from `app/`, matching `build-resources.sh`'s expected invocation
+cwd) produced a real ad-hoc-signed `Heimdall.app`
+(`codesign -dv` confirms `flags=0x10002(adhoc,runtime)`, `TeamIdentifier=not
+set` — as designed, no Apple Developer Program credentials involved). Copied
+to `/Applications/Heimdall.app` and launched exactly as a user double-
+clicking it would: sidecar spawned, passed `/healthz`, `/docs` served 200,
+the actual installed app's window rendered the live dashboard
+(screenshotted), and Cmd+Q cleanly exited both the app and the sidecar —
+confirming the release-mode `resource_dir()` resolution path (not just the
+dev-mode repo-checkout fallback) works correctly. The test install was
+removed after verification; a fresh one is one `cargo tauri build` + copy
+away.
