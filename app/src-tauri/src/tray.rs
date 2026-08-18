@@ -34,7 +34,12 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         ],
     )?;
 
-    TrayIconBuilder::new()
+    // hdl-desktop-icon-settings: named "main" so lib.rs can look it up
+    // later via app.tray_by_id("main") once the sidecar is healthy and
+    // reports the operator's icon preference -- tray_by_id is the only
+    // way to retrieve a previously-built tray handle (there's no
+    // AppHandle::tray() default-lookup shortcut).
+    TrayIconBuilder::with_id("main")
         .icon(app.default_window_icon().unwrap().clone())
         .menu(&menu)
         .show_menu_on_left_click(true)
