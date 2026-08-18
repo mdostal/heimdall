@@ -7,8 +7,35 @@
 // lane reports until its first real status is recorded by the signal
 // pipeline (lane-pipeline.ts, lhs-03f).
 
+import { mkdirSync } from "node:fs";
+import { homedir as osHomedir } from "node:os";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { ErrorCode, LaneStatus, LaneStatusValue, SignalSource } from "./status-model.js";
+
+// hdl-ao-01 — same shape as resolveDefaultPolicyPath (routing/policy-loader.ts):
+// honors HEIMDALL_DB_PATH when explicitly set, otherwise resolves to a fixed
+// per-machine path under the user's home directory (XDG-style data dir),
+// creating the parent directory if it doesn't exist yet. Before this, every
+// one of the four StateStore construction sites (main.ts, http-server.ts,
+// mcp-server.ts, cli.ts) fell back to `":memory:"` when no `.env` was
+// present — fine for dev processes sharing one `.env`, but a
+// globally-installed `heimdall mcp` spawned by an agent harness with no
+// shared `.env` got an empty, ephemeral, disconnected database (grill-record
+// H1). Factored as a pure-shaped function (env/homedir both injectable) for
+// the same reason resolveDefaultPolicyPath is: process.env is read once at
+// module load otherwise, which a test can't observe changing.
+export function resolveDefaultDbPath(
+  env: Record<string, string | undefined> = process.env,
+  homedir: string = osHomedir(),
+): string {
+  if (env.HEIMDALL_DB_PATH) {
+    return env.HEIMDALL_DB_PATH;
+  }
+  const dbPath = join(homedir, ".local", "share", "heimdall", "heimdall.db");
+  mkdirSync(dirname(dbPath), { recursive: true });
+  return dbPath;
+}
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS lanes (
@@ -106,6 +133,13 @@ export class StateStore {
     // version (observed OFF on Node 22.9, ON on the hive's Node build) —
     // pinned explicitly so behavior is deterministic across environments.
     this.db = new DatabaseSync(path, { enableForeignKeyConstraints: true });
+    // hdl-ao-01: WAL mode is required for safe concurrent multi-process
+    // access — the whole point of resolveDefaultDbPath's shared per-machine
+    // default is that the dashboard server (http-server.ts), an MCP process
+    // (mcp-server.ts), and the CLI (cli.ts) can all open the same DB file at
+    // once. A no-op (SQLite reports "memory") against ":memory:" — WAL
+    // requires a real file, which is exactly the case that matters here.
+    this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec(SCHEMA);
     // Defensive migration (hdl-lo-01): CREATE TABLE IF NOT EXISTS only
     // affects fresh databases — a pre-existing persisted DB file created

@@ -5,7 +5,7 @@
 // JSON (default) for scripting.
 
 import { buildLaneRegistry, getLaneStatuses } from "./http-server.js";
-import { StateStore } from "../core/state-store.js";
+import { StateStore, resolveDefaultDbPath } from "../core/state-store.js";
 import type { LaneStatus } from "../core/status-model.js";
 import { runRouteCommand, runRouteOutcomeCommand } from "../cli/route-command.js";
 
@@ -54,7 +54,7 @@ if (isMainModule) {
   const command = args[0] && !args[0].startsWith("--") ? args[0] : "lanes";
 
   const registry = buildLaneRegistry();
-  const store = new StateStore(process.env.HEIMDALL_DB_PATH ?? ":memory:");
+  const store = new StateStore(resolveDefaultDbPath());
   
   try {
     if (command === "route") {

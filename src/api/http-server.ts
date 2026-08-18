@@ -16,7 +16,7 @@ import {
   getRoutingStrategyNames,
   ROUTING_STRATEGY_SETTING_KEY,
 } from "../core/route-selector.js";
-import { StateStore, type ManualOverride } from "../core/state-store.js";
+import { StateStore, resolveDefaultDbPath, type ManualOverride } from "../core/state-store.js";
 import type { LaneStatus } from "../core/status-model.js";
 import { renderDashboardHtml } from "./ui/dashboard.js";
 import { DOC_ENTRIES, getDocBySlug, renderDocMarkdown, renderDocsIndexHtml, renderDocPageHtml } from "./ui/docs-viewer.js";
@@ -879,7 +879,7 @@ const isMainModule =
 
 if (isMainModule) {
   const registry = buildLaneRegistry();
-  const store = new StateStore(process.env.HEIMDALL_DB_PATH ?? ":memory:");
+  const store = new StateStore(resolveDefaultDbPath());
   const port = Number(process.env.PORT ?? 4870);
   createHttpServer(registry, store).listen(port, () => {
     console.log(`heimdall dev server listening on http://localhost:${port}`);
