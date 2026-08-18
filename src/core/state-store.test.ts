@@ -230,6 +230,38 @@ test("setManualOverride persists and getManualOverride reads it back (hdl-lo-01)
   store.close();
 });
 
+test("hdl-override-reason: getOverrideReason defaults to null, setManualOverride persists and reads it back", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+
+  assert.equal(store.getOverrideReason("claude@mathew.dostal"), null);
+
+  store.setManualOverride("claude@mathew.dostal", "disabled", "cost review in progress");
+  assert.equal(store.getOverrideReason("claude@mathew.dostal"), "cost review in progress");
+  store.close();
+});
+
+test("hdl-override-reason: setManualOverride(laneId, null, reason) discards the reason -- a reason with no active override is meaningless", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+
+  store.setManualOverride("claude@mathew.dostal", "disabled", "cost review in progress");
+  store.setManualOverride("claude@mathew.dostal", null, "this should be discarded");
+
+  assert.equal(store.getManualOverride("claude@mathew.dostal"), null);
+  assert.equal(store.getOverrideReason("claude@mathew.dostal"), null);
+  store.close();
+});
+
+test("hdl-override-reason: reason defaults to null when omitted", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+
+  store.setManualOverride("claude@mathew.dostal", "enabled");
+  assert.equal(store.getOverrideReason("claude@mathew.dostal"), null);
+  store.close();
+});
+
 test("setManualOverride works even when the lane was never upserted first (guards row existence like recordStatus)", () => {
   const store = new StateStore(":memory:");
 
