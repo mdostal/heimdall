@@ -1,6 +1,6 @@
 [package]
 name = "heimdall-desktop"
-version = "0.28.0"
+version = "0.31.0"
 description = "Heimdall -- a native desktop shell around the existing Heimdall service (dashboard + docs viewer served by its own Node process), kept in lockstep with the heimdall npm package's own version."
 authors = ["Mathew Dostal"]
 license = "MIT"
@@ -21,7 +21,7 @@ tauri-build = { version = "2.6.3", features = [] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.11.3", features = ["tray-icon"] }
+tauri = { version = "2.11.3", features = ["tray-icon", "image-png"] }
 tauri-plugin-log = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"

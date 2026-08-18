@@ -1140,7 +1140,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control"): st
         // launch/refresh; the Dock icon needs an actual rebuild, same
         // "restart_required" pattern the Add lane form already uses.
         document.getElementById("icon-settings-note").textContent =
-          "Tray icon preference saved. Dock icon takes effect on the next rebuild: cd app && cargo tauri build";
+          "Preference saved. Tray icon updates next time you launch Heimdall; Dock icon needs a rebuild: cd app && cargo tauri build";
       });
   });
 

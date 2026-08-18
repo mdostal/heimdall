@@ -1,0 +1,82 @@
+name: hdl-desktop-icon-settings
+title: Rust-side tray icon consumption of the operator's icon preference
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: dev
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [cross-language, real-platform-constraint, follow-up]
+  roster: []
+  per_tag_reasoning:
+    cross-language: Rust shell consuming a Node-persisted preference over HTTP, plus real macOS/Tauri icon-loading API research.
+    real-platform-constraint: Tauri v2 on macOS genuinely cannot swap the Dock icon at runtime -- confirmed via research before implementation, not discovered as a surprise mid-build.
+    follow-up: deliberately split from hdl-unified-dashboard (which shipped the Node-side persistence) once that epic was already large.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (follow-up to an already-approved operator spec, no new design fork)
+    hv_planning: not_applicable (small, well-scoped follow-up)
+    structured_outline: not_applicable (same)
+
+description: >
+  Completes the icon-settings feature `hdl-unified-dashboard` split off as
+  a deliberate follow-up: the Node-side preference persistence
+  (`GET`/`POST /desktop-icon`) already shipped; this epic makes the
+  running desktop app's tray icon actually reflect it.
+
+  Rasterized all 3 icon concepts from the UI/icon-pass mockups to real
+  1024x1024 PNGs (via Playwright's `canvas.toDataURL()`, decoded through
+  Python) and generated full macOS icon sets for each via `cargo tauri
+  icon`. Found a real composition bug during that process: the Signal Horn
+  concept was badly off-center (bounding box crammed into the bottom-right
+  quadrant, with the outer signal arc actually clipped off the canvas
+  edge) -- confirmed by measuring actual rendered pixels, not by reading
+  the drawing code. Fixed as a pure positioning change (no color/shape/
+  style touched) by a dedicated agent, independently re-verified with a
+  fresh pixel measurement before/after. The Watchtower concept (the
+  operator's chosen default) replaces the crude placeholder icon that had
+  been in place since the original `hdl-desktop-app` epic.
+
+  Rust-side wiring: `tray.rs`'s tray gets an explicit id ("main") so it
+  can be retrieved later via `app.tray_by_id` -- there is no
+  `AppHandle::tray()` default-lookup shortcut. `sidecar.rs` gains
+  `fetch_icon_preference()` (GET /desktop-icon against the sidecar itself)
+  and `resolve_icon_path()` (bundled-resource-first, dev-checkout-fallback,
+  mirroring `resolve_heimdall_root`'s existing pattern). `lib.rs`'s
+  post-health-check thread calls `apply_icon_preference()`, which loads
+  the chosen icon via `tauri::image::Image::from_path` (added the
+  `image-png` Tauri feature) and calls `tray.set_icon()` directly --
+  research confirmed `tauri::tray::TrayIcon::set_icon` takes a
+  `tauri::image::Image` directly, no manual RGBA decoding or `tray_icon`
+  crate dependency needed, simpler than initially planned.
+
+  Real, confirmed platform limit (multiple open Tauri GitHub issues, not
+  assumed): there is no supported way to swap a running app's Dock icon
+  at runtime on macOS. Only the tray icon updates from this code path,
+  and only on the NEXT launch (the preference is read once at startup,
+  not polled) -- the Settings panel copy was corrected to say so exactly,
+  after an initial draft implied a fuller live update than the
+  implementation actually delivers.
+
+  Live-verified via `cargo tauri dev`'s real stdout (temporary diagnostic
+  eprintln!s, removed before shipping): fetch -> resolve -> load -> set_icon
+  all succeeded end to end, confirming this isn't just code that compiles
+  but a real, working pipeline.
+
+stories:
+  - id: hdl-dis-01-rasterize-and-generate
+    title: Rasterize all 3 icon concepts to real PNGs, generate macOS icon sets, fix a real composition bug found along the way
+    complexity: medium
+    depends_on: []
+  - id: hdl-dis-02-rust-wiring
+    title: tray.rs id, sidecar.rs fetch/resolve helpers, lib.rs apply_icon_preference
+    complexity: medium
+    depends_on: [hdl-dis-01-rasterize-and-generate]
+  - id: hdl-dis-03-verify-and-ship
+    title: Live verification via cargo tauri dev stdout, honest Settings copy correction
+    complexity: low
+    depends_on: [hdl-dis-02-rust-wiring]

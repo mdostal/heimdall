@@ -188,3 +188,45 @@ pub fn wait_until_healthy(port: u16) -> bool {
     }
     false
 }
+
+/// GET /desktop-icon's `active` field -- the operator's persisted icon
+/// preference (Node/StateStore is the single source of truth, see
+/// hdl-unified-dashboard's design-discussion.md §4; the Rust shell has no
+/// preference of its own, it only applies what the sidecar reports).
+/// Returns None on any failure -- a tray-icon preference is never worth
+/// blocking or crashing startup over.
+pub fn fetch_icon_preference(port: u16) -> Option<String> {
+    let url = format!("http://127.0.0.1:{port}/desktop-icon");
+    let resp = ureq::get(&url).timeout(Duration::from_secs(2)).call().ok()?;
+    // ureq's "json" feature isn't enabled (this crate already depends on
+    // serde_json directly for other purposes, no need for a second path
+    // to the same functionality) -- read the body as text and parse it
+    // ourselves instead of resp.into_json().
+    let text = resp.into_string().ok()?;
+    let body: serde_json::Value = serde_json::from_str(&text).ok()?;
+    body.get("active")?.as_str().map(|s| s.to_string())
+}
+
+/// Resolves the bundled icon-sets directory (contains one subdirectory per
+/// icon concept, e.g. icon-sets/watchtower/32x32.png), mirroring
+/// resolve_heimdall_root's bundled-resource-first-then-dev-fallback
+/// pattern. Returns the path to the specific icon file for `icon_name` at
+/// the given resolution, or None if it doesn't exist (an unrecognized
+/// name, or a dev checkout that hasn't run build-resources.sh).
+pub fn resolve_icon_path(app: &AppHandle, icon_name: &str, size: &str) -> Option<PathBuf> {
+    let candidates = [
+        app.path().resource_dir().ok().map(|d| d.join("icon-sets")),
+        Some(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("resources")
+                .join("icon-sets"),
+        ),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        let path = candidate.join(icon_name).join(size);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
+}

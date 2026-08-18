@@ -91,3 +91,5 @@ app/src-tauri/gen/
 !.pHive/epics/hdl-override-reason/**
 !.pHive/epics/hdl-unified-dashboard/
 !.pHive/epics/hdl-unified-dashboard/**
+!.pHive/epics/hdl-desktop-icon-settings/
+!.pHive/epics/hdl-desktop-icon-settings/**

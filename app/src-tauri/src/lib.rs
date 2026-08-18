@@ -92,12 +92,14 @@ pub fn run() {
             });
 
             let window_for_thread = window.clone();
+            let app_handle_for_thread = app.handle().clone();
             std::thread::spawn(move || {
                 if sidecar::wait_until_healthy(port) {
                     let url = format!("http://127.0.0.1:{port}");
                     if let Ok(parsed) = tauri::Url::parse(&url) {
                         let _ = window_for_thread.navigate(parsed);
                     }
+                    apply_icon_preference(&app_handle_for_thread, port);
                 } else {
                     let _ = window_for_thread.eval(
                         "document.getElementById('spinner').style.display='none';\
@@ -129,4 +131,45 @@ pub fn run() {
             kill_sidecar(app_handle);
         }
     });
+}
+
+/// hdl-desktop-icon-settings: applies the operator's persisted icon
+/// preference to the tray icon once the sidecar is healthy (the
+/// preference itself lives server-side, in the Node/StateStore settings
+/// table -- see hdl-unified-dashboard's design-discussion.md §4 for why).
+/// Only the tray icon is touched here -- confirmed via real research (not
+/// assumed) that Tauri v2 on macOS has no supported way to swap the Dock
+/// icon at runtime; that only takes effect on the next `cargo tauri
+/// build`, which is why the Settings panel's own copy says so explicitly
+/// rather than implying a full live swap. Every failure path here just
+/// logs and returns -- a stale tray icon is never worth crashing over.
+fn apply_icon_preference(app: &tauri::AppHandle, port: u16) {
+    let Some(icon_name) = sidecar::fetch_icon_preference(port) else {
+        log::warn!("apply_icon_preference: could not fetch /desktop-icon, leaving default tray icon");
+        return;
+    };
+    let Some(icon_path) = sidecar::resolve_icon_path(app, &icon_name, "32x32.png") else {
+        log::warn!("apply_icon_preference: no bundled icon set found for '{icon_name}'");
+        return;
+    };
+    // tauri::tray::TrayIcon::set_icon takes a tauri::image::Image directly
+    // -- no need for the raw tray_icon crate's own Icon type or a
+    // TryFrom conversion, despite tray-icon being the crate that actually
+    // implements the platform-specific tray behind Tauri's wrapper.
+    // Confirmed live (not assumed): fetch -> resolve -> load -> set_icon
+    // all succeed, verified via cargo tauri dev's real stdout.
+    let image = match tauri::image::Image::from_path(&icon_path) {
+        Ok(img) => img,
+        Err(e) => {
+            log::warn!("apply_icon_preference: failed to load {}: {e}", icon_path.display());
+            return;
+        }
+    };
+    let Some(tray) = app.tray_by_id("main") else {
+        log::warn!("apply_icon_preference: no tray registered under id 'main'");
+        return;
+    };
+    if let Err(e) = tray.set_icon(Some(image)) {
+        log::warn!("apply_icon_preference: set_icon failed: {e}");
+    }
 }
