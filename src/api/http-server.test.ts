@@ -536,6 +536,171 @@ test("GET /available-route returns 404 when no usable lane has headroom and a va
   }
 });
 
+test("hdl-unified-dashboard: GET /theme defaults to 'mission-control' active with all 3 themes listed", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/theme`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.active, "mission-control");
+    assert.deepEqual(body.available.sort(), ["harbor-watch", "mission-control", "terminal"]);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-unified-dashboard: POST /theme sets the active theme, GET /theme and GET / (data-theme attribute) both reflect it", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const setRes = await fetch(`http://localhost:${port}/theme`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ theme: "terminal" }),
+    });
+    assert.equal(setRes.status, 200);
+    assert.equal((await setRes.json()).active, "terminal");
+
+    const getRes = await fetch(`http://localhost:${port}/theme`);
+    assert.equal((await getRes.json()).active, "terminal");
+
+    const pageRes = await fetch(`http://localhost:${port}/`);
+    const body = await pageRes.text();
+    assert.match(body, /<html lang="en" data-theme="terminal">/, "the server-rendered page must set data-theme so the correct theme paints on first load, not just after client JS runs");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-unified-dashboard: POST /theme with an unrecognized name returns 400 and does NOT change the active theme", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/theme`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ theme: "not-a-real-theme" }),
+    });
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).error, "invalid_theme");
+
+    const getRes = await fetch(`http://localhost:${port}/theme`);
+    assert.equal((await getRes.json()).active, "mission-control", "an invalid POST must not change the persisted setting");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-unified-dashboard: GET / does not set a data-theme attribute for the default mission-control theme", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /<html lang="en">/, "Mission Control needs no data-theme attribute -- the bare :root CSS already IS Mission Control");
+    assert.doesNotMatch(
+      body,
+      /<html lang="en" data-theme=/,
+      "the <html> tag itself must not carry data-theme for the default theme (CSS legitimately contains data-theme= as selector text for the other two themes' blocks, so this must check the tag specifically, not the whole document)",
+    );
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-desktop-icon-settings: GET /desktop-icon defaults to 'watchtower' active with all 3 icons listed", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/desktop-icon`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.active, "watchtower");
+    assert.deepEqual(body.available.sort(), ["routing-lanes", "signal-horn", "watchtower"]);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-desktop-icon-settings: POST /desktop-icon sets the preference, invalid values are rejected without changing it", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const setRes = await fetch(`http://localhost:${port}/desktop-icon`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ icon: "signal-horn" }),
+    });
+    assert.equal(setRes.status, 200);
+    assert.equal((await setRes.json()).active, "signal-horn");
+
+    const badRes = await fetch(`http://localhost:${port}/desktop-icon`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ icon: "not-a-real-icon" }),
+    });
+    assert.equal(badRes.status, 400);
+    assert.equal((await badRes.json()).error, "invalid_icon");
+
+    const getRes = await fetch(`http://localhost:${port}/desktop-icon`);
+    assert.equal((await getRes.json()).active, "signal-horn", "the invalid POST must not have changed the persisted setting");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-unified-dashboard: GET / (dashboard) includes a Settings panel with theme and icon pickers", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /id="theme-picker"/);
+    assert.match(body, /fetch\("\/theme"\)/, "theme picker must load from GET /theme");
+    assert.match(body, /id="icon-picker"/);
+    assert.match(body, /fetch\("\/desktop-icon"\)/, "icon picker must load from GET /desktop-icon");
+    assert.match(body, /cargo tauri build/, "must be honest that the Dock icon needs a rebuild, not silently imply a full live swap");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
 test("hdl-rr-03: GET /routing-strategy defaults to 'priority' active with all 4 strategies listed as available", async () => {
   const registry = registryWithOneConfiguredLane();
   const store = new StateStore(":memory:");
@@ -1700,6 +1865,44 @@ test("hdl-mcd-01: GET / (dashboard) includes a Model catalog panel with a Refres
     assert.match(body, /id="model-catalog-banner"/);
     assert.match(body, /fetch\("\/models"\)/, "the panel must load its state from GET /models");
     assert.match(body, /fetch\("\/models\/refresh"/, "the Refresh button must POST to /models/refresh");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-unified-dashboard: GET / renders the model catalog as a tree (Terminal-origin widget, now universal)", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /catalog-tree/, "must render the tree container class");
+    assert.match(body, /tree-glyph/, "must render tree connector glyphs, not a flat table");
+    assert.match(body, /model-flag/, "must render an enabled\\/disabled flag per model");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-unified-dashboard: GET / includes a Fleet Scope radar plotting lanes by severity", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /id="fleet-scope-root"/);
+    assert.match(body, /SCOPE_RING/, "severity-to-ring mapping must be present");
+    assert.match(body, /renderFleetScope/, "must render from the same live lane data render() receives, not separately fetched");
   } finally {
     server.close();
     store.close();
