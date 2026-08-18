@@ -211,6 +211,63 @@ export function setRoutingStrategy(store: StateStore, rawName: unknown): SetRout
   return { ok: true, active: rawName };
 }
 
+// hdl-unified-dashboard: dashboard visual theme, persisted the same way
+// routing_strategy is (a global settings-table key, mirrors
+// ROUTING_STRATEGY_SETTING_KEY/setRoutingStrategy exactly). Mission
+// Control is the default per operator direction during the UI-redesign
+// synthesis — the CSS itself also defaults to it (bare :root, no
+// [data-theme] override needed), so an unset setting and an explicit
+// "mission-control" setting render byte-identically.
+export const THEME_SETTING_KEY = "dashboard_theme";
+export const DASHBOARD_THEMES = ["mission-control", "harbor-watch", "terminal"] as const;
+export const DEFAULT_DASHBOARD_THEME = "mission-control";
+
+export function getActiveTheme(store: StateStore): string {
+  const stored = store.getSetting(THEME_SETTING_KEY);
+  return stored && (DASHBOARD_THEMES as readonly string[]).includes(stored) ? stored : DEFAULT_DASHBOARD_THEME;
+}
+
+export type SetThemeResult =
+  | { ok: true; active: string }
+  | { ok: false; error: "invalid_theme"; allowed_themes: string[] };
+
+export function setTheme(store: StateStore, rawName: unknown): SetThemeResult {
+  if (typeof rawName !== "string" || !(DASHBOARD_THEMES as readonly string[]).includes(rawName)) {
+    return { ok: false, error: "invalid_theme", allowed_themes: [...DASHBOARD_THEMES] };
+  }
+  store.setSetting(THEME_SETTING_KEY, rawName);
+  return { ok: true, active: rawName };
+}
+
+// hdl-desktop-icon-settings: which of the 3 bundled app-icon concepts the
+// desktop shell should use. Persisted here (same settings-table pattern)
+// so it's a single source of truth the Rust sidecar reads on startup --
+// this Node service has no way to reach into the Tauri process directly,
+// and the dashboard must keep working identically headless or wrapped, so
+// the preference lives on the server side, not in Tauri-only IPC. Watchtower
+// is the operator-chosen default (2026-08-18, same synthesis message that
+// picked Mission Control as the default theme).
+export const ICON_SETTING_KEY = "desktop_icon";
+export const DESKTOP_ICONS = ["watchtower", "routing-lanes", "signal-horn"] as const;
+export const DEFAULT_DESKTOP_ICON = "watchtower";
+
+export function getActiveIcon(store: StateStore): string {
+  const stored = store.getSetting(ICON_SETTING_KEY);
+  return stored && (DESKTOP_ICONS as readonly string[]).includes(stored) ? stored : DEFAULT_DESKTOP_ICON;
+}
+
+export type SetIconResult =
+  | { ok: true; active: string }
+  | { ok: false; error: "invalid_icon"; allowed_icons: string[] };
+
+export function setIcon(store: StateStore, rawName: unknown): SetIconResult {
+  if (typeof rawName !== "string" || !(DESKTOP_ICONS as readonly string[]).includes(rawName)) {
+    return { ok: false, error: "invalid_icon", allowed_icons: [...DESKTOP_ICONS] };
+  }
+  store.setSetting(ICON_SETTING_KEY, rawName);
+  return { ok: true, active: rawName };
+}
+
 export function buildLaneRegistry(env: NodeJS.ProcessEnv = process.env): LaneRegistry {
   return new LaneRegistry(loadLaneDeclarations(env), new EnvCredentialSource(env));
 }
@@ -314,7 +371,36 @@ export function createHttpServer(
     // GET /lanes below; adds no new backend query logic.
     if (req.method === "GET" && req.url === "/") {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(renderDashboardHtml());
+      res.end(renderDashboardHtml(getActiveTheme(store)));
+      return;
+    }
+
+    // hdl-unified-dashboard: dashboard visual theme, same read/write shape
+    // as /routing-strategy.
+    if (req.method === "GET" && req.url === "/theme") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ active: getActiveTheme(store), available: [...DASHBOARD_THEMES] }));
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/theme") {
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+        const result = setTheme(store, (body.data as { theme?: unknown }).theme);
+        if (!result.ok) {
+          const { ok: _ok, ...wire } = result;
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify(wire));
+          return;
+        }
+        const { ok: _ok, ...wire } = result;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(wire));
+      });
       return;
     }
 
@@ -448,6 +534,39 @@ export function createHttpServer(
           return;
         }
         const result = setRoutingStrategy(store, (body.data as { strategy?: unknown }).strategy);
+        if (!result.ok) {
+          const { ok: _ok, ...wire } = result;
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify(wire));
+          return;
+        }
+        const { ok: _ok, ...wire } = result;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(wire));
+      });
+      return;
+    }
+
+    // hdl-desktop-icon-settings: which bundled desktop-app icon concept is
+    // preferred. The Node service only persists the preference — it has no
+    // way to actually swap the running Tauri process's icon; the Rust
+    // sidecar reads this on startup (tray icon: live; Dock icon: next
+    // rebuild only, a real macOS/Tauri v2 limitation, not a gap in this
+    // implementation).
+    if (req.method === "GET" && req.url === "/desktop-icon") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ active: getActiveIcon(store), available: [...DESKTOP_ICONS] }));
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/desktop-icon") {
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+        const result = setIcon(store, (body.data as { icon?: unknown }).icon);
         if (!result.ok) {
           const { ok: _ok, ...wire } = result;
           res.writeHead(400, { "content-type": "application/json" });
