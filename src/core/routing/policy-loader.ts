@@ -3,7 +3,24 @@ import { join } from "node:path";
 import { parseDocument } from "yaml";
 import { TASK_TYPES, type TaskType } from "../task-type.js";
 
-export const DEFAULT_POLICY_PATH = join(process.cwd(), "config", "routing-policy.yaml");
+// HEIMDALL_REPO_ROOT (introduced for the docs viewer, see http-server.ts's
+// docsRepoRoot) takes precedence over cwd for the same reason here: the
+// desktop app sets cwd to a per-user app-data directory (for .env/DB), not
+// the bundled resource root that actually contains config/. Without this,
+// PolicyLoader silently can't find the real policy file when running
+// packaged -- confirmed live, not hypothetical (ENOENT against the
+// app-data dir). Factored into a pure function (rather than inlined into
+// the module-level constant below) so the precedence is unit-testable --
+// process.env is read once at module load otherwise, which a test can't
+// observe changing.
+export function resolveDefaultPolicyPath(
+  env: Record<string, string | undefined> = process.env,
+  cwd: string = process.cwd(),
+): string {
+  return join(env.HEIMDALL_REPO_ROOT ?? cwd, "config", "routing-policy.yaml");
+}
+
+export const DEFAULT_POLICY_PATH = resolveDefaultPolicyPath();
 export const POLICY_SCHEMA_VERSION = "1.0";
 export const COST_PREFERENCES = ["quality", "balanced", "economy"] as const;
 

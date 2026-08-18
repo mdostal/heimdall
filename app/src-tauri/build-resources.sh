@@ -28,6 +28,9 @@ cp "$REPO_ROOT/package-lock.json" "$STAGE/package-lock.json"
 if [ -d "$REPO_ROOT/docs" ]; then
   cp -R "$REPO_ROOT/docs" "$STAGE/docs"
 fi
+if [ -d "$REPO_ROOT/config" ]; then
+  cp -R "$REPO_ROOT/config" "$STAGE/config"
+fi
 
 echo "installing production dependencies into staged copy..."
 (cd "$STAGE" && npm ci --omit=dev)
