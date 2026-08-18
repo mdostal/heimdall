@@ -1,0 +1,53 @@
+name: hdl-icon-reconciliation
+title: Settings icon picker shows the real icon artwork, not emoji placeholders
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: dev
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [bug-investigation, real-scope-correction, small-scope]
+  roster: [researcher]
+  per_tag_reasoning:
+    bug-investigation: operator reported a real discrepancy requiring root-cause diagnosis, not a guess.
+    real-scope-correction: the first research pass investigated the wrong problem (icon legibility) before the operator redirected to the actual bug (Settings picker showing emoji placeholders); documented honestly rather than laundered.
+    small-scope: one new route, one new env var following an established pattern, one UI change.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: ran (adversarial review pass caught real gaps in the FIRST, incorrect framing -- retained as a real example of the review catching something, even though the framing itself turned out to be off-target)
+    hv_planning: not_applicable (small scope)
+    structured_outline: not_applicable (small scope)
+
+description: >
+  Operator: "Use the actual icons we saw, but looks good overall need to
+  do the full /hive plan and execute for it, not one off work." First
+  pass misidentified the problem (chased an icon-legibility "bug" in the
+  Watchtower artwork that the operator directly confirmed does not
+  exist -- "ALL 3 look fine at 16 in the prior things done"). Redirected
+  by the operator pointing at the actual Settings-panel icon picker,
+  which showed generic emoji (watchtower/shuffle/horn emoji) instead of
+  the real designed artwork from hdl-desktop-icon-settings.
+
+  Real fix: new GET /desktop-icon/:name/thumbnail.png route (validated
+  against the existing DESKTOP_ICONS allowlist), a new
+  HEIMDALL_ICON_SETS_ROOT env var wired from the Rust sidecar (mirrors
+  HEIMDALL_REPO_ROOT's existing bundled-resource-first/dev-fallback
+  pattern, since icon-sets is a sibling Tauri resource dir, not nested
+  inside the Node app's own bundled resource dir), and a dashboard
+  picker-markup change from emoji span to real <img> thumbnail.
+
+  Live-verified: curled the new route directly against a real server
+  (valid PNG magic bytes, correct content-type, 404 on invalid/
+  path-traversal names), then loaded the real dashboard in a real
+  browser and confirmed all 3 thumbnails render with real image
+  dimensions -- not just that the server responds.
+
+stories:
+  - id: hdl-ir-01-real-icon-thumbnails
+    title: Settings icon picker shows real artwork thumbnails instead of emoji placeholders
+    complexity: low
+    depends_on: []

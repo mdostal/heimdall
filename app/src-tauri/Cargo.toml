@@ -1,6 +1,6 @@
 [package]
 name = "heimdall-desktop"
-version = "0.31.0"
+version = "0.32.0"
 description = "Heimdall -- a native desktop shell around the existing Heimdall service (dashboard + docs viewer served by its own Node process), kept in lockstep with the heimdall npm package's own version."
 authors = ["Mathew Dostal"]
 license = "MIT"

@@ -388,7 +388,11 @@ export function renderDashboardHtml(activeTheme: string = "mission-control"): st
     width: 5.5rem;
   }
   .icon-option.active { border-color: var(--hd-accent); color: var(--hd-accent-strong); font-weight: 600; }
-  .icon-option .icon-glyph { font-size: 1.4rem; }
+  .icon-option .icon-thumb {
+    width: 32px;
+    height: 32px;
+    border-radius: calc(var(--hd-radius) * 1.5);
+  }
   .settings-note { font-size: 0.78rem; color: var(--hd-text-faint); margin-top: 0.5rem; }
 </style>
 </head>
@@ -1102,15 +1106,19 @@ export function renderDashboardHtml(activeTheme: string = "mission-control"): st
   });
 
   var ICON_LABELS = { "watchtower": "Watchtower", "routing-lanes": "Routing Mark", "signal-horn": "Signal Horn" };
-  var ICON_GLYPHS = { "watchtower": "\\ud83d\\uddfc", "routing-lanes": "\\ud83d\\udd00", "signal-horn": "\\ud83d\\udcef" };
 
+  // hdl-icon-reconciliation: real thumbnail previews (GET
+  // /desktop-icon/:name/thumbnail.png) -- this picker used to show generic
+  // emoji standing in for each option, not the actual designed artwork the
+  // operator reviewed and picked between.
   function renderIconPicker(data) {
     var picker = document.getElementById("icon-picker");
     picker.innerHTML = data.available
       .map(function (name) {
         var activeClass = name === data.active ? " active" : "";
         return "<button type=\\"button\\" class=\\"icon-option" + activeClass + "\\" data-icon-choice=\\"" +
-          escapeHtml(name) + "\\"><span class=\\"icon-glyph\\">" + (ICON_GLYPHS[name] || "") + "</span>" +
+          escapeHtml(name) + "\\"><img class=\\"icon-thumb\\" src=\\"/desktop-icon/" + escapeHtml(name) +
+          "/thumbnail.png\\" alt=\\"\\" width=\\"32\\" height=\\"32\\">" +
           escapeHtml(ICON_LABELS[name] || name) + "</button>";
       })
       .join("");
