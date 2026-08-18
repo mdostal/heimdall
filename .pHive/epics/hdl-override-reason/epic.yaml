@@ -1,0 +1,58 @@
+name: hdl-override-reason
+title: Optional free-text reason alongside manual lane override
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: dev
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [small-scope, data-model, ui]
+  roster: []
+  per_tag_reasoning:
+    small-scope: one new nullable column, one new function param, thin surface changes across HTTP/MCP/dashboard.
+    data-model: mirrors the exact established getX/setX-per-field pattern (manual_override, manual_reset_at) already used twice in state-store.ts.
+    ui: dashboard override controls needed a matching input + display, not just backend plumbing.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (operator directly specified this while reviewing the UI redesign mockups)
+    hv_planning: not_applicable (small, well-precedented scope)
+    structured_outline: not_applicable (same)
+
+description: >
+  Operator reviewing the parallel UI-redesign mockups (both the Mission
+  Control and Terminal directions independently showed an override+reason
+  pattern, using sample data this session supplied in the design brief —
+  "cost review in progress") called it out explicitly: "we need the
+  override toggle with an optional description to get added for why."
+
+  New `override_reason` column on `lanes` (nullable, mirrors the existing
+  `manual_override`/`manual_reset_at` column pair exactly). `setManualOverride`
+  gains an optional third `reason` param; forced to `null` whenever the
+  override itself is cleared (`value === null`) — a reason with no active
+  override would be stale leftover text the next time the lane IS
+  overridden. Threaded through the shared `setLaneOverride()` function
+  (HTTP + MCP both call this one implementation, unchanged pattern from
+  hdl-mcp-01), `GET /lanes`, and the dashboard's override controls (a text
+  input the operator can type into before clicking Enable/Disable, plus a
+  read-only display of the current reason once set).
+
+  Live-verified in a real browser via Playwright: typed a reason, clicked
+  Disable, confirmed it persisted through `GET /lanes` and rendered in the
+  DOM; confirmed Auto correctly discards it. Found and fixed a real (if
+  minor) CSS class collision during that verification -- the new reason
+  display accidentally shared the `.reason` class with two unrelated
+  existing elements (the lane status-reason `<td>`, and the routing-policy
+  panel's experiment-status caption), making `document.querySelector('.reason')`
+  ambiguous. Fixed by adding a second, scoped class
+  (`override-reason-note`) rather than renaming the shared one (both still
+  want the same muted-caption visual style).
+
+stories:
+  - id: hdl-or-01-data-and-surfaces
+    title: state-store column + setLaneOverride/HTTP/MCP wiring + dashboard UI + tests
+    complexity: low
+    depends_on: []

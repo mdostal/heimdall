@@ -106,6 +106,18 @@ export function renderDashboardHtml(): string {
     border-color: currentColor;
     font-weight: 600;
   }
+  .override-reason-input {
+    display: block;
+    font-size: 0.75rem;
+    padding: 0.15rem 0.35rem;
+    margin-top: 0.3rem;
+    width: 12rem;
+    max-width: 100%;
+    border: 1px solid rgba(128, 128, 128, 0.4);
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+  }
   .reset-at-controls {
     display: flex;
     align-items: center;
@@ -287,10 +299,21 @@ export function renderDashboardHtml(): string {
         "\\" data-state=\\"" + state + "\\">" + label + "</button>"
       );
     }
+    // hdl-override-reason: the reason input always renders (not just while
+    // overridden) so a reason can be typed BEFORE clicking Enable/Disable —
+    // the click handler reads this input's live value at click time.
+    // Backend already discards any reason when the resulting state is
+    // "auto", so no client-side gating is needed here either.
+    var reasonInput =
+      "<input type=\\"text\\" class=\\"override-reason-input\\" placeholder=\\"reason (optional)\\" " +
+      "data-lane=\\"" + laneAttr + "\\" value=\\"" + escapeHtml(lane.override_reason || "") + "\\">";
+    var reasonDisplay = lane.override_reason
+      ? "<div class=\\"reason override-reason-note\\">\\u201c" + escapeHtml(lane.override_reason) + "\\u201d</div>"
+      : "";
     return (
       "<span class=\\"override-controls\\">" +
       btn("enabled", "Enable") + btn("disabled", "Disable") + btn("auto", "Auto") +
-      "</span>"
+      "</span>" + reasonInput + reasonDisplay
     );
   }
 
@@ -413,11 +436,13 @@ export function renderDashboardHtml(): string {
     if (overrideBtn) {
       var laneId = overrideBtn.getAttribute("data-lane");
       var state = overrideBtn.getAttribute("data-state");
+      var reasonInputEl = document.querySelector('.override-reason-input[data-lane="' + CSS.escape(laneId) + '"]');
+      var reason = reasonInputEl ? reasonInputEl.value : "";
       overrideBtn.disabled = true;
       fetch("/lanes/" + encodeURIComponent(laneId) + "/override", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ state: state })
+        body: JSON.stringify({ state: state, reason: reason })
       })
         .then(poll)
         .catch(function () { overrideBtn.disabled = false; });

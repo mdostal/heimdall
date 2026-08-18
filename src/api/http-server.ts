@@ -73,6 +73,7 @@ function readJsonBody(req: import("node:http").IncomingMessage): Promise<{ ok: t
  */
 export interface LaneStatusWithOverride extends LaneStatus {
   manual_override: ManualOverride;
+  override_reason: string | null;
   credential_configured: boolean;
   manual_reset_at: string | null;
   model: string;
@@ -90,15 +91,17 @@ const VALID_OVERRIDE_STATES = new Set(["enabled", "disabled", "auto"]);
 // an MCP tool's structured content) translate the same result its own way.
 
 export type SetOverrideResult =
-  | { ok: true; lane_id: string; manual_override: ManualOverride }
+  | { ok: true; lane_id: string; manual_override: ManualOverride; override_reason: string | null }
   | { ok: false; error: "unknown_lane"; lane_id: string }
-  | { ok: false; error: "invalid_override_state"; allowed_states: string[] };
+  | { ok: false; error: "invalid_override_state"; allowed_states: string[] }
+  | { ok: false; error: "invalid_reason"; message: string };
 
 export function setLaneOverride(
   registry: LaneRegistry,
   store: StateStore,
   laneId: string,
   rawState: unknown,
+  rawReason?: unknown,
 ): SetOverrideResult {
   if (!registry.get(laneId)) {
     return { ok: false, error: "unknown_lane", lane_id: laneId };
@@ -106,9 +109,13 @@ export function setLaneOverride(
   if (typeof rawState !== "string" || !VALID_OVERRIDE_STATES.has(rawState)) {
     return { ok: false, error: "invalid_override_state", allowed_states: [...VALID_OVERRIDE_STATES] };
   }
+  if (rawReason !== undefined && rawReason !== null && typeof rawReason !== "string") {
+    return { ok: false, error: "invalid_reason", message: "reason must be a string or null" };
+  }
   const value: ManualOverride = rawState === "auto" ? null : (rawState as "enabled" | "disabled");
-  store.setManualOverride(laneId, value);
-  return { ok: true, lane_id: laneId, manual_override: value };
+  const reason = typeof rawReason === "string" && rawReason.trim() !== "" ? rawReason : null;
+  store.setManualOverride(laneId, value, reason);
+  return { ok: true, lane_id: laneId, manual_override: value, override_reason: store.getOverrideReason(laneId) };
 }
 
 export type SetResetAtResult =
@@ -255,6 +262,7 @@ export function getLaneStatuses(registry: LaneRegistry, store: StateStore): Lane
     return {
       ...status,
       manual_override: store.getManualOverride(status.lane_id),
+      override_reason: store.getOverrideReason(status.lane_id),
       credential_configured: declared?.credential != null,
       manual_reset_at: store.getManualResetAt(status.lane_id),
       model: declared?.model ?? status.provider,
@@ -632,8 +640,8 @@ export function createHttpServer(
           res.end(JSON.stringify({ error: "invalid_json" }));
           return;
         }
-        const state = (body.data as { state?: unknown }).state;
-        const result = setLaneOverride(registry, store, laneId, state);
+        const { state, reason } = body.data as { state?: unknown; reason?: unknown };
+        const result = setLaneOverride(registry, store, laneId, state, reason);
         if (!result.ok) {
           const status = result.error === "unknown_lane" ? 404 : 400;
           const { ok: _ok, ...wire } = result;

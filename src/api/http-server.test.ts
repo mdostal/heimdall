@@ -789,7 +789,12 @@ test("hdl-mcp-01: setLaneOverride is independently callable without an HTTP serv
   const store = new StateStore(":memory:");
   try {
     const result = setLaneOverride(registry, store, "claude@mathew.dostal", "disabled");
-    assert.deepEqual(result, { ok: true, lane_id: "claude@mathew.dostal", manual_override: "disabled" });
+    assert.deepEqual(result, {
+      ok: true,
+      lane_id: "claude@mathew.dostal",
+      manual_override: "disabled",
+      override_reason: null,
+    });
     assert.equal(store.getManualOverride("claude@mathew.dostal"), "disabled");
   } finally {
     store.close();
@@ -1268,6 +1273,40 @@ test("hdl-lo-01: POST /lanes/:laneId/override sets the override and GET /lanes r
   }
 });
 
+test("hdl-override-reason: POST /lanes/:laneId/override accepts an optional reason, GET /lanes reflects it, and auto discards it", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const overrideRes = await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/override`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ state: "disabled", reason: "cost review in progress" }),
+    });
+    assert.equal(overrideRes.status, 200);
+    const overrideBody = await overrideRes.json();
+    assert.equal(overrideBody.override_reason, "cost review in progress");
+
+    const lanesRes = await fetch(`http://localhost:${port}/lanes`);
+    const lanes = await lanesRes.json();
+    assert.equal(lanes[0].override_reason, "cost review in progress");
+
+    const clearRes = await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/override`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ state: "auto", reason: "should be discarded" }),
+    });
+    const clearBody = await clearRes.json();
+    assert.equal(clearBody.override_reason, null, "auto must discard any reason, not carry it forward");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
 test("hdl-lo-01: POST /lanes/:laneId/override with state: auto clears a previously-set override", async () => {
   const registry = registryWithOneConfiguredLane();
   const store = new StateStore(":memory:");
@@ -1393,6 +1432,29 @@ test("hdl-lo-02: GET / (dashboard) renders an override indicator distinct from t
     const body = await res.text();
     assert.match(body, /overrideBadge/, "must render a distinct override indicator, not fold override state into the status badge");
     assert.match(body, /if \(!manualOverride\) return ""/, "the override badge must render nothing when no override is set (not 'null' or an empty badge)");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-override-reason: GET / (dashboard) renders a reason input next to the override controls, sent along with state on click", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /override-reason-input/, "must render a reason input the operator can type into before overriding");
+    assert.match(
+      body,
+      /body: JSON\.stringify\(\{ state: state, reason: reason \}\)/,
+      "the click handler must send the reason input's current value alongside state",
+    );
+    assert.match(body, /override-reason-note/, "must render the persisted reason as a distinct, scoped element (not the shared .reason class also used for status text and the routing-policy panel)");
   } finally {
     server.close();
     store.close();

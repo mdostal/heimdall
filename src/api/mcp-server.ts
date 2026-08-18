@@ -82,6 +82,10 @@ export function listLaneToolsDescriptor() {
             enum: ["enabled", "disabled", "auto"],
             description: "'auto' clears the override, returning to sensed-status-driven routing.",
           },
+          reason: {
+            type: "string" as const,
+            description: "Optional free-text note for why this lane is overridden. Ignored (never persisted) when state is 'auto'.",
+          },
         },
         required: ["lane_id", "state"],
       },
@@ -207,9 +211,9 @@ export function callLanesListTool(registry: LaneRegistry, store: StateStore) {
 }
 
 export function callLaneOverrideTool(registry: LaneRegistry, store: StateStore, args: unknown) {
-  const input = (args ?? {}) as { lane_id?: unknown; state?: unknown };
+  const input = (args ?? {}) as { lane_id?: unknown; state?: unknown; reason?: unknown };
   const laneId = typeof input.lane_id === "string" ? input.lane_id : "";
-  return textResult(setLaneOverride(registry, store, laneId, input.state));
+  return textResult(setLaneOverride(registry, store, laneId, input.state, input.reason));
 }
 
 export function callLaneSetResetAtTool(registry: LaneRegistry, store: StateStore, args: unknown) {

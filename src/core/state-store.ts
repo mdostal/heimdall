@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS lanes (
   provider TEXT NOT NULL,
   credential_ref TEXT NOT NULL,
   manual_override TEXT CHECK (manual_override IN ('enabled','disabled') OR manual_override IS NULL),
-  manual_reset_at TEXT
+  manual_reset_at TEXT,
+  override_reason TEXT
 );
 CREATE TABLE IF NOT EXISTS lane_status_history (
   lane_id TEXT NOT NULL REFERENCES lanes(lane_id),
@@ -128,6 +129,12 @@ export class StateStore {
     // hdl-error-taxonomy: same defensive migration pattern, on lane_status_history this time.
     try {
       this.db.exec(`ALTER TABLE lane_status_history ADD COLUMN error_code TEXT`);
+    } catch {
+      // Column already exists — same reasoning as manual_override above.
+    }
+    // hdl-override-reason: same defensive migration pattern, third lanes column.
+    try {
+      this.db.exec(`ALTER TABLE lanes ADD COLUMN override_reason TEXT`);
     } catch {
       // Column already exists — same reasoning as manual_override above.
     }
@@ -262,7 +269,15 @@ export class StateStore {
    * desiredEnabled decision. null (the default) means "automatic" — status
    * alone decides, unchanged from pre-hdl-lo-01 behavior.
    */
-  setManualOverride(laneId: string, value: ManualOverride): void {
+  /**
+   * `reason` (hdl-override-reason) is optional free-text the operator gives
+   * for WHY a lane is overridden — surfaced next to the toggle so a second
+   * operator (or the same one, later) doesn't have to guess. Forced to
+   * `null` whenever `value` is `null` (auto) — a reason with no active
+   * override is meaningless and would be stale leftover text the next time
+   * the lane IS overridden.
+   */
+  setManualOverride(laneId: string, value: ManualOverride, reason: string | null = null): void {
     // Guard the row's existence regardless of call order (same pattern as
     // recordStatus) — a no-op via ON CONFLICT DO NOTHING when the lane was
     // already upserted, but never silently affects 0 rows if it wasn't.
@@ -272,7 +287,10 @@ export class StateStore {
          ON CONFLICT(lane_id) DO NOTHING`,
       )
       .run(laneId);
-    this.db.prepare(`UPDATE lanes SET manual_override = ? WHERE lane_id = ?`).run(value, laneId);
+    const effectiveReason = value === null ? null : reason;
+    this.db
+      .prepare(`UPDATE lanes SET manual_override = ?, override_reason = ? WHERE lane_id = ?`)
+      .run(value, effectiveReason, laneId);
   }
 
   getManualOverride(laneId: string): ManualOverride {
@@ -280,6 +298,13 @@ export class StateStore {
       .prepare(`SELECT manual_override FROM lanes WHERE lane_id = ?`)
       .get(laneId) as unknown as { manual_override: ManualOverride } | undefined;
     return row?.manual_override ?? null;
+  }
+
+  getOverrideReason(laneId: string): string | null {
+    const row = this.db
+      .prepare(`SELECT override_reason FROM lanes WHERE lane_id = ?`)
+      .get(laneId) as unknown as { override_reason: string | null } | undefined;
+    return row?.override_reason ?? null;
   }
 
   /**

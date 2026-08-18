@@ -185,7 +185,28 @@ test("hdl-mcp-02: callLaneOverrideTool returns setLaneOverride's result wrapped 
     assert.equal(result.content.length, 1);
     assert.equal(result.content[0].type, "text");
     const parsed = JSON.parse(result.content[0].text);
-    assert.deepEqual(parsed, { ok: true, lane_id: "claude@mathew.dostal", manual_override: "disabled" });
+    assert.deepEqual(parsed, {
+      ok: true,
+      lane_id: "claude@mathew.dostal",
+      manual_override: "disabled",
+      override_reason: null,
+    });
+  } finally {
+    store.close();
+  }
+});
+
+test("hdl-override-reason: callLaneOverrideTool passes reason through to setLaneOverride", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  try {
+    const result = callLaneOverrideTool(registry, store, {
+      lane_id: "claude@mathew.dostal",
+      state: "disabled",
+      reason: "cost review in progress",
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    assert.equal(parsed.override_reason, "cost review in progress");
   } finally {
     store.close();
   }
