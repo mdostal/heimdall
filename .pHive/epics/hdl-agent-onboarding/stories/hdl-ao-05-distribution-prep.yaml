@@ -1,0 +1,57 @@
+id: hdl-ao-05-distribution-prep
+epic: hdl-agent-onboarding
+title: scripts/install.sh and npm publish-readiness (not the actual publish)
+status: pending
+complexity: low
+methodology: classic
+depends_on: [hdl-ao-02-packaged-cli]
+parallel_allowed: true
+parallel_rationale: bounded-slice
+
+description: >
+  Adds scripts/install.sh (`npm install -g pantheon-heimdall && heimdall
+  agent init`) with real, tested content — not a template shape blindly
+  trusted from Portunus's own unverified install.sh. Re-verifies the final
+  npm pack --dry-run tarball shape from hdl-ao-02 against the completed
+  package. Explicitly does NOT run the real `npm publish` — that is a
+  separate, operator-gated action flagged back per design-discussion open
+  question 1, matching the same posture as the repo-visibility decision in
+  hdl-ao-06.
+
+acceptance_criteria:
+  - scripts/install.sh exists, passes shellcheck, and its logic is
+    confirmed by locally installing a real `npm pack` tarball globally in
+    a scratch environment and confirming `heimdall` resolves on PATH and
+    `heimdall agent init` runs.
+  - The actual `npm publish` command is not run as part of this story; the
+    story's completion note explicitly flags it as an operator decision
+    still pending.
+
+steps:
+  - id: s1
+    description: Write scripts/install.sh with real content, shellcheck it.
+    agent: developer
+  - id: s2
+    description: Local dry-run simulation — `npm pack`, global install of
+      the resulting tarball in a scratch environment, confirm `heimdall`
+      resolves and `heimdall agent init` runs end to end.
+    agent: developer
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - scripts/install.sh
+    - package.json
+  tech_stack: [bash, npm]
+
+risks:
+  - severity: low
+    description: install.sh assumes a bash-compatible shell; not verified
+      against non-bash shells (e.g. fish, plain POSIX sh) in this session.
+    mitigation: Documented as a known gap in the script's own header
+      comment rather than silently unverified.
+
+metric:
+  applies: false
+  justification: Distribution-readiness substrate; not independently
+    observable until hdl-ao-06/07 make the install path live and reachable.

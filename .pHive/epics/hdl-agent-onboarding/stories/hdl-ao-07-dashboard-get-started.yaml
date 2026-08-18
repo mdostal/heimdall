@@ -1,0 +1,76 @@
+id: hdl-ao-07-dashboard-get-started
+epic: hdl-agent-onboarding
+title: Dashboard "get started" panel — prominent, dismissible, server-persisted
+status: pending
+complexity: low
+methodology: classic
+depends_on: [hdl-ao-03-agent-init-status, hdl-ao-06-public-repo-pages]
+parallel_allowed: false
+
+description: >
+  New first panel above Fleet Scope in src/api/ui/dashboard.ts, containing
+  the real (now-live) curl one-liner, `heimdall agent init` instructions,
+  and a link to the skill docs. New AGENT_ONBOARDING_DISMISSED_KEY setting
+  in http-server.ts, same getActive*/set* pattern as THEME_SETTING_KEY/
+  ICON_SETTING_KEY, new GET/POST /agent-onboarding-dismissed routes
+  mirroring the existing theme/icon routes exactly. Dismiss state persists
+  server-side (not localStorage) so it's consistent whether the dashboard
+  is loaded via a plain browser or the desktop app's webview — both hit the
+  same HTTP server. README's top line (under the existing badges, ahead of
+  "What & why") becomes the same curl one-liner. Scoped standalone-mode
+  only per design-discussion's scope statement — dashboard.ts is already
+  documented as "the standalone-mode UI requirement" and nothing in it
+  renders in Pantheon-plugin mode today.
+
+acceptance_criteria:
+  - New first dashboard panel renders with the real, live curl URL (from
+    hdl-ao-06) and the real `heimdall agent init` command (from
+    hdl-ao-03) — not placeholder text.
+  - Dismiss button persists via AGENT_ONBOARDING_DISMISSED_KEY through the
+    settings table; reload after dismiss keeps the panel collapsed.
+  - Panel renders identically via a plain browser load and via the desktop
+    app's webview (same HTTP server, confirmed via real Playwright checks
+    against a running server, not just code inspection).
+  - README's new top line is the real curl one-liner.
+
+steps:
+  - id: s1
+    description: Add the panel markup to dashboard.ts and the new
+      AGENT_ONBOARDING_DISMISSED_KEY setting + GET/POST routes to
+      http-server.ts.
+    agent: developer
+  - id: s2
+    description: Update README's top line with the real curl one-liner.
+    agent: developer
+  - id: s3
+    description: Real Playwright load of the dashboard — confirm the panel
+      renders with real (not placeholder) URLs/commands, dismiss persists
+      across reload.
+    agent: developer
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - src/api/ui/dashboard.ts
+    - src/api/http-server.ts
+    - README.md
+  tech_stack: [typescript, html, css]
+
+design_decisions:
+  - decision: Server-side settings-table persistence for the dismiss state,
+      not localStorage.
+    rationale: The desktop app and a plain browser both hit the same HTTP
+      server; localStorage would desync between them. Matches the existing
+      THEME_SETTING_KEY/ICON_SETTING_KEY pattern exactly.
+  - decision: No plugin-mode gate added to the panel.
+    rationale: dashboard.ts's own file header already documents it as "the
+      standalone-mode UI requirement" — nothing in the module renders in
+      Pantheon-plugin mode today, confirmed via grep in the collaborative
+      review pass, so the new panel inherits that scoping for free.
+
+metric:
+  applies: false
+  justification: UI/copy work whose success criterion (real URLs, not
+    placeholders, persisted dismiss) is directly covered by acceptance
+    criteria and Playwright verification at integrate; no separate
+    quantitative target is meaningful at this scale.
