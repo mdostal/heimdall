@@ -10,6 +10,10 @@
 // unit suite re-does on every run.
 
 import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir as osHomedir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export type Harness = "claude" | "codex";
 
@@ -101,15 +105,95 @@ export function registerMcp(harness: Harness, runner: CommandRunner = defaultRun
   return { harness, status: "error", error: (result.stderr || result.stdout).trim() };
 }
 
-// installSkills: intentionally a no-op stub for hdl-ao-03. The real
-// SKILL.md content (heimdall-lanes/heimdall-routing/heimdall-models/
-// heimdall-status under agent_skills/) lands in a later story
-// (hdl-ao-04) — inventing placeholder skill content here is explicitly
-// out of scope. This function exists now so agent-init's overall flow
-// shape (detect -> register -> install skills) is final; it does nothing
-// until agent_skills/ actually exists.
-export function installSkills(): { installed: string[] } {
-  return { installed: [] };
+// The 4 real usage skills (hdl-ao-04). Directory names double as both the
+// source subdirectory under agent_skills/ AND the installed subdirectory
+// under ~/.claude/skills/ — a direct 1:1 copy, no renaming in either
+// direction.
+export const SKILL_NAMES = ["heimdall-lanes", "heimdall-routing", "heimdall-models", "heimdall-status"] as const;
+
+// resolvePackageRoot: walks up from a starting directory looking for the
+// nearest package.json. Needed because this file's own on-disk location
+// differs between dev (tsx runs src/cli/agent-command.ts directly, 2
+// levels below repo root) and the packaged/compiled bin
+// (tsconfig's rootDir: "." + outDir: "dist" preserves the src/ prefix, so
+// the compiled file is dist/src/cli/agent-command.js, 3 levels below
+// package root) — see bin/heimdall.js's own comment on this exact
+// asymmetry. Walking up to the nearest package.json works identically in
+// both shapes instead of hardcoding a level count that would silently
+// break the moment either shape changes.
+function resolvePackageRoot(startDir: string): string {
+  let dir = startDir;
+  for (let i = 0; i < 8; i++) {
+    if (existsSync(join(dir, "package.json"))) {
+      return dir;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  throw new Error(`installSkills: could not locate heimdall's package root walking up from ${startDir}`);
+}
+
+// resolveAgentSkillsDir: the real on-disk agent_skills/ directory shipped
+// alongside this package (repo root in a dev checkout; package root after
+// a global npm install — package.json's "files" field includes
+// agent_skills so it ships in the published tarball too).
+export function resolveAgentSkillsDir(moduleUrl: string = import.meta.url): string {
+  return join(resolvePackageRoot(dirname(fileURLToPath(moduleUrl))), "agent_skills");
+}
+
+export interface SkillInstallResult {
+  /** Skill directory names actually written this run (missing, or content differed from source). */
+  installed: string[];
+  /** Skill directory names left untouched because installed content already matched source exactly. */
+  upToDate: string[];
+}
+
+// installSkills: copies each agent_skills/{name}/SKILL.md to
+// ~/.claude/skills/{name}/SKILL.md, content-diffed before overwrite —
+// same idempotency contract as Portunus's own filecmp.cmp-based
+// install_skills(). A destination file is only written when its current
+// content differs from the source (or it doesn't exist yet); an unchanged
+// destination is left alone entirely (no write, no mtime bump), so a
+// repeated `heimdall agent init` with nothing changed is a true no-op
+// here, while a source-content change (this package upgrading its own
+// skill docs) still lands on the next run even if the operator never
+// touched the installed copy themselves.
+//
+// homedir and skillsSourceDir are both injectable (mirrors registerMcp's
+// injectable CommandRunner) so unit tests exercise this against real
+// temp directories rather than the operator's actual $HOME/~/.claude.
+export function installSkills(
+  homedir: string = osHomedir(),
+  skillsSourceDir: string = resolveAgentSkillsDir(),
+): SkillInstallResult {
+  const installed: string[] = [];
+  const upToDate: string[] = [];
+
+  for (const name of SKILL_NAMES) {
+    const sourcePath = join(skillsSourceDir, name, "SKILL.md");
+    if (!existsSync(sourcePath)) {
+      // Shipped-with-package content missing (e.g. a broken install) —
+      // skip rather than crash the rest of `agent init` over one skill.
+      continue;
+    }
+    const sourceContent = readFileSync(sourcePath, "utf8");
+
+    const destDir = join(homedir, ".claude", "skills", name);
+    const destPath = join(destDir, "SKILL.md");
+    const existingContent = existsSync(destPath) ? readFileSync(destPath, "utf8") : null;
+
+    if (existingContent === sourceContent) {
+      upToDate.push(name);
+      continue;
+    }
+
+    mkdirSync(destDir, { recursive: true });
+    writeFileSync(destPath, sourceContent, "utf8");
+    installed.push(name);
+  }
+
+  return { installed, upToDate };
 }
 
 export interface AgentStatusEntry {
@@ -156,11 +240,21 @@ function resolveTargets(args: string[]): Harness[] {
 }
 
 // runAgentInitCommand: detect -> register (per targeted harness) ->
-// install skills. Idempotent by construction (see registerMcp). Exits
-// non-zero only on a genuine registration failure for an installed
-// harness — a harness simply not being installed is reported, not an
-// error.
-export function runAgentInitCommand(args: string[], runner: CommandRunner = defaultRunner): void {
+// install skills. Idempotent by construction (see registerMcp and
+// installSkills). Exits non-zero only on a genuine registration failure
+// for an installed harness — a harness simply not being installed is
+// reported, not an error.
+//
+// skillsHomedir/skillsSourceDir are optional pass-throughs to
+// installSkills, purely for unit-test injection (defaulting to `undefined`
+// so production callers get installSkills' own real-machine defaults) —
+// mirrors how `runner` is threaded through for the harness side.
+export function runAgentInitCommand(
+  args: string[],
+  runner: CommandRunner = defaultRunner,
+  skillsHomedir?: string,
+  skillsSourceDir?: string,
+): void {
   const targets = resolveTargets(args);
   const installed = detectHarnesses(runner);
 
@@ -183,7 +277,13 @@ export function runAgentInitCommand(args: string[], runner: CommandRunner = defa
     }
   }
 
-  installSkills();
+  const skillsResult = installSkills(skillsHomedir, skillsSourceDir);
+  for (const name of skillsResult.installed) {
+    console.log(`skill ${name}: installed`);
+  }
+  for (const name of skillsResult.upToDate) {
+    console.log(`skill ${name}: already up to date`);
+  }
 
   if (hadError) {
     process.exit(1);

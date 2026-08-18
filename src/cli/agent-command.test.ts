@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   detectHarnesses,
   mcpRegistered,
@@ -9,6 +12,8 @@ import {
   runAgentStatusCommand,
   runAgentCommand,
   installSkills,
+  resolveAgentSkillsDir,
+  SKILL_NAMES,
   type CommandRunner,
   type CommandResult,
 } from "./agent-command.js";
@@ -164,8 +169,197 @@ test("getAgentStatus reports registered: false for a harness that isn't installe
   assert.ok(!calls.includes("claude mcp get heimdall"));
 });
 
-test("installSkills is a documented no-op for this story", () => {
-  assert.deepEqual(installSkills(), { installed: [] });
+// installSkills tests: real temp directories on disk (same style as
+// env-file.test.ts/state-store.test.ts elsewhere in this repo) rather than
+// a mocked fs layer — homedir and skillsSourceDir are both injectable
+// parameters specifically so tests never touch the operator's actual
+// $HOME/~/.claude.
+function tmpDir(label: string): string {
+  const dir = path.join(os.tmpdir(), `heimdall-agent-command-test-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function writeSourceSkills(sourceDir: string, content: (name: string) => string = (name) => `# ${name}\nreal content v1\n`): void {
+  for (const name of SKILL_NAMES) {
+    const dir = path.join(sourceDir, name);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "SKILL.md"), content(name));
+  }
+}
+
+test("resolveAgentSkillsDir finds the real repo-root agent_skills/ directory from this compiled/dev module location", () => {
+  const dir = resolveAgentSkillsDir();
+  assert.ok(fs.existsSync(dir), `expected ${dir} to exist`);
+  for (const name of SKILL_NAMES) {
+    assert.ok(fs.existsSync(path.join(dir, name, "SKILL.md")), `expected ${name}/SKILL.md to exist under ${dir}`);
+  }
+});
+
+test("installSkills installs all 4 skills fresh when nothing is installed yet", () => {
+  const sourceDir = tmpDir("source");
+  const homedir = tmpDir("home");
+  writeSourceSkills(sourceDir);
+  try {
+    const result = installSkills(homedir, sourceDir);
+    assert.deepEqual([...result.installed].sort(), [...SKILL_NAMES].sort());
+    assert.deepEqual(result.upToDate, []);
+    for (const name of SKILL_NAMES) {
+      const installedPath = path.join(homedir, ".claude", "skills", name, "SKILL.md");
+      assert.equal(fs.readFileSync(installedPath, "utf8"), `# ${name}\nreal content v1\n`);
+    }
+  } finally {
+    fs.rmSync(sourceDir, { recursive: true, force: true });
+    fs.rmSync(homedir, { recursive: true, force: true });
+  }
+});
+
+test("installSkills is content-diffed: re-running with nothing changed writes nothing and reports upToDate", () => {
+  const sourceDir = tmpDir("source");
+  const homedir = tmpDir("home");
+  writeSourceSkills(sourceDir);
+  try {
+    installSkills(homedir, sourceDir);
+
+    const installedPath = path.join(homedir, ".claude", "skills", "heimdall-lanes", "SKILL.md");
+    const statBefore = fs.statSync(installedPath);
+
+    // Re-run without touching anything.
+    const second = installSkills(homedir, sourceDir);
+    assert.deepEqual(second.installed, []);
+    assert.deepEqual([...second.upToDate].sort(), [...SKILL_NAMES].sort());
+
+    const statAfter = fs.statSync(installedPath);
+    assert.equal(statAfter.mtimeMs, statBefore.mtimeMs, "unchanged file must not be rewritten (mtime must not change)");
+  } finally {
+    fs.rmSync(sourceDir, { recursive: true, force: true });
+    fs.rmSync(homedir, { recursive: true, force: true });
+  }
+});
+
+test("installSkills overwrites an installed file when the SOURCE content changed, even though the local copy was never touched", () => {
+  const sourceDir = tmpDir("source");
+  const homedir = tmpDir("home");
+  writeSourceSkills(sourceDir);
+  try {
+    installSkills(homedir, sourceDir);
+
+    // The package's own source content changes (e.g. a future release
+    // ships updated skill docs) — the operator never touched their local
+    // installed copy.
+    fs.writeFileSync(path.join(sourceDir, "heimdall-lanes", "SKILL.md"), "# heimdall-lanes\nreal content v2\n");
+
+    const result = installSkills(homedir, sourceDir);
+    assert.deepEqual(result.installed, ["heimdall-lanes"]);
+    assert.deepEqual([...result.upToDate].sort(), ["heimdall-models", "heimdall-routing", "heimdall-status"]);
+
+    const installedPath = path.join(homedir, ".claude", "skills", "heimdall-lanes", "SKILL.md");
+    assert.equal(fs.readFileSync(installedPath, "utf8"), "# heimdall-lanes\nreal content v2\n");
+  } finally {
+    fs.rmSync(sourceDir, { recursive: true, force: true });
+    fs.rmSync(homedir, { recursive: true, force: true });
+  }
+});
+
+test("installSkills overwrites a LOCALLY-edited installed file to re-sync it with source (sync semantics, not preserve-local-edits)", () => {
+  const sourceDir = tmpDir("source");
+  const homedir = tmpDir("home");
+  writeSourceSkills(sourceDir);
+  try {
+    installSkills(homedir, sourceDir);
+
+    const installedPath = path.join(homedir, ".claude", "skills", "heimdall-routing", "SKILL.md");
+    fs.writeFileSync(installedPath, "a local edit that differs from source\n");
+
+    const result = installSkills(homedir, sourceDir);
+    assert.deepEqual(result.installed, ["heimdall-routing"]);
+    assert.equal(fs.readFileSync(installedPath, "utf8"), "# heimdall-routing\nreal content v1\n");
+  } finally {
+    fs.rmSync(sourceDir, { recursive: true, force: true });
+    fs.rmSync(homedir, { recursive: true, force: true });
+  }
+});
+
+test("installSkills creates ~/.claude/skills/<name>/ directories that don't exist yet", () => {
+  const sourceDir = tmpDir("source");
+  const homedir = tmpDir("home");
+  writeSourceSkills(sourceDir);
+  try {
+    assert.ok(!fs.existsSync(path.join(homedir, ".claude")));
+    installSkills(homedir, sourceDir);
+    assert.ok(fs.existsSync(path.join(homedir, ".claude", "skills", "heimdall-models", "SKILL.md")));
+  } finally {
+    fs.rmSync(sourceDir, { recursive: true, force: true });
+    fs.rmSync(homedir, { recursive: true, force: true });
+  }
+});
+
+test("installSkills skips a skill silently when its source SKILL.md is missing, rather than throwing", () => {
+  const sourceDir = tmpDir("source");
+  const homedir = tmpDir("home");
+  writeSourceSkills(sourceDir);
+  fs.rmSync(path.join(sourceDir, "heimdall-status"), { recursive: true, force: true });
+  try {
+    const result = installSkills(homedir, sourceDir);
+    assert.deepEqual([...result.installed].sort(), ["heimdall-lanes", "heimdall-models", "heimdall-routing"]);
+    assert.ok(!fs.existsSync(path.join(homedir, ".claude", "skills", "heimdall-status")));
+  } finally {
+    fs.rmSync(sourceDir, { recursive: true, force: true });
+    fs.rmSync(homedir, { recursive: true, force: true });
+  }
+});
+
+test("runAgentInitCommand actually installs skills as part of `agent init`, not just registering harnesses", () => {
+  const { runner } = fakeRunner({
+    "which claude": fail(1),
+    "which codex": fail(1),
+  });
+
+  const sourceDir = tmpDir("source");
+  const homeDirForRun = tmpDir("home");
+  writeSourceSkills(sourceDir);
+
+  const originalLog = console.log;
+  const logs: string[] = [];
+  console.log = (msg: string) => logs.push(msg);
+  try {
+    runAgentInitCommand([], runner, homeDirForRun, sourceDir);
+    for (const name of SKILL_NAMES) {
+      assert.ok(fs.existsSync(path.join(homeDirForRun, ".claude", "skills", name, "SKILL.md")), `expected ${name} to be installed`);
+    }
+    assert.ok(logs.some((l) => l.includes("skill") && l.includes("installed")));
+  } finally {
+    console.log = originalLog;
+    fs.rmSync(sourceDir, { recursive: true, force: true });
+    fs.rmSync(homeDirForRun, { recursive: true, force: true });
+  }
+});
+
+test("runAgentInitCommand's skill install step is also content-diffed on a second run", () => {
+  const { runner } = fakeRunner({
+    "which claude": fail(1),
+    "which codex": fail(1),
+  });
+
+  const sourceDir = tmpDir("source");
+  const homeDirForRun = tmpDir("home");
+  writeSourceSkills(sourceDir);
+
+  const originalLog = console.log;
+  const logs: string[] = [];
+  console.log = (msg: string) => logs.push(msg);
+  try {
+    runAgentInitCommand([], runner, homeDirForRun, sourceDir);
+    logs.length = 0;
+    runAgentInitCommand([], runner, homeDirForRun, sourceDir);
+  } finally {
+    console.log = originalLog;
+    fs.rmSync(sourceDir, { recursive: true, force: true });
+    fs.rmSync(homeDirForRun, { recursive: true, force: true });
+  }
+
+  assert.ok(!logs.some((l) => l.includes("skill") && l.includes("installed")), "second run must not report any skill as freshly installed");
+  assert.ok(logs.some((l) => l.includes("skill") && l.includes("already up to date")));
 });
 
 test("runAgentInitCommand registers each installed harness and is silent about the rest", () => {
