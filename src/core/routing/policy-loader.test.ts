@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PolicyLoader, PolicyValidationError } from "./policy-loader.js";
+import { PolicyLoader, PolicyValidationError, resolveDefaultPolicyPath } from "./policy-loader.js";
 
 const VALID_POLICY = `version: "1.0"
 task_type_weights:
@@ -48,6 +48,16 @@ test("load reads the checked-in routing policy by default", () => {
   assert.equal(policy.headroom_floor, 1000);
   assert.equal(policy.cost_preference, "balanced");
   assert.deepEqual(policy.experiments.arms.control, { split: 1 });
+});
+
+test("hdl-desktop-app: resolveDefaultPolicyPath prefers HEIMDALL_REPO_ROOT over cwd", () => {
+  const withOverride = resolveDefaultPolicyPath({ HEIMDALL_REPO_ROOT: "/bundled/heimdall" }, "/some/other/cwd");
+  assert.equal(withOverride, join("/bundled/heimdall", "config", "routing-policy.yaml"));
+});
+
+test("hdl-desktop-app: resolveDefaultPolicyPath falls back to cwd when HEIMDALL_REPO_ROOT is unset", () => {
+  const withoutOverride = resolveDefaultPolicyPath({}, "/repo/checkout");
+  assert.equal(withoutOverride, join("/repo/checkout", "config", "routing-policy.yaml"));
 });
 
 test("load returns a typed policy from valid YAML", () => {
