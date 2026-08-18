@@ -153,8 +153,10 @@ pub fn spawn_sidecar(app: &AppHandle) -> SidecarHandle {
     let port = pick_free_port();
     let path = capture_login_shell_path();
     let db_path = app_data_dir.join("heimdall.db");
+    let icon_sets_root = resolve_icon_sets_root(app);
 
-    let child = Command::new("node")
+    let mut command = Command::new("node");
+    command
         .arg("--experimental-sqlite")
         .arg("--env-file-if-exists=.env")
         .arg(&main_js)
@@ -164,11 +166,13 @@ pub fn spawn_sidecar(app: &AppHandle) -> SidecarHandle {
         .env("HEIMDALL_DB_PATH", db_path.to_string_lossy().to_string())
         .env("HEIMDALL_REPO_ROOT", heimdall_root.to_string_lossy().to_string())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap_or_else(|e| {
-            panic!("failed to spawn sidecar (node {}): {e}", main_js.display())
-        });
+        .stderr(Stdio::null());
+    if let Some(root) = icon_sets_root {
+        command.env("HEIMDALL_ICON_SETS_ROOT", root.to_string_lossy().to_string());
+    }
+    let child = command.spawn().unwrap_or_else(|e| {
+        panic!("failed to spawn sidecar (node {}): {e}", main_js.display())
+    });
 
     SidecarHandle { child, port }
 }
@@ -214,19 +218,37 @@ pub fn fetch_icon_preference(port: u16) -> Option<String> {
 /// the given resolution, or None if it doesn't exist (an unrecognized
 /// name, or a dev checkout that hasn't run build-resources.sh).
 pub fn resolve_icon_path(app: &AppHandle, icon_name: &str, size: &str) -> Option<PathBuf> {
-    let candidates = [
+    for root in icon_sets_root_candidates(app) {
+        let path = root.join(icon_name).join(size);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// hdl-icon-reconciliation: the icon-sets ROOT directory (not a specific
+/// icon+size file within it) -- passed to the sidecar as
+/// HEIMDALL_ICON_SETS_ROOT so the Node server can serve real thumbnail
+/// previews for the Settings-panel icon picker (it previously showed
+/// generic emoji standing in for each option, not the actual artwork).
+/// Picks the first candidate that actually exists on disk, same
+/// bundled-resource-first-then-dev-fallback precedence resolve_icon_path
+/// already used internally.
+pub fn resolve_icon_sets_root(app: &AppHandle) -> Option<PathBuf> {
+    icon_sets_root_candidates(app).into_iter().find(|p| p.exists())
+}
+
+fn icon_sets_root_candidates(app: &AppHandle) -> Vec<PathBuf> {
+    [
         app.path().resource_dir().ok().map(|d| d.join("icon-sets")),
         Some(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("resources")
                 .join("icon-sets"),
         ),
-    ];
-    for candidate in candidates.into_iter().flatten() {
-        let path = candidate.join(icon_name).join(size);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    None
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }

@@ -1,0 +1,77 @@
+id: hdl-ir-01-real-icon-thumbnails
+epic: hdl-icon-reconciliation
+title: Settings icon picker shows real artwork thumbnails instead of emoji placeholders
+status: pending
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  The Settings-panel icon picker (shipped in hdl-unified-dashboard) rendered
+  each of the 3 desktop-icon options as a generic Unicode emoji (watchtower
+  emoji, shuffle-arrows emoji, horn emoji) instead of the actual designed
+  artwork. Operator correctly identified this as "not the icons we saw."
+
+  Fix: serve the real per-icon 128x128 PNG via a new GET
+  /desktop-icon/:name/thumbnail.png route (validated against the existing
+  DESKTOP_ICONS allowlist, never resolving an arbitrary path), wire a new
+  HEIMDALL_ICON_SETS_ROOT env var from the Rust sidecar (mirrors the
+  existing HEIMDALL_REPO_ROOT pattern exactly, since the icon-sets
+  directory is a sibling of, not nested inside, the Node app's own bundled
+  resource dir), and swap the dashboard's icon-picker markup from an emoji
+  span to a real <img> thumbnail.
+
+acceptance_criteria:
+  - "Given the Settings page is loaded, when the icon picker renders, then each of the 3 options shows the real icon artwork (an <img> tag), not an emoji glyph"
+  - "Given GET /desktop-icon/watchtower/thumbnail.png, when requested, then a real PNG (valid magic bytes, content-type: image/png) is returned"
+  - "Given GET /desktop-icon/not-a-real-icon/thumbnail.png or a path-traversal attempt, when requested, then 404 unknown_icon is returned, never resolving an arbitrary filesystem path"
+  - "Given the real installed desktop app, when the Settings page loads, then the thumbnails load correctly via HEIMDALL_ICON_SETS_ROOT pointing at the bundled Tauri resource, not just in headless dev mode"
+
+steps:
+  - id: implement
+    description: Add the thumbnail route, HEIMDALL_ICON_SETS_ROOT wiring, and dashboard picker UI change
+    agent: developer
+  - id: test
+    description: Add real/unit tests for the route (valid icon, invalid icon, path traversal) and dashboard markup (real img tag, ICON_GLYPHS fully removed)
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Live-verify against a real running server and a real browser (not just the test suite) — curl the route directly, load the dashboard and confirm all 3 thumbnails actually render with real image dimensions
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Full app rebuild + reinstall, confirm the Settings page shows real thumbnails in the actual installed app, commit and ship via the standard epic workflow
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - path: src/api/http-server.ts
+      purpose: HTTP route layer -- new thumbnail route lives alongside the existing /desktop-icon GET/POST routes
+    - path: src/api/ui/dashboard.ts
+      purpose: Settings panel icon-picker rendering -- ICON_GLYPHS removed, <img> thumbnail added
+    - path: app/src-tauri/src/sidecar.rs
+      purpose: HEIMDALL_ICON_SETS_ROOT env var set here when spawning the Node sidecar, mirroring HEIMDALL_REPO_ROOT
+    - path: app/src-tauri/tauri.conf.json
+      purpose: "confirms icon-sets is bundled as a Resources/ sibling of heimdall/, not nested inside it -- why a new resolution path was needed"
+
+files_to_modify:
+  - file: src/api/http-server.ts
+    change: add iconSetsRoot resolution + GET /desktop-icon/:name/thumbnail.png route
+  - file: src/api/ui/dashboard.ts
+    change: replace ICON_GLYPHS emoji rendering with real <img> thumbnails, update CSS
+  - file: app/src-tauri/src/sidecar.rs
+    change: extract icon_sets_root_candidates() helper, add resolve_icon_sets_root(), set HEIMDALL_ICON_SETS_ROOT on spawn
+
+design_decisions:
+  - decision: New env var (HEIMDALL_ICON_SETS_ROOT) rather than duplicating icon PNGs into the Node app's own bundled resource dir
+    rationale: Mirrors the already-proven HEIMDALL_REPO_ROOT pattern exactly, avoids file duplication, and the Rust side already has the correct resource-resolution logic (resolve_icon_path) to extract a shared root-only variant from.
+  - decision: Serve 128x128.png (not 32x32) for the picker thumbnail
+    rationale: The picker buttons render at 32px CSS size but on a Retina/HiDPI display that's 64 real pixels -- 128x128 source gives headroom without needing a dedicated @2x asset.
+
+references:
+  - path: .pHive/epics/hdl-icon-reconciliation/docs/design-discussion.md
+    relevant_excerpt: |
+      The Settings-panel icon picker rendered each option as a generic
+      Unicode emoji... never replaced with the actual designed artwork.

@@ -93,3 +93,5 @@ app/src-tauri/gen/
 !.pHive/epics/hdl-unified-dashboard/**
 !.pHive/epics/hdl-desktop-icon-settings/
 !.pHive/epics/hdl-desktop-icon-settings/**
+!.pHive/epics/hdl-icon-reconciliation/
+!.pHive/epics/hdl-icon-reconciliation/**

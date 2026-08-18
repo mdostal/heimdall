@@ -22,6 +22,7 @@ import { renderDashboardHtml } from "./ui/dashboard.js";
 import { DOC_ENTRIES, getDocBySlug, renderDocMarkdown, renderDocsIndexHtml, renderDocPageHtml } from "./ui/docs-viewer.js";
 import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { appendLane, deriveCredentialRef, laneIdAlreadyDeclared } from "../core/env-file.js";
 import { refreshModelCatalog, getModelCatalog, setModelEnabled } from "../core/model-catalog.js";
 import { NoHealthyAccountsAvailableError, type RotationController } from "../core/rotation-controller.js";
@@ -40,6 +41,18 @@ const DEFAULT_ENV_FILE_PATH = ".env";
 // hardcoded relative path.
 const docsRepoRoot = process.env.HEIMDALL_REPO_ROOT ?? process.cwd();
 const mermaidBundlePath = createRequire(import.meta.url).resolve("mermaid/dist/mermaid.min.js");
+
+// hdl-icon-reconciliation: the icon-set PNGs live under a Tauri resource
+// dir that's a SIBLING of (not nested inside) the Node app's own bundled
+// resource dir (see app/src-tauri/tauri.conf.json's bundle.resources: both
+// "resources/heimdall" -> "heimdall" and "resources/icon-sets" ->
+// "icon-sets" map directly under Resources/, not one inside the other) --
+// so docsRepoRoot/HEIMDALL_REPO_ROOT can't reach them. Same env-var-
+// override-with-dev-fallback pattern as docsRepoRoot itself: the desktop
+// app sets HEIMDALL_ICON_SETS_ROOT explicitly; headless dev/CLI usage
+// falls back to the real path in this git checkout.
+const iconSetsRoot =
+  process.env.HEIMDALL_ICON_SETS_ROOT ?? join(process.cwd(), "app", "src-tauri", "resources", "icon-sets");
 
 /** Collects and JSON-parses a request body. Shared by every mutation route (override, reset-at, add-lane). */
 function readJsonBody(req: import("node:http").IncomingMessage): Promise<{ ok: true; data: unknown } | { ok: false }> {
@@ -577,6 +590,32 @@ export function createHttpServer(
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(wire));
       });
+      return;
+    }
+
+    // hdl-icon-reconciliation: real thumbnail preview for the Settings
+    // picker -- it previously showed generic emoji standing in for each
+    // option, not the actual designed artwork the operator reviewed and
+    // picked between. :name is validated against the DESKTOP_ICONS
+    // allowlist before touching the filesystem (same discipline as the
+    // docs viewer's :slug handling -- never resolve an arbitrary
+    // caller-supplied path).
+    const iconThumbMatch = req.method === "GET" && req.url?.match(/^\/desktop-icon\/([^/]+)\/thumbnail\.png$/);
+    if (iconThumbMatch) {
+      const name = decodeURIComponent(iconThumbMatch[1]);
+      if (!(DESKTOP_ICONS as readonly string[]).includes(name)) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "unknown_icon" }));
+        return;
+      }
+      try {
+        const png = readFileSync(join(iconSetsRoot, name, "128x128.png"));
+        res.writeHead(200, { "content-type": "image/png", "cache-control": "public, max-age=86400" });
+        res.end(png);
+      } catch {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "thumbnail_missing" }));
+      }
       return;
     }
 

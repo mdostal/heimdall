@@ -648,6 +648,68 @@ test("hdl-desktop-icon-settings: GET /desktop-icon defaults to 'watchtower' acti
   }
 });
 
+test("hdl-icon-reconciliation: GET /desktop-icon/:name/thumbnail.png serves a real PNG for each valid icon", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    for (const name of ["watchtower", "routing-lanes", "signal-horn"]) {
+      const res = await fetch(`http://localhost:${port}/desktop-icon/${name}/thumbnail.png`);
+      assert.equal(res.status, 200, `${name} thumbnail should exist`);
+      assert.equal(res.headers.get("content-type"), "image/png");
+      const buf = Buffer.from(await res.arrayBuffer());
+      assert.ok(buf.length > 100, `${name} thumbnail should be a real, non-trivial PNG`);
+      // PNG magic bytes
+      assert.deepEqual([...buf.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    }
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-icon-reconciliation: GET /desktop-icon/:name/thumbnail.png rejects an unrecognized or path-traversal name", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const badName = await fetch(`http://localhost:${port}/desktop-icon/not-a-real-icon/thumbnail.png`);
+    assert.equal(badName.status, 404);
+    assert.equal((await badName.json()).error, "unknown_icon");
+
+    const traversal = await fetch(`http://localhost:${port}/desktop-icon/..%2F..%2F..%2Fetc%2Fpasswd/thumbnail.png`);
+    assert.equal(traversal.status, 404, "must never resolve an arbitrary caller-supplied path");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-icon-reconciliation: GET / (dashboard) icon picker uses real thumbnail images, not emoji placeholders", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /icon-thumb/, "must render an <img class=\"icon-thumb\"> per option");
+    assert.match(body, /\/desktop-icon\/" \+ escapeHtml\(name\) \+\s*"\/thumbnail\.png/, "must load each thumbnail from the real per-icon route");
+    assert.doesNotMatch(body, /ICON_GLYPHS/, "the emoji-placeholder table must be gone, not just unused");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
 test("hdl-desktop-icon-settings: POST /desktop-icon sets the preference, invalid values are rejected without changing it", async () => {
   const registry = registryWithOneConfiguredLane();
   const store = new StateStore(":memory:");
