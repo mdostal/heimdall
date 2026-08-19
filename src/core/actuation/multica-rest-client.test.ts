@@ -5,7 +5,7 @@ import { EnvCredentialSource } from "../credential-source.js";
 
 function baseEnv(): NodeJS.ProcessEnv {
   return {
-    MULTICA_BASE_URL: "http://100.75.161.82:8090",
+    MULTICA_BASE_URL: "http://192.0.2.1:8090",
     MULTICA_WORKSPACE_ID: "d70dc5cf",
     MULTICA_PAT_TOKEN: "fake-pat-token",
   };
@@ -51,7 +51,7 @@ test("every request includes workspace_id query param and a Bearer auth header",
   await client.listAgents();
 
   const url = new URL(capturedUrl!);
-  assert.equal(url.origin, "http://100.75.161.82:8090");
+  assert.equal(url.origin, "http://192.0.2.1:8090");
   assert.equal(url.pathname, "/api/agents");
   assert.equal(url.searchParams.get("workspace_id"), "d70dc5cf");
   assert.equal(capturedHeaders?.authorization, "Bearer fake-pat-token");
@@ -170,7 +170,7 @@ test("reuses the real CredentialSource interface, not a bespoke token loader", a
   }) as typeof fetch;
 
   const client = new MulticaRestClient({
-    env: { MULTICA_BASE_URL: "http://100.75.161.82:8090", MULTICA_WORKSPACE_ID: "d70dc5cf" },
+    env: { MULTICA_BASE_URL: "http://192.0.2.1:8090", MULTICA_WORKSPACE_ID: "d70dc5cf" },
     credentialSource,
     tokenRef: "CUSTOM_TOKEN_REF",
     fetchImpl,

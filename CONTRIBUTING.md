@@ -13,7 +13,7 @@ Welcome to Heimdall! We appreciate your interest in contributing to the Pantheon
    - Open a Pull Request and describe your changes clearly.
 
 ## Development Setup
-- Requires Node.js >= 22.5.0.
+- Requires Node.js >= 22.13.0.
 - Copy `.env.example` to `.env`.
 - Run `npm install` and `npm run dev`.
 

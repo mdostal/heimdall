@@ -29,7 +29,12 @@ export class ArgusUnavailableError extends Error {
   }
 }
 
-const DEFAULT_ARGUS_STATS_BASE_URL = "http://100.75.161.82:4328";
+// Argus is normally co-located with Heimdall in a typical Pantheon
+// installation, so "localhost" is the only safe code-baked default — a
+// remote/Tailscale Argus host is a per-operator override via ARGUS_STATS_URL
+// / ARGUS_BASE_URL, never hardcoded here (see multica-rest-client.ts for the
+// same reasoning applied to Multica).
+const DEFAULT_ARGUS_STATS_BASE_URL = "http://localhost:4328";
 const DEFAULT_STATS_PATH = "/stats";
 
 export class ArgusStatsClient {
