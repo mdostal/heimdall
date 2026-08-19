@@ -17,7 +17,7 @@
 
 import { buildLaneRegistry, createHttpServer, type RefreshLaneFn } from "./api/http-server.js";
 import type { Server } from "node:http";
-import { StateStore } from "./core/state-store.js";
+import { StateStore, resolveDefaultDbPath } from "./core/state-store.js";
 import type { LaneRegistry } from "./core/lane-registry.js";
 import {
   LanePipeline,
@@ -127,7 +127,7 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
   const env = options.env ?? process.env;
 
   const registry = buildLaneRegistry(env);
-  const store = new StateStore(env.HEIMDALL_DB_PATH ?? ":memory:");
+  const store = new StateStore(resolveDefaultDbPath(env));
 
   // hdl-ot-01: Heimdall's own local record (telemetry_events) is the source
   // of truth; Argus is one downstream consumer of the same facts, composed

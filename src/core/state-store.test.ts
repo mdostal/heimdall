@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { StateStore } from "./state-store.js";
+import { StateStore, resolveDefaultDbPath } from "./state-store.js";
 
 test("a declared lane with no recorded status reports down/unconfigured (REQ-07)", () => {
   const store = new StateStore(":memory:");
@@ -604,4 +604,44 @@ test("hdl-ot-01: getTelemetryEventCounts for an event type with zero events retu
   const store = new StateStore(":memory:");
   assert.deepEqual(store.getTelemetryEventCounts("rotation_event"), []);
   store.close();
+});
+
+test("hdl-ao-01: resolveDefaultDbPath honors HEIMDALL_DB_PATH when set", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "heimdall-home-"));
+  const resolved = resolveDefaultDbPath({ HEIMDALL_DB_PATH: "/custom/path/heimdall.db" }, home);
+  assert.equal(resolved, "/custom/path/heimdall.db");
+});
+
+test("hdl-ao-01: resolveDefaultDbPath falls back to a fixed per-machine path under homedir when HEIMDALL_DB_PATH is unset", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "heimdall-home-"));
+  const resolved = resolveDefaultDbPath({}, home);
+  assert.equal(resolved, path.join(home, ".local", "share", "heimdall", "heimdall.db"));
+});
+
+test("hdl-ao-01: resolveDefaultDbPath creates the parent directory if it doesn't exist", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "heimdall-home-"));
+  const resolved = resolveDefaultDbPath({}, home);
+  assert.ok(fs.existsSync(path.dirname(resolved)));
+  // A real StateStore can actually open a file at the resolved path — the
+  // whole point of resolving this default instead of ":memory:".
+  const store = new StateStore(resolved);
+  store.close();
+  assert.ok(fs.existsSync(resolved));
+  fs.rmSync(path.dirname(resolved), { recursive: true, force: true });
+});
+
+test("hdl-ao-01: resolveDefaultDbPath is idempotent when the parent directory already exists", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "heimdall-home-"));
+  resolveDefaultDbPath({}, home);
+  assert.doesNotThrow(() => resolveDefaultDbPath({}, home));
+});
+
+test("hdl-ao-01: StateStore enables WAL journal mode on a real database file", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "heimdall-home-"));
+  const dbPath = resolveDefaultDbPath({}, home);
+  const store = new StateStore(dbPath);
+  const row = store.database.prepare("PRAGMA journal_mode").get() as unknown as { journal_mode: string };
+  assert.equal(row.journal_mode, "wal");
+  store.close();
+  fs.rmSync(path.dirname(dbPath), { recursive: true, force: true });
 });

@@ -1,0 +1,69 @@
+id: hdl-ao-04-usage-skills
+epic: hdl-agent-onboarding
+title: 4 real usage skills installed idempotently to ~/.claude/skills/
+status: pending
+complexity: low
+methodology: classic
+depends_on: [hdl-ao-03-agent-init-status]
+parallel_allowed: false
+
+description: >
+  Adds installSkills() to agent-command.ts (content-diffed via a file
+  comparison before overwrite, same idempotency contract as Portunus's
+  filecmp.cmp-based approach) and 4 real SKILL.md files under
+  agent_skills/, copied to ~/.claude/skills/heimdall-*/ by `heimdall agent
+  init`: heimdall-lanes (list/override/setResetAt/add), heimdall-routing
+  (routingStrategy get/set + route_selection + reportOutcome, including the
+  explicit inline note that route_selection is not heimdall.route.*
+  namespaced like its siblings), heimdall-models (list/refresh/setEnabled),
+  heimdall-status (read-only fleet overview). Content uses real parameter
+  names/types from the Phase A research's tool inventory, not placeholders.
+
+acceptance_criteria:
+  - 4 SKILL.md files exist under agent_skills/, one per functional group,
+    each documenting real tool names, required/optional params, and at
+    least one real example call per tool.
+  - heimdall-routing's SKILL.md explicitly notes the route_selection naming
+    inconsistency inline.
+  - `heimdall agent init` copies all 4 files to ~/.claude/skills/heimdall-
+    {name}/SKILL.md.
+  - Re-running `heimdall agent init` after a local edit to an installed
+    skill file only overwrites when the source content differs from what's
+    installed (content-diffed, not blind overwrite).
+
+steps:
+  - id: s1
+    description: Write the 4 SKILL.md files with real tool/parameter
+      content from the Phase A research brief's tool inventory.
+    agent: developer
+  - id: s2
+    description: Add installSkills() to agent-command.ts, content-diffed
+      before overwrite, wired into `heimdall agent init`.
+    agent: developer
+  - id: s3
+    description: Run `heimdall agent init` on this machine, confirm all 4
+      files land with real content; edit one locally, re-run, confirm the
+      diff-before-overwrite logic works.
+    agent: developer
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - src/cli/agent-command.ts
+    - src/api/mcp-server.ts
+  tech_stack: [typescript, markdown]
+
+risks:
+  - severity: medium
+    description: Skill content quality is the actual point of the epic —
+      shallow/stub content (just tool names with no real examples) would
+      technically satisfy the file-existence checks while defeating the
+      purpose.
+    mitigation: Acceptance criteria explicitly require at least one real
+      example call per tool, not just a name list.
+
+metric:
+  applies: false
+  justification: Documentation content; usefulness is qualitative and
+    reviewed at story integrate, not something with a clean quantitative
+    source available yet.

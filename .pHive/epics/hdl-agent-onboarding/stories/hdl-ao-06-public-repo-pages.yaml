@@ -1,0 +1,85 @@
+id: hdl-ao-06-public-repo-pages
+epic: hdl-agent-onboarding
+title: Repo goes public; branch-based GitHub Pages serves install.sh and the docs site
+status: pending
+complexity: high
+methodology: classic
+depends_on: [hdl-ao-05-distribution-prep]
+parallel_allowed: false
+
+description: >
+  Flips mdostal/heimdall to public (operator-approved during planning, per
+  the AskUserQuestion decision "make repo public + GH Pages" — re-confirm
+  at execution time before running, since this is the epic's one
+  irreversible-in-spirit action). Pushes a gh-pages branch directly (plain
+  git push, NOT a GitHub Actions workflow — Actions is account-wide
+  billing-blocked for this repo per docs/decisions/
+  DEC-hdl-local-build-verification.md, corrected in collaborative review
+  from the original Actions-workflow plan) containing the Jekyll docs site
+  and install.sh. Enables Pages via `gh api repos/mdostal/heimdall/pages`
+  against the branch (build_type: legacy). Live-curls both the
+  pre-existing (currently dead) docs-site link and the new install.sh URL
+  to confirm they actually work, not just that the push/API call succeeded.
+
+acceptance_criteria:
+  - mdostal/heimdall repo visibility is public (execute this as its own
+    isolated, reviewable step — not folded into a larger commit).
+  - A gh-pages branch exists with the built Jekyll docs site + install.sh
+    at its root.
+  - GitHub Pages is enabled against gh-pages via the Pages API
+    (build_type: legacy, no Actions workflow file added).
+  - `curl -I https://mdostal.github.io/heimdall/` and `curl -fsSL
+    https://mdostal.github.io/heimdall/install.sh` both succeed, retried
+    over a few minutes to account for first-deploy propagation lag before
+    being declared broken.
+
+steps:
+  - id: s1
+    description: Re-confirm the repo-visibility decision at execution time,
+      then flip mdostal/heimdall to public as its own isolated action.
+    agent: developer
+  - id: s2
+    description: Build and push the gh-pages branch (docs site +
+      install.sh), enable Pages via the Pages API against it.
+    agent: developer
+  - id: s3
+    description: Live-curl verification of both the docs-site root and
+      install.sh, retried for propagation lag.
+    agent: developer
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - docs/_config.yml
+    - README.md
+    - docs/decisions/DEC-hdl-local-build-verification.md
+  tech_stack: [github-pages, jekyll, bash]
+
+design_decisions:
+  - decision: Branch-based Pages (build_type legacy), not an
+      actions/deploy-pages workflow.
+    rationale: GitHub Actions is account-wide billing-blocked for this repo
+      right now (DEC-hdl-local-build-verification.md) — an Actions-based
+      Pages workflow would silently never run. Corrected in collaborative
+      review before any code was written. Branch-based Pages needs no
+      Actions run at all.
+
+risks:
+  - severity: high
+    description: Making the repo public is irreversible in spirit (history
+      becomes visible even if flipped back private later).
+    mitigation: Operator explicitly approved this after being shown the
+      alternative (skip Pages entirely) during planning; step s1 requires
+      re-confirming at execution time as its own isolated, reviewable
+      action rather than folding it into a larger commit.
+  - severity: low
+    description: GitHub Pages first-deploy propagation delay can look "not
+      live" for a few minutes after enabling.
+    mitigation: Step s3's verification retries over a few minutes rather
+      than declaring broken on the first failed curl.
+
+metric:
+  applies: false
+  justification: One-time infrastructure/hosting change with a binary
+    live/not-live outcome verified directly by acceptance criteria; no
+    ongoing rate or ratio to track.

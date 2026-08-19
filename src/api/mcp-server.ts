@@ -44,7 +44,7 @@ import {
 } from "./http-server.js";
 import { getActiveRoutingStrategyName, getRoutingStrategyNames, getScoredRoute, reportRouteOutcome, parseTaskType } from "../core/route-selector.js";
 import { refreshModelCatalog, getModelCatalog, setModelEnabled } from "../core/model-catalog.js";
-import { StateStore } from "../core/state-store.js";
+import { StateStore, resolveDefaultDbPath } from "../core/state-store.js";
 import type { LaneRegistry } from "../core/lane-registry.js";
 
 export const LANES_LIST_TOOL_NAME = "heimdall.lanes.list";
@@ -353,7 +353,7 @@ const isMainModule =
 
 if (isMainModule) {
   const registry = buildLaneRegistry();
-  const store = new StateStore(process.env.HEIMDALL_DB_PATH ?? ":memory:");
+  const store = new StateStore(resolveDefaultDbPath());
   const server = createMcpServer(registry, store);
   const transport = new StdioServerTransport();
   await server.connect(transport);

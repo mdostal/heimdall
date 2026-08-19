@@ -13,6 +13,10 @@ by disabling or re-enabling a lane's mapped Multica agents.
 
 📖 **[Read the Documentation Site](https://mdostal.github.io/heimdall/)**
 
+```
+curl -fsSL https://mdostal.github.io/heimdall/install.sh | bash
+```
+
 ## What & why
 
 Agent fleets stall for boring reasons: one account hits its weekly cap while

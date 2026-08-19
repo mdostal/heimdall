@@ -16,7 +16,7 @@ import {
   getRoutingStrategyNames,
   ROUTING_STRATEGY_SETTING_KEY,
 } from "../core/route-selector.js";
-import { StateStore, type ManualOverride } from "../core/state-store.js";
+import { StateStore, resolveDefaultDbPath, type ManualOverride } from "../core/state-store.js";
 import type { LaneStatus } from "../core/status-model.js";
 import { renderDashboardHtml } from "./ui/dashboard.js";
 import { DOC_ENTRIES, getDocBySlug, renderDocMarkdown, renderDocsIndexHtml, renderDocPageHtml } from "./ui/docs-viewer.js";
@@ -281,6 +281,32 @@ export function setIcon(store: StateStore, rawName: unknown): SetIconResult {
   return { ok: true, active: rawName };
 }
 
+// hdl-ao-07: whether the operator has dismissed the dashboard's "get
+// started" agent-onboarding panel (the install curl one-liner + `heimdall
+// agent init`). Same settings-table persistence as THEME_SETTING_KEY/
+// ICON_SETTING_KEY -- server-side, not localStorage, so the panel's
+// collapsed state is consistent whether the dashboard is loaded via a plain
+// browser or the desktop app's webview (both hit the same HTTP server).
+// Unset defaults to false (shown/expanded) so a first-time visitor with no
+// stored setting sees the panel.
+export const AGENT_ONBOARDING_DISMISSED_KEY = "agent_onboarding_dismissed";
+
+export function getAgentOnboardingDismissed(store: StateStore): boolean {
+  return store.getSetting(AGENT_ONBOARDING_DISMISSED_KEY) === "true";
+}
+
+export type SetAgentOnboardingDismissedResult =
+  | { ok: true; dismissed: boolean }
+  | { ok: false; error: "invalid_dismissed" };
+
+export function setAgentOnboardingDismissed(store: StateStore, rawValue: unknown): SetAgentOnboardingDismissedResult {
+  if (typeof rawValue !== "boolean") {
+    return { ok: false, error: "invalid_dismissed" };
+  }
+  store.setSetting(AGENT_ONBOARDING_DISMISSED_KEY, rawValue ? "true" : "false");
+  return { ok: true, dismissed: rawValue };
+}
+
 export function buildLaneRegistry(env: NodeJS.ProcessEnv = process.env): LaneRegistry {
   return new LaneRegistry(loadLaneDeclarations(env), new EnvCredentialSource(env));
 }
@@ -384,7 +410,7 @@ export function createHttpServer(
     // GET /lanes below; adds no new backend query logic.
     if (req.method === "GET" && req.url === "/") {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(renderDashboardHtml(getActiveTheme(store)));
+      res.end(renderDashboardHtml(getActiveTheme(store), getAgentOnboardingDismissed(store)));
       return;
     }
 
@@ -404,6 +430,35 @@ export function createHttpServer(
           return;
         }
         const result = setTheme(store, (body.data as { theme?: unknown }).theme);
+        if (!result.ok) {
+          const { ok: _ok, ...wire } = result;
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify(wire));
+          return;
+        }
+        const { ok: _ok, ...wire } = result;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(wire));
+      });
+      return;
+    }
+
+    // hdl-ao-07: dismiss state for the dashboard's "get started" agent-
+    // onboarding panel, same read/write shape as /theme and /desktop-icon.
+    if (req.method === "GET" && req.url === "/agent-onboarding-dismissed") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ dismissed: getAgentOnboardingDismissed(store) }));
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/agent-onboarding-dismissed") {
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+        const result = setAgentOnboardingDismissed(store, (body.data as { dismissed?: unknown }).dismissed);
         if (!result.ok) {
           const { ok: _ok, ...wire } = result;
           res.writeHead(400, { "content-type": "application/json" });
@@ -879,7 +934,7 @@ const isMainModule =
 
 if (isMainModule) {
   const registry = buildLaneRegistry();
-  const store = new StateStore(process.env.HEIMDALL_DB_PATH ?? ":memory:");
+  const store = new StateStore(resolveDefaultDbPath());
   const port = Number(process.env.PORT ?? 4870);
   createHttpServer(registry, store).listen(port, () => {
     console.log(`heimdall dev server listening on http://localhost:${port}`);

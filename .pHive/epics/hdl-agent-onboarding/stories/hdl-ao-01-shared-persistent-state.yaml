@@ -1,0 +1,84 @@
+id: hdl-ao-01-shared-persistent-state
+epic: hdl-agent-onboarding
+title: Every Heimdall process shares one real, persistent default DB/config path instead of :memory:
+status: pending
+complexity: medium
+methodology: classic
+depends_on: []
+parallel_allowed: false
+
+description: >
+  Fixes the grill-caught foundational gap (grill-record H1, extended in
+  collaborative review): src/main.ts:130, src/api/http-server.ts:882,
+  src/api/mcp-server.ts:356, and src/api/cli.ts:57 all default to
+  `new StateStore(process.env.HEIMDALL_DB_PATH ?? ":memory:")`. Without a
+  shared `.env`, a globally-installed `heimdall mcp` process gets an empty,
+  ephemeral, disconnected database. Adds resolveDefaultDbPath(env, homedir)
+  (same shape as the existing resolveDefaultPolicyPath in
+  src/core/routing/policy-loader.ts) and an equivalent config-dir fallback,
+  wires both into all four call sites, and verifies safe concurrent
+  multi-process SQLite access under WAL mode.
+
+acceptance_criteria:
+  - resolveDefaultDbPath(env, homedir) exists, honors HEIMDALL_DB_PATH when
+    set, and otherwise resolves to a fixed per-machine path under the
+    user's home directory, creating the parent directory if missing.
+  - All four StateStore construction sites (main.ts, http-server.ts,
+    mcp-server.ts, cli.ts) use the new resolver instead of a literal
+    ":memory:" fallback.
+  - policy-loader.ts's config resolution gains an equivalent global-install
+    -safe fallback alongside its existing HEIMDALL_REPO_ROOT/cwd chain.
+  - SQLite WAL mode is enabled on the resolved database file.
+  - A live test starts two separate local processes (e.g. http-server +
+    mcp-server) against the same resolved default path with no .env
+    present, writes through one, and confirms the write is visible through
+    the other.
+
+steps:
+  - id: s1
+    description: Write resolveDefaultDbPath(env, homedir) and the config-dir
+      equivalent, following resolveDefaultPolicyPath's existing shape and
+      test style.
+    agent: developer
+  - id: s2
+    description: Wire the resolver into main.ts, http-server.ts,
+      mcp-server.ts, and cli.ts in place of the ":memory:" literal; enable
+      WAL mode on the resolved file.
+    agent: developer
+  - id: s3
+    description: Live concurrent-access verification — two real local
+      processes sharing the resolved default path, cross-process write
+      visibility confirmed, checked for SQLITE_BUSY under normal load.
+    agent: developer
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - src/core/routing/policy-loader.ts
+    - src/main.ts
+    - src/api/http-server.ts
+    - src/api/mcp-server.ts
+    - src/api/cli.ts
+  tech_stack: [typescript, node, sqlite]
+
+design_decisions:
+  - decision: Use a fixed XDG-style per-machine path as the new default
+      instead of requiring HEIMDALL_DB_PATH to always be set explicitly.
+    rationale: A globally-installed CLI has no repo checkout or bundled
+      resource dir to fall back to the way the desktop app's sidecar does;
+      every Heimdall process on a machine needs to agree on one default
+      without the user configuring anything.
+
+risks:
+  - severity: medium
+    description: This repo has zero prior multi-process SQLite experience;
+      WAL mode may not behave as expected under real concurrent access.
+    mitigation: Live concurrent-access test in step s3 before this story is
+      considered complete, not assumed from WAL mode's documented behavior
+      alone.
+
+metric:
+  applies: false
+  justification: Foundational correctness fix with no standalone user-facing
+    behavior to measure yet; its effect is only observable once hdl-ao-03
+    (agent registration) ships on top of it.

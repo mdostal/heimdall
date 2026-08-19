@@ -1,0 +1,87 @@
+name: hdl-agent-onboarding
+title: Real install + agent/harness interactivity story, top and forward in the dashboard
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: dev
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [new-subsystem, packaging, cross-language-reference, medium-scope]
+  roster: [researcher]
+  per_tag_reasoning:
+    new-subsystem: Heimdall has zero install/CLI/agent-registration story today — packaging, CLI dispatch extension, and MCP registration are new surface, not an extension of existing tooling.
+    packaging: first-ever npm bin entrypoint, npm pack/publish-readiness, and distribution (install.sh, GitHub Pages) for this repo.
+    cross-language-reference: modeled on Portunus's real, shipped Python/pipx `agent init` pattern, adapted (not copied) to Heimdall's Node/TypeScript/npm baseline.
+    medium-scope: cross-stack (build tooling, CLI, MCP registration, CI/hosting, dashboard UI) and multi-file across genuinely independent layers needing explicit sequencing — design discussion alone was insufficient to slice safely, but scope is bounded (single repo, no migration) so full structured-outline elicitation wasn't warranted.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: ran (plugin-hive:grill adversarial pass — found and the draft resolved 6 real findings: a 4th missed :memory:-default StateStore site would have surfaced later via collaborative review, a false "no CLI dispatcher exists" claim, a wrong compiled-output path claim, a self-contradictory Node-floor migration claim, an unaddressed standalone-vs-plugin-mode scoping gap, and a dashboard convention-gate question — full record at docs/grill-record.md)
+    hv_planning: ran (horizontal-plan.md + vertical-plan.md, 9 layers / 7 vertical slices; collaborative review pass against both documents caught 3 further real corrections — a 4th :memory: site, the false CLI-dispatcher claim, wrong dist/ output path, and a genuinely severe environmental blocker: GitHub Actions is account-wide billing-blocked for this repo per docs/decisions/DEC-hdl-local-build-verification.md, which would have silently broken the original Actions-based GitHub Pages plan — resolved by switching to branch-based Pages)
+    structured_outline: not_applicable (Medium, not Large — single repo, no migration, bounded and well-understood after Phase A research + H/V planning)
+
+description: >
+  Operator: "every agent, harness, etc that uses this needs a way to
+  install and interact with it -- it should be top and foreward so people
+  can see when installing and working and what to feed the agent or
+  harness to get interactivity," modeled on (not copied from) Portunus's
+  real, shipped `agent init`/`agent status` pattern. Also explicit: the
+  dashboard needs a prominent, dismissible "get started" panel, not just
+  docs/README.
+
+  Heimdall started this epic with zero install story: no bin entrypoint,
+  no packaged CLI, no portable way to register its MCP server with an
+  agent harness, zero SKILL.md files, and a dashboard with no onboarding
+  surface at all. This epic gives it: a real packaged npm CLI
+  (pantheon-heimdall, installed command `heimdall`), `heimdall agent
+  init`/`status` mirroring Portunus's real pattern, 4 genuinely useful
+  usage skills, a real curl-based installer, GitHub Pages (branch-based,
+  since GitHub Actions is account-wide billing-blocked for this repo right
+  now), and a prominent, dismissible, server-persisted "get started"
+  dashboard panel.
+
+  Adversarial review (grill) and a collaborative-review pass against the
+  H/V planning documents caught real, substantive corrections before any
+  code was written: a foundational bug (the MCP server and 3 sibling
+  entrypoints default to an in-memory, ephemeral database with no shared
+  `.env` — a globally-installed `heimdall mcp` would silently hand an
+  agent a fake empty fleet), a false claim that no CLI dispatcher existed
+  (src/api/cli.ts already dispatches subcommands), a wrong compiled-output
+  path assumption, and — most consequential — that the originally-planned
+  Actions-based GitHub Pages deployment could never have run at all given
+  this repo's known account-wide GitHub Actions billing block, documented
+  in its own repo decision record. All resolved in planning, not
+  discovered mid-execution.
+
+stories:
+  - id: hdl-ao-01-shared-persistent-state
+    title: Every Heimdall process shares one real, persistent default DB/config path instead of :memory:
+    complexity: medium
+    depends_on: []
+  - id: hdl-ao-02-packaged-cli
+    title: Heimdall becomes a real packaged npm CLI (pantheon-heimdall, bin heimdall)
+    complexity: medium
+    depends_on: [hdl-ao-01-shared-persistent-state]
+  - id: hdl-ao-03-agent-init-status
+    title: heimdall agent init/status detect and register Claude Code and Codex
+    complexity: medium
+    depends_on: [hdl-ao-02-packaged-cli]
+  - id: hdl-ao-04-usage-skills
+    title: 4 real usage skills installed idempotently to ~/.claude/skills/
+    complexity: low
+    depends_on: [hdl-ao-03-agent-init-status]
+  - id: hdl-ao-05-distribution-prep
+    title: scripts/install.sh and npm publish-readiness (not the actual publish)
+    complexity: low
+    depends_on: [hdl-ao-02-packaged-cli]
+  - id: hdl-ao-06-public-repo-pages
+    title: Repo goes public; branch-based GitHub Pages serves install.sh and the docs site
+    complexity: high
+    depends_on: [hdl-ao-05-distribution-prep]
+  - id: hdl-ao-07-dashboard-get-started
+    title: Dashboard "get started" panel — prominent, dismissible, server-persisted
+    complexity: low
+    depends_on: [hdl-ao-03-agent-init-status, hdl-ao-06-public-repo-pages]
