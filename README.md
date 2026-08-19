@@ -1,8 +1,12 @@
 # Heimdall
 
-[![Build Status](https://img.shields.io/github/actions/workflow/status/mdostal/heimdall/ci.yml?branch=main)](https://github.com/mdostal/heimdall/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![OSS Ready](https://img.shields.io/badge/OSS-Ready-brightgreen.svg)]()
+
+> PRs aren't currently gated by GitHub Actions (billing-blocked on this repo — see
+> [`DEC-hdl-local-build-verification.md`](docs/decisions/DEC-hdl-local-build-verification.md)).
+> The real merge gate is a local build-verification script run before merge; `npm run build`
+> and `npm test` are the same commands it runs, so running them yourself is the closest
+> equivalent to "CI" a contributor can do today.
 
 **The health-aware lane gateway for [Pantheon](https://github.com/mdostal/pantheon-v2).**
 
@@ -108,7 +112,7 @@ Heimdall's telemetry).
 
 ## Quickstart
 
-Requires **Node.js >= 22.5.0** (uses the built-in `node:sqlite` module — the
+Requires **Node.js >= 22.13.0** (uses the built-in `node:sqlite` module — the
 scripts pass `--experimental-sqlite`).
 
 ```bash

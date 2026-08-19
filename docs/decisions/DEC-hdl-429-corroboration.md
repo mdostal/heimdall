@@ -7,10 +7,10 @@ Referenced by: `src/core/signal-sources/active-probe/claude.ts`, `src/core/signa
 
 ## Provenance — what was recovered and from where
 
-During a re-kickoff standalone-deploy smoke test (2026-08-12), a git-checkout survey of `dostal@100.75.161.82` ("the hive" box) found two Heimdall-related artifacts not present anywhere else, alongside a fully redundant one:
+During a re-kickoff standalone-deploy smoke test (2026-08-12), a git-checkout survey of `<build-box-user>@<build-box-ip>` ("the hive" box) found two Heimdall-related artifacts not present anywhere else, alongside a fully redundant one:
 
-1. **`/Users/dostal/.merge-work/heimdall`** — byte-identical to this repo's `main` (`5f80115`). No unique content. Redundant, not a loss risk.
-2. **Commit `4ec66ef`** on a local `feat/PAN-7526` checkout at `/Users/dostal/Documents/work/dostal/code/heimdall`, dated 2026-08-08, **never pushed to `origin/feat/PAN-7526` and never part of any PR**. Confirmed via `gh pr list`: the real `feat/PAN-7526` work was **PR #6 ("PAN-7526: add available route endpoint"), already merged to `main`** on 2026-08-08 (`87a5335`). `4ec66ef` was added to that local branch checkout *after* the PR's real content, as a separate, never-shared experiment.
+1. **`/path/to/.merge-work/heimdall`** — byte-identical to this repo's `main` (`5f80115`). No unique content. Redundant, not a loss risk.
+2. **Commit `4ec66ef`** on a local `feat/PAN-7526` checkout at `/path/to/work/<build-box-user>/code/heimdall`, dated 2026-08-08, **never pushed to `origin/feat/PAN-7526` and never part of any PR**. Confirmed via `gh pr list`: the real `feat/PAN-7526` work was **PR #6 ("PAN-7526: add available route endpoint"), already merged to `main`** on 2026-08-08 (`87a5335`). `4ec66ef` was added to that local branch checkout *after* the PR's real content, as a separate, never-shared experiment.
 3. **An uncommitted working-tree change** on that same checkout, in `src/core/signal-sources/active-probe/claude.ts` — this is what this doc is about.
 
 ### Commit `4ec66ef` — evaluated and parked, not ported forward
