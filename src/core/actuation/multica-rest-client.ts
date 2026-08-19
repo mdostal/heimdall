@@ -1,7 +1,7 @@
 // MulticaRestClient — flaky-connection-hardened HTTP layer for Multica's real
 // REST control API (hda-01). Multica does NOT run on this laptop: the real
 // target is a separate instance on "the hive" at :8090 (co-located prod =
-// http://localhost:8090; remote/dev = http://100.75.161.82:8090 via
+// http://localhost:8090; remote/dev = http://<your-tailscale-ip>:8090 via
 // Tailscale) — MULTICA_BASE_URL is required config, no baked-in default,
 // since hardcoding either host would be actively wrong depending on where
 // Heimdall runs. MULTICA_WORKSPACE_ID is also required — every /api/agents
@@ -80,7 +80,7 @@ export class MulticaRestClient {
       throw new Error(
         "MULTICA_BASE_URL is not configured — cannot construct a MulticaRestClient without a " +
           "base URL. This is deployment-specific (co-located on the hive: http://localhost:8090; " +
-          "remote/dev: http://100.75.161.82:8090) and has no safe default.",
+          "remote/dev: http://<your-tailscale-ip>:8090) and has no safe default.",
       );
     }
 

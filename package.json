@@ -2,6 +2,15 @@
   "name": "pantheon-heimdall",
   "version": "0.33.0",
   "description": "Pantheon's health-aware LLM/lane router \u2014 v1 sense (lane health/status) + v2 actuate (Multica control).",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mdostal/heimdall.git"
+  },
+  "homepage": "https://github.com/mdostal/heimdall#readme",
+  "bugs": {
+    "url": "https://github.com/mdostal/heimdall/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=22.13.0"

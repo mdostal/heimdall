@@ -133,8 +133,12 @@ export interface ArgusSdkOptions {
   httpPort?: number;
 }
 
-/** Real Argus host confirmed via direct research (2026-07-25): Tailscale 100.75.161.82. */
-const DEFAULT_ARGUS_HOST = "100.75.161.82";
+// Argus, like Multica, is normally co-located with Heimdall in a typical
+// Pantheon installation — "localhost" is the only default that's safe for
+// every operator's deployment. A remote/Tailscale Argus host is a
+// per-operator override via ARGUS_OTLP_HOST, never a code-baked default
+// (see multica-rest-client.ts for the same reasoning applied to Multica).
+const DEFAULT_ARGUS_HOST = "localhost";
 const DEFAULT_ARGUS_GRPC_PORT = 4327;
 const DEFAULT_ARGUS_HTTP_PORT = 4328;
 

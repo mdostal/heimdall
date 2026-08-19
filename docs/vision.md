@@ -11,7 +11,7 @@ are healthy and to act on that knowledge.
 
 ---
 
-## ① Current — where it is (v0.27.0)
+## ① Current — where it is (v0.33.0)
 
 Heimdall runs as a headless Node/TypeScript service on **`http://localhost:4870`**
 (override with `PORT`). Everything below actually runs today.
@@ -109,6 +109,23 @@ dev-mode wrapper.
 
 **Pantheon integration.** Heimdall's real L2 descriptor (capabilities,
 `healthz`, port, transport) is registered in `pantheon-v2`.
+
+**Installable CLI and agent onboarding.** Heimdall ships as a real global npm
+package (`npm install -g pantheon-heimdall`, or the one-liner `curl -fsSL
+https://mdostal.github.io/heimdall/install.sh | bash`), not just a repo
+checkout. The `heimdall` bin (`bin/heimdall.js`) is a cross-platform shim that
+dispatches to the compiled CLI — `heimdall lanes`/`route`/`route-outcome` for
+one-shot calls, and `heimdall mcp` to speak the MCP protocol over stdio.
+`heimdall agent init` is the onboarding command: it detects which coding
+harnesses (`claude`, `codex`) are actually installed on the machine,
+idempotently registers Heimdall as an MCP server with each one (`heimdall
+agent status` reports current registration state without changing anything),
+and installs the four real usage skills (`heimdall-lanes`, `heimdall-routing`,
+`heimdall-models`, `heimdall-status`) into the harness's skills directory —
+turning "clone the repo and read the source" into "install, run one command,
+start asking your agent about lane health." `scripts/install.sh` wraps the
+same two steps (global install + `agent init`) with Node-version and PATH
+error handling for the curl-to-bash path.
 
 **Honest gaps.**
 - Actuation is tested **entirely against local mocks** in this repo's own test

@@ -29,7 +29,7 @@ Beyond the two already-built query surfaces (agent-call/MCP, API-call/HTTP+CLI),
 
 ## Telemetry
 
-Every tick (from either backend) and every status flip emits an OTLP span to **Argus** (Pantheon's observability god — confirmed live at Tailscale `100.75.161.82`, OTLP `4327` gRPC / `4328` HTTP, feeding Langfuse traces/cost + SigNoz infra) via `ArgusClient` — the first Node/TypeScript OTLP emitter in Pantheon. Fire-and-forget: Argus being unreachable never breaks Heimdall's core health-check function.
+Every tick (from either backend) and every status flip emits an OTLP span to **Argus** (Pantheon's observability god — confirmed live at Tailscale `<build-box-ip>`, OTLP `4327` gRPC / `4328` HTTP, feeding Langfuse traces/cost + SigNoz infra) via `ArgusClient` — the first Node/TypeScript OTLP emitter in Pantheon. Fire-and-forget: Argus being unreachable never breaks Heimdall's core health-check function.
 
 ## What's still deferred
 

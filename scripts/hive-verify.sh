@@ -1,8 +1,9 @@
 #!/bin/zsh
-# heimdall local build verification — runs on "the hive" (dostal@100.75.161.82
-# / thes-mac-studio.lan), which is the build box for this repo per operator
-# directive (2026-08-12): GitHub Actions billing is blocked and is no longer
-# the merge gate for this repo. This script — run on the hive box — is.
+# heimdall local build verification — runs on "the hive" (this operator's own
+# build box, reachable via Tailscale), which is the build box for this repo
+# per operator directive (2026-08-12): GitHub Actions billing is blocked and
+# is no longer the merge gate for this repo. This script — run on the hive
+# box — is.
 #
 # See docs/decisions/DEC-hdl-local-build-verification.md for the full context.
 #
@@ -10,18 +11,20 @@
 #   ref  - branch/tag/sha to verify (default: origin/main)
 #
 # Usage (from anywhere, over SSH):
-#   ssh dostal@100.75.161.82 /Users/dostal/hive-ci/verify-heimdall.sh [ref]
+#   ssh <build-box-user>@${HIVE_BUILD_BOX:-100.75.161.82} /path/to/hive-ci/verify-heimdall.sh [ref]
 #
-# Expects a dedicated build-only checkout at /Users/dostal/hive-ci/heimdall —
-# NOT a dev checkout. This script hard-resets that checkout to `ref` on every
-# run (git reset --hard + git clean -fdx) and never pushes or commits. To
+# Expects a dedicated build-only checkout at $BUILD_DIR (default:
+# /Users/dostal/hive-ci/heimdall, overridable via HIVE_CI_DIR) — NOT a dev
+# checkout. This script hard-resets that checkout to `ref` on every run (git
+# reset --hard + git clean -fdx) and never pushes or commits. To
 # (re-)provision the build checkout:
-#   mkdir -p /Users/dostal/hive-ci && cd /Users/dostal/hive-ci && \
+#   mkdir -p "$HIVE_CI_DIR" && cd "$HIVE_CI_DIR" && \
 #     git clone git@github.com:mdostal/heimdall.git
 
 REF="${1:-origin/main}"
-BUILD_DIR="/Users/dostal/hive-ci/heimdall"
-LOG_DIR="/Users/dostal/hive-ci/logs"
+HIVE_CI_DIR="${HIVE_CI_DIR:-/Users/dostal/hive-ci}"
+BUILD_DIR="${HIVE_CI_DIR}/heimdall"
+LOG_DIR="${HIVE_CI_DIR}/logs"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 LOG_FILE="${LOG_DIR}/heimdall-${TIMESTAMP}.log"
 
