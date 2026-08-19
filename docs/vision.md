@@ -27,7 +27,10 @@ free way to validate that credential type), **Codex**, **Gemini**, **Kimi K3**,
 **OpenRouter** (nests as a gateway with independently-toggleable routes under one
 credential, not a flat lane), and **Ollama** (liveness-only — no auth, no
 degraded/out_of_credit concept for local inference). State persists to a
-**`node:sqlite`** store (`HEIMDALL_DB_PATH`, default in-memory). SLA-verified:
+**`node:sqlite`** store (`HEIMDALL_DB_PATH`, default `~/.local/share/heimdall/heimdall.db`
+via `resolveDefaultDbPath()` — a real per-machine persistent file, not
+in-memory, so the dashboard server, an MCP process, and the CLI can all open
+the same DB at once). SLA-verified:
 status correctness within 10 seconds of an actual state change, *measured* by
 `test/sla-harness/`.
 
