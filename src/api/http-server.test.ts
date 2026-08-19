@@ -763,6 +763,108 @@ test("hdl-unified-dashboard: GET / (dashboard) includes a Settings panel with th
   }
 });
 
+test("hdl-ao-07: GET /agent-onboarding-dismissed defaults to false", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/agent-onboarding-dismissed`);
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).dismissed, false);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-ao-07: POST /agent-onboarding-dismissed persists true, GET reflects it, and GET / renders the panel collapsed", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const setRes = await fetch(`http://localhost:${port}/agent-onboarding-dismissed`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ dismissed: true }),
+    });
+    assert.equal(setRes.status, 200);
+    assert.equal((await setRes.json()).dismissed, true);
+
+    const getRes = await fetch(`http://localhost:${port}/agent-onboarding-dismissed`);
+    assert.equal((await getRes.json()).dismissed, true);
+
+    const pageRes = await fetch(`http://localhost:${port}/`);
+    const body = await pageRes.text();
+    assert.match(
+      body,
+      /id="agent-onboarding-collapsed" style="display:flex;"/,
+      "reload after dismiss must render the panel already collapsed server-side, not rely on client JS alone",
+    );
+    assert.match(body, /id="agent-onboarding-expanded" style="display:none;"/);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-ao-07: POST /agent-onboarding-dismissed with a non-boolean value returns 400 and does not change the setting", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/agent-onboarding-dismissed`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ dismissed: "yes" }),
+    });
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).error, "invalid_dismissed");
+
+    const getRes = await fetch(`http://localhost:${port}/agent-onboarding-dismissed`);
+    assert.equal((await getRes.json()).dismissed, false, "an invalid POST must not change the persisted setting");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-ao-07: GET / (dashboard) first panel has the real, live curl one-liner and heimdall agent init command, not placeholder text", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /curl -fsSL https:\/\/mdostal\.github\.io\/heimdall\/install\.sh \| bash/);
+    assert.match(body, /heimdall agent init/);
+    assert.match(body, /~\/\.claude\/skills\//);
+    assert.match(body, /id="agent-onboarding-panel"/);
+    // Above Fleet Scope: the panel markup must appear earlier in the BODY
+    // than the Fleet Scope heading (the CSS block, which legitimately
+    // contains the substring "Fleet Scope" in a comment, precedes the body
+    // entirely, so this checks the real <h2> heading specifically).
+    assert.ok(
+      body.indexOf("id=\"agent-onboarding-panel\"") < body.indexOf("<h2>Fleet Scope</h2>"),
+      "the get-started panel must render as the first panel, above Fleet Scope",
+    );
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
 test("hdl-rr-03: GET /routing-strategy defaults to 'priority' active with all 4 strategies listed as available", async () => {
   const registry = registryWithOneConfiguredLane();
   const store = new StateStore(":memory:");
@@ -965,7 +1067,15 @@ test("GET / (hdl-ui-01) returns 200 text/html and references /lanes for its data
     const body = await res.text();
     assert.match(body, /<table|<div id="root"/);
     assert.match(body, /fetch\("\/lanes"\)/, "the dashboard must fetch its data from Heimdall's own /lanes endpoint");
-    assert.doesNotMatch(body, /https?:\/\/(?!localhost)/, "no external network requests (CDN scripts/styles etc.)");
+    // hdl-ao-07: the get-started panel legitimately displays a real external
+    // URL as copy-paste text (the live install.sh curl one-liner) — that's
+    // documentation content, not a network call the page itself makes. What
+    // this test actually guards against is the page fetching assets FROM an
+    // external host (CDN scripts/styles/fetches), so it checks those tags
+    // specifically rather than banning any https:// substring in the body.
+    assert.doesNotMatch(body, /<script[^>]+src="https?:\/\/(?!localhost)/, "no external <script src> (CDN scripts)");
+    assert.doesNotMatch(body, /<link[^>]+href="https?:\/\/(?!localhost)/, "no external <link href> (CDN styles)");
+    assert.doesNotMatch(body, /fetch\("https?:\/\/(?!localhost)/, "no external fetch() calls");
   } finally {
     server.close();
     store.close();

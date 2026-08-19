@@ -18,7 +18,7 @@
 
 const KNOWN_THEMES = ["mission-control", "harbor-watch", "terminal"];
 
-export function renderDashboardHtml(activeTheme: string = "mission-control"): string {
+export function renderDashboardHtml(activeTheme: string = "mission-control", agentOnboardingDismissed: boolean = false): string {
   // hdl-unified-dashboard: data-theme is set server-side on the initial
   // response (not left to client JS alone) so the correct theme paints on
   // first render -- no flash of the default theme before JS runs. Mission
@@ -30,6 +30,13 @@ export function renderDashboardHtml(activeTheme: string = "mission-control"): st
   // interpolating an arbitrary string into the HTML attribute.
   const safeTheme = KNOWN_THEMES.includes(activeTheme) ? activeTheme : "mission-control";
   const themeAttr = safeTheme !== "mission-control" ? ` data-theme="${safeTheme}"` : "";
+  // hdl-ao-07: the dismiss state is rendered server-side (same reasoning as
+  // safeTheme/themeAttr just above) so a reload after dismissing lands on
+  // the collapsed state immediately -- no flash of the expanded panel
+  // before client JS runs, and no dependency on localStorage.
+  const onboardingDismissed = agentOnboardingDismissed === true;
+  const onboardingCollapsedDisplay = onboardingDismissed ? "flex" : "none";
+  const onboardingExpandedDisplay = onboardingDismissed ? "none" : "block";
   return `<!doctype html>
 <html lang="en"${themeAttr}>
 <head>
@@ -394,11 +401,51 @@ export function renderDashboardHtml(activeTheme: string = "mission-control"): st
     border-radius: calc(var(--hd-radius) * 1.5);
   }
   .settings-note { font-size: 0.78rem; color: var(--hd-text-faint); margin-top: 0.5rem; }
+
+  /* ---------- Get started / agent onboarding (hdl-ao-07) ---------- */
+  .agent-onboarding-collapsed {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+  .agent-onboarding-cmd {
+    display: block;
+    font-family: var(--hd-font-mono);
+    background: var(--hd-surface-2);
+    color: var(--hd-text);
+    padding: 0.6rem 0.75rem;
+    border-radius: var(--hd-radius);
+    font-size: 0.85rem;
+    overflow-x: auto;
+    white-space: pre;
+    margin: 0.4rem 0 0.9rem;
+  }
+  .agent-onboarding-step-label { font-size: 0.85rem; color: var(--hd-text-muted); }
 </style>
 </head>
 <body>
   <h1>Heimdall — Lane Status <a href="/docs" style="font-size:0.6em;font-weight:400;">Docs &rarr;</a></h1>
   <div class="subtitle">Polls <code>GET /lanes</code> every 5s · manual overrides route through the same ControlAdapter Heimdall already uses for automatic sensing</div>
+
+  <div class="panel" id="agent-onboarding-panel">
+    <div class="agent-onboarding-collapsed" id="agent-onboarding-collapsed" style="display:${onboardingCollapsedDisplay};">
+      <span class="agent-onboarding-step-label">Get started: connect a coding agent to this fleet.</span>
+      <button type="button" id="agent-onboarding-show">Show</button>
+    </div>
+    <div id="agent-onboarding-expanded" style="display:${onboardingExpandedDisplay};">
+      <h2>Get started — connect your agent</h2>
+      <div class="strategy-status">Install the <code>heimdall</code> CLI and register it with Claude Code / Codex so your agent can call this fleet's routing and lane tools directly.</div>
+      <div class="agent-onboarding-step-label">1. Install (detects your harness, registers the MCP server, installs usage skills):</div>
+      <code class="agent-onboarding-cmd">curl -fsSL https://mdostal.github.io/heimdall/install.sh | bash</code>
+      <div class="agent-onboarding-step-label">2. Already have the <code>heimdall</code> CLI? Just re-run onboarding directly:</div>
+      <code class="agent-onboarding-cmd">heimdall agent init</code>
+      <div class="settings-note">This installs 4 usage skills (heimdall-lanes, heimdall-routing, heimdall-models, heimdall-status) to <code>~/.claude/skills/</code> so your agent knows how to call <code>heimdall.lanes.list</code> and friends against this fleet's real, live state. Read-only? Run <code>heimdall agent status</code> instead — it reports without touching anything. See the <a href="/docs">docs</a> for more.</div>
+      <div class="row" style="margin-top:0.75rem;">
+        <button type="button" id="agent-onboarding-dismiss">Dismiss</button>
+      </div>
+    </div>
+  </div>
 
   <div class="panel">
     <h2>Fleet Scope</h2>
@@ -1150,6 +1197,37 @@ export function renderDashboardHtml(activeTheme: string = "mission-control"): st
         document.getElementById("icon-settings-note").textContent =
           "Preference saved. Tray icon updates next time you launch Heimdall; Dock icon needs a rebuild: cd app && cargo tauri build";
       });
+  });
+
+  // Get started / agent onboarding (hdl-ao-07) — dismiss/show toggle,
+  // persisted server-side via AGENT_ONBOARDING_DISMISSED_KEY so it stays
+  // consistent across a plain browser and the desktop app's webview (same
+  // reasoning as the theme/icon settings above). Panel content is static
+  // real copy already rendered server-side, so all this does is flip which
+  // half is visible and tell the server to remember it -- no re-fetch of
+  // panel content needed.
+  function setAgentOnboardingDismissed(dismissed) {
+    return fetch("/agent-onboarding-dismissed", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ dismissed: dismissed })
+    }).then(function (res) { return res.json(); });
+  }
+
+  document.getElementById("agent-onboarding-dismiss").addEventListener("click", function () {
+    setAgentOnboardingDismissed(true).then(function (result) {
+      if (result.dismissed !== true) return;
+      document.getElementById("agent-onboarding-expanded").style.display = "none";
+      document.getElementById("agent-onboarding-collapsed").style.display = "flex";
+    });
+  });
+
+  document.getElementById("agent-onboarding-show").addEventListener("click", function () {
+    setAgentOnboardingDismissed(false).then(function (result) {
+      if (result.dismissed !== false) return;
+      document.getElementById("agent-onboarding-collapsed").style.display = "none";
+      document.getElementById("agent-onboarding-expanded").style.display = "block";
+    });
   });
 
   loadRoutingStrategy();
