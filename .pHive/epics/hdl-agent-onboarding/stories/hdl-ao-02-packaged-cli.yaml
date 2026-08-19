@@ -1,0 +1,82 @@
+id: hdl-ao-02-packaged-cli
+epic: hdl-agent-onboarding
+title: Heimdall becomes a real packaged npm CLI (pantheon-heimdall, bin heimdall)
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [hdl-ao-01-shared-persistent-state]
+parallel_allowed: false
+
+description: >
+  Gives Heimdall its first-ever packaged CLI entrypoint. Bumps
+  engines.node to >=22.13.0 and drops --experimental-sqlite from every
+  script (confirmed unneeded as of Node 22.13/23.4). Adds bin/heimdall.js,
+  a spawnSync shim targeting the real compiled path
+  dist/src/api/cli.js (tsconfig's rootDir/outDir preserves the src/
+  prefix — not a bare dist/cli.js, corrected in collaborative review).
+  Wires package.json's "bin" and "name": "pantheon-heimdall" (confirmed
+  available on npm; installed command stays plain heimdall). Verifies a
+  real npm pack --dry-run tarball.
+
+acceptance_criteria:
+  - engines.node is ">=22.13.0"; --experimental-sqlite is removed from
+    every package.json script.
+  - bin/heimdall.js exists, spawnSync's process.execPath against
+    dist/src/api/cli.js, and behaves identically on macOS/Linux/Windows
+    by construction (no shebang-flag dependency).
+  - package.json has "bin": {"heimdall": "bin/heimdall.js"} and
+    "name": "pantheon-heimdall".
+  - npm pack --dry-run produces a tarball containing dist/, bin/, and no
+    dev-only files (tsx/typescript are devDependencies, not runtime deps
+    of the published package).
+  - Running the compiled shim directly reproduces today's `npm run cli`/
+    `npm run mcp` behavior (same dispatch, same stdio MCP handshake).
+
+steps:
+  - id: s1
+    description: Bump engines.node, drop --experimental-sqlite from all
+      scripts, confirm `npm test`/`npm run build` still pass.
+    agent: developer
+  - id: s2
+    description: Add bin/heimdall.js and package.json "bin"/"name" fields.
+    agent: developer
+  - id: s3
+    description: Real `npm pack --dry-run` + tarball content inspection;
+      run the compiled shim directly and confirm parity with existing
+      npm run cli/mcp scripts.
+    agent: developer
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - package.json
+    - tsconfig.json
+    - src/api/cli.ts
+  tech_stack: [typescript, node, npm]
+
+design_decisions:
+  - decision: bin/heimdall.js is a spawnSync shim over compiled dist/, not
+      a shebang-flag entrypoint or an NODE_OPTIONS-based one.
+    rationale: Confirmed in Phase A research — shebang flag-parsing breaks
+      on Windows (npm's cmd-shim doesn't forward shebang flags at all);
+      NODE_OPTIONS leaks into spawned child processes. A JS shim is the
+      only option that behaves identically across platforms.
+  - decision: Extend src/api/cli.ts's existing dispatcher rather than
+      inventing a new CLI router.
+    rationale: src/api/cli.ts already argv-dispatches route/route-outcome/
+      lanes (npm run cli) — the first design-discussion draft wrongly
+      assumed no dispatcher existed; corrected in collaborative review.
+
+risks:
+  - severity: medium
+    description: First-ever npm packaging in this repo's history; real risk
+      of a missing file in the published tarball that only surfaces on a
+      real global install, not in local dev.
+    mitigation: Real npm pack --dry-run inspection (step s3), not assumed
+      correct from package.json alone.
+
+metric:
+  applies: false
+  justification: Packaging/build-tooling substrate with no standalone
+    user-facing behavior; its value is only observable once hdl-ao-05/06
+    (distribution + Pages) make it reachable.

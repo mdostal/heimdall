@@ -20,7 +20,13 @@
 //
 // Only up/down are possible — no degraded, no out_of_credit, no reset_at.
 // Confirmed: local, unauthenticated inference has no quota/rate-limit/
-// billing concept to signal those states honestly.
+// billing concept to signal those states honestly. error_code is still
+// meaningful for the two down cases that DO apply here — network_error
+// (couldn't reach it) vs unknown (reached it, got something unexpected) —
+// just never rate_limit/quota_exceeded/billing_error/auth_failed, which
+// genuinely don't exist for local unauthenticated inference.
+
+import type { ErrorCode } from "../../status-model.js";
 
 export type ProbeStatusValue = "up" | "down" | "out_of_credit" | "degraded";
 
@@ -28,6 +34,7 @@ export interface ProbeResult {
   status: ProbeStatusValue;
   reset_at: string | null;
   reason: string | null;
+  error_code: ErrorCode | null;
 }
 
 const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434";
@@ -51,11 +58,12 @@ export async function probeOllamaLane(
       status: "down",
       reset_at: null,
       reason: `probe request failed: ${err instanceof Error ? err.message : String(err)}`,
+      error_code: "network_error",
     };
   }
 
   if (!response.ok) {
-    return { status: "down", reset_at: null, reason: `unexpected status ${response.status}` };
+    return { status: "down", reset_at: null, reason: `unexpected status ${response.status}`, error_code: "unknown" };
   }
 
   try {
@@ -65,8 +73,9 @@ export async function probeOllamaLane(
       status: "down",
       reset_at: null,
       reason: `malformed response body: ${err instanceof Error ? err.message : String(err)}`,
+      error_code: "unknown",
     };
   }
 
-  return { status: "up", reset_at: null, reason: null };
+  return { status: "up", reset_at: null, reason: null, error_code: null };
 }

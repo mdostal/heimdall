@@ -23,8 +23,8 @@ CREATE INDEX IF NOT EXISTS idx_routing_decisions_recorded_at
   ON routing_decisions(recorded_at DESC);
 `;
 
-type JsonPrimitive = string | number | boolean | null;
-type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+export type JsonPrimitive = string | number | boolean | null;
+export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 type JsonObject = { [key: string]: JsonValue };
 
 export interface RouteRequestSummary {
@@ -252,6 +252,14 @@ export class RouteLedger {
               reportedAt: row.reported_at,
             },
     };
+  }
+
+  /** hdl-ot-03: grouped decision counts by result ("lane" | "no_route") — used by GET /metrics. */
+  getDecisionCounts(): Array<{ result: RouteDecisionResult; count: number }> {
+    const rows = this.db
+      .prepare(`SELECT result, COUNT(*) as count FROM routing_decisions GROUP BY result`)
+      .all() as unknown as Array<{ result: RouteDecisionResult; count: number }>;
+    return rows;
   }
 
   close(): void {

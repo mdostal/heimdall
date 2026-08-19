@@ -32,6 +32,7 @@ function fakePipeline(refresh: (lane: Lane) => Promise<void>): LanePipeline {
 function seedStore(
   status: "up" | "down" | "degraded" | "out_of_credit",
   reset_at: string | null = null,
+  error_code: "rate_limit" | "quota_exceeded" | "billing_error" | "auth_failed" | "server_error" | "network_error" | "unknown" | null = null,
 ): StateStore {
   const store = new StateStore(":memory:");
   store.upsertLane({ lane_id: LANE.lane_id, provider: LANE.provider, credential_ref: LANE.credential_ref });
@@ -40,6 +41,7 @@ function seedStore(
     status,
     reset_at,
     reason: null,
+    error_code,
     signal_source: "active_probe",
     observed_at: "2026-07-25T12:00:00.000Z",
   });
@@ -353,6 +355,76 @@ test("reset_at-aware delay: a lane that recovers to healthy reverts to the flat 
 
   assert.equal(delays.length, 2);
   assert.equal(delays[1], 5_000, "a recovered (healthy) lane always gets the flat interval, unaffected by the pre-recovery reset_at");
+  store.close();
+});
+
+test("hdl-error-taxonomy: an auth_failed lane backs off to the fixed long interval, not the flat 5s or a (nonexistent) reset_at", async () => {
+  const store = seedStore("down", null, "auth_failed");
+  const delays: number[] = [];
+  const scheduler = new InProcessScheduler({
+    lane: LANE,
+    pipeline: fakePipeline(async () => {}),
+    store,
+    argus: fakeArgus(),
+    nowImpl: () => "2026-07-25T12:00:00.000Z",
+    setTimeoutImpl: ((fn: () => void, ms: number) => {
+      delays.push(ms);
+      return {} as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+  });
+
+  scheduler.start();
+  await scheduler.poll();
+
+  assert.equal(delays.length, 2);
+  assert.equal(delays[1], 5 * 60_000, "expected the fixed 5-minute auth_failed backoff, not the flat 5s interval");
+  store.close();
+});
+
+test("hdl-error-taxonomy: a suspect lane with any OTHER error_code is unaffected — still gets the flat interval when reset_at is unknown", async () => {
+  const store = seedStore("degraded", null, "rate_limit");
+  const delays: number[] = [];
+  const scheduler = new InProcessScheduler({
+    lane: LANE,
+    pipeline: fakePipeline(async () => {}),
+    store,
+    argus: fakeArgus(),
+    nowImpl: () => "2026-07-25T12:00:00.000Z",
+    setTimeoutImpl: ((fn: () => void, ms: number) => {
+      delays.push(ms);
+      return {} as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+  });
+
+  scheduler.start();
+  await scheduler.poll();
+
+  assert.equal(delays.length, 2);
+  assert.equal(delays[1], 5_000, "rate_limit (and every other non-auth_failed code) must not trigger the backoff — the SLA-driven fine cadence still applies");
+  store.close();
+});
+
+test("hdl-error-taxonomy: an operator's manual_reset_at wins outright over the auth_failed backoff", async () => {
+  const store = seedStore("down", null, "auth_failed");
+  store.setManualResetAt(LANE.lane_id, "2026-07-25T12:10:00.000Z"); // operator: "I'll fix this in 10 minutes"
+  const delays: number[] = [];
+  const scheduler = new InProcessScheduler({
+    lane: LANE,
+    pipeline: fakePipeline(async () => {}),
+    store,
+    argus: fakeArgus(),
+    nowImpl: () => "2026-07-25T12:00:00.000Z",
+    setTimeoutImpl: ((fn: () => void, ms: number) => {
+      delays.push(ms);
+      return {} as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+  });
+
+  scheduler.start();
+  await scheduler.poll();
+
+  assert.equal(delays.length, 2);
+  assert.equal(delays[1], 10 * 60_000, "the operator's explicit manual_reset_at (10 minutes) must win over the automatic 5-minute auth_failed backoff");
   store.close();
 });
 

@@ -1,0 +1,54 @@
+name: hdl-own-telemetry
+title: Heimdall's own local telemetry — Argus becomes a consumer, not the source of truth
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: dev
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [observability, medium-scope]
+  roster: [technical-writer]
+  per_tag_reasoning:
+    observability: Heimdall currently has zero local record of actuation results, rotation events, or model substitutions — only Argus OTEL spans.
+    medium-scope: one new table, a thin recorder/composite pair, one new endpoint, one dashboard panel — no architecture redesign.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (autonomous loop; operator gave explicit architectural direction 2026-08-14)
+    hv_planning: not_applicable (medium scope, single-operator execution)
+    structured_outline: not_applicable (medium scope)
+
+description: >
+  Per operator directive (2026-08-14): Heimdall needs its own self-contained
+  metric tracking, operating in a silo, independent of Argus — Argus is "just
+  another OTEL dashboard, like PostHog," a downstream consumer, not the
+  source of truth. Audit found actuation results, rotation events, and model
+  substitutions currently have zero local record (Argus-only, fire-and-forget
+  OTEL push). Adds a telemetry_events table, a LocalTelemetryRecorder
+  composed alongside ArgusClient (additive fan-out, not a replacement),
+  GET /metrics in Prometheus text format, and a dashboard telemetry panel.
+
+stories:
+  - id: hdl-ot-01-telemetry-events-table-and-recorder
+    title: telemetry_events table + LocalTelemetryRecorder + CompositeTelemetryEmitter
+    complexity: medium
+    depends_on: []
+  - id: hdl-ot-02-instrument-rotation-and-model-substitution
+    title: Record rotation events and model substitutions locally (route-selector.ts, rotation-controller.ts)
+    complexity: low
+    depends_on: [hdl-ot-01-telemetry-events-table-and-recorder]
+  - id: hdl-ot-03-metrics-endpoint
+    title: "GET /metrics — Prometheus text format, aggregated from local state"
+    complexity: medium
+    depends_on: [hdl-ot-02-instrument-rotation-and-model-substitution]
+  - id: hdl-ot-04-dashboard-telemetry-panel
+    title: Dashboard Telemetry panel
+    complexity: low
+    depends_on: [hdl-ot-03-metrics-endpoint]
+  - id: hdl-ot-05-verify-and-ship
+    title: Verify, CHANGELOG, hive-verify, merge to dev
+    complexity: low
+    depends_on: [hdl-ot-04-dashboard-telemetry-panel]

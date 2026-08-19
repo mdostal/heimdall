@@ -53,3 +53,23 @@ test("a non-string reset_at is dropped to null rather than passed through", () =
   const result = resolveStatus({ status: "up", reset_at: 12345 });
   assert.equal(result.reset_at, null);
 });
+
+test("hdl-error-taxonomy: a recognized error_code passes through", () => {
+  const result = resolveStatus({ status: "degraded", error_code: "rate_limit" });
+  assert.equal(result.error_code, "rate_limit");
+});
+
+test("hdl-error-taxonomy: error_code defaults to null when absent", () => {
+  const result = resolveStatus({ status: "up" });
+  assert.equal(result.error_code, null);
+});
+
+test("hdl-error-taxonomy: an unrecognized error_code string is dropped to null rather than passed through", () => {
+  const result = resolveStatus({ status: "degraded", error_code: "made_up_code" });
+  assert.equal(result.error_code, null);
+});
+
+test("hdl-error-taxonomy: every error branch (malformed input, unrecognized status) still reports error_code: null, never undefined", () => {
+  assert.equal(resolveStatus(null).error_code, null);
+  assert.equal(resolveStatus({ status: "on_fire" }).error_code, null);
+});

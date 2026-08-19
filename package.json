@@ -1,20 +1,27 @@
 {
-  "name": "heimdall",
-  "version": "0.20.0",
-  "private": true,
+  "name": "pantheon-heimdall",
+  "version": "0.33.0",
   "description": "Pantheon's health-aware LLM/lane router \u2014 v1 sense (lane health/status) + v2 actuate (Multica control).",
   "type": "module",
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=22.13.0"
   },
+  "bin": {
+    "heimdall": "bin/heimdall.js"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "agent_skills"
+  ],
   "scripts": {
-    "dev": "node --experimental-sqlite --env-file-if-exists=.env --import tsx src/main.ts",
-    "dev:http-only": "node --experimental-sqlite --env-file-if-exists=.env --import tsx src/api/http-server.ts",
-    "cli": "node --experimental-sqlite --env-file-if-exists=.env --import tsx src/api/cli.ts",
-    "mcp": "node --experimental-sqlite --env-file-if-exists=.env --import tsx src/api/mcp-server.ts",
-    "test": "node --experimental-sqlite --import tsx --test \"src/**/*.test.ts\" \"test/**/*.test.ts\" \"hive/**/*.test.ts\"",
-    "sla-report": "node --experimental-sqlite --import tsx test/sla-harness/index.ts",
-    "build": "tsc -p tsconfig.json"
+    "dev": "node --env-file-if-exists=.env --import tsx src/main.ts",
+    "dev:http-only": "node --env-file-if-exists=.env --import tsx src/api/http-server.ts",
+    "cli": "node --env-file-if-exists=.env --import tsx src/api/cli.ts",
+    "mcp": "node --env-file-if-exists=.env --import tsx src/api/mcp-server.ts",
+    "test": "node --import tsx --test \"src/**/*.test.ts\" \"test/**/*.test.ts\" \"hive/**/*.test.ts\"",
+    "sla-report": "node --import tsx test/sla-harness/index.ts",
+    "build": "rm -rf dist && tsc -p tsconfig.json"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
@@ -29,6 +36,8 @@
     "@opentelemetry/resources": "^2.10.0",
     "@opentelemetry/sdk-node": "^0.221.0",
     "@opentelemetry/semantic-conventions": "^1.43.0",
+    "marked": "^18.0.9",
+    "mermaid": "^11.16.1",
     "yaml": "^2.9.0"
   }
 }

@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PolicyLoader, PolicyValidationError } from "./policy-loader.js";
+import { PolicyLoader, PolicyValidationError, resolveDefaultPolicyPath } from "./policy-loader.js";
 
 const VALID_POLICY = `version: "1.0"
 task_type_weights:
@@ -48,6 +48,28 @@ test("load reads the checked-in routing policy by default", () => {
   assert.equal(policy.headroom_floor, 1000);
   assert.equal(policy.cost_preference, "balanced");
   assert.deepEqual(policy.experiments.arms.control, { split: 1 });
+});
+
+test("hdl-desktop-app: resolveDefaultPolicyPath prefers HEIMDALL_REPO_ROOT over cwd", () => {
+  const withOverride = resolveDefaultPolicyPath({ HEIMDALL_REPO_ROOT: "/bundled/heimdall" }, "/some/other/cwd");
+  assert.equal(withOverride, join("/bundled/heimdall", "config", "routing-policy.yaml"));
+});
+
+test("hdl-desktop-app: resolveDefaultPolicyPath falls back to cwd when HEIMDALL_REPO_ROOT is unset and cwd is a real checkout", () => {
+  const checkout = mkdtempSync(join(tmpdir(), "heimdall-checkout-"));
+  mkdirSync(join(checkout, "config"), { recursive: true });
+  writeFileSync(join(checkout, "config", "routing-policy.yaml"), VALID_POLICY, "utf8");
+
+  const withoutOverride = resolveDefaultPolicyPath({}, checkout);
+  assert.equal(withoutOverride, join(checkout, "config", "routing-policy.yaml"));
+});
+
+test("hdl-ao-01: resolveDefaultPolicyPath falls back to a fixed per-machine config dir when neither HEIMDALL_REPO_ROOT nor a real cwd checkout exist", () => {
+  const cwdWithNoConfig = mkdtempSync(join(tmpdir(), "heimdall-no-checkout-"));
+  const home = mkdtempSync(join(tmpdir(), "heimdall-home-"));
+
+  const resolved = resolveDefaultPolicyPath({}, cwdWithNoConfig, home);
+  assert.equal(resolved, join(home, ".config", "heimdall", "routing-policy.yaml"));
 });
 
 test("load returns a typed policy from valid YAML", () => {

@@ -1,0 +1,55 @@
+id: hdl-ot-01-telemetry-events-table-and-recorder
+epic: hdl-own-telemetry
+title: telemetry_events table + LocalTelemetryRecorder + CompositeTelemetryEmitter
+status: pending
+complexity: medium
+methodology: classic
+depends_on: []
+
+description: |
+  Add `telemetry_events(id, event_type, labels, occurred_at)` to state-store.ts
+  (JSON-stringified labels, matching model_catalog's simplicity). Add
+  `recordTelemetryEvent(event_type, labels, occurred_at?)` and
+  `getTelemetryEventCounts(event_type?)` query methods.
+
+  Add src/core/telemetry/local-recorder.ts: `LocalTelemetryRecorder implements
+  ArgusEmitter` — emitTick/emitStatusFlip/emitActuationResult all write to
+  telemetry_events (tick intentionally NOT persisted — see design-discussion
+  §3 — only emitStatusFlip and emitActuationResult record).
+
+  Add src/core/telemetry/composite-emitter.ts: `CompositeTelemetryEmitter
+  implements ArgusEmitter` wrapping an array of ArgusEmitter — calls every
+  method on every emitter in the array, catching+logging (never throwing) if
+  any one fails, matching this codebase's fire-and-forget precedent.
+
+  main.ts: `const argus = options.argus ?? new ArgusClient();` becomes
+  `const telemetry = new CompositeTelemetryEmitter([new
+  LocalTelemetryRecorder(store), options.argus ?? new ArgusClient()]);` —
+  every existing call site keeps passing what's now `telemetry` where it used
+  to pass `argus` (parameter name in those files can stay `argus:
+  ArgusEmitter` unchanged — only the value constructed in main.ts changes).
+
+acceptance_criteria:
+  - "Given emitActuationResult is called on a LocalTelemetryRecorder, when telemetry_events is queried, then one row exists with event_type='actuation_result' and the labels JSON includes laneId/provider/success"
+  - "Given a CompositeTelemetryEmitter wrapping [local, argus], when emitStatusFlip is called, then BOTH local.emitStatusFlip and argus.emitStatusFlip are called with identical params"
+  - "Given one emitter in the composite throws, when any emit* method is called, then the other emitter(s) still receive the call and no exception propagates to the caller"
+  - "Given composeService() runs end-to-end, when an actuation happens, then telemetry_events has a row AND Argus still receives its span (verified via a mock ArgusEmitter in the test)"
+
+steps:
+  - id: implement
+    description: Add the table, recorder, composite, and the one-line composeService() wiring change
+    agent: developer
+  - id: test
+    description: Unit tests for LocalTelemetryRecorder, CompositeTelemetryEmitter, and StateStore's new methods
+    agent: tester
+    depends_on: [implement]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - path: src/core/telemetry/argus-client.ts
+      purpose: the ArgusEmitter interface both LocalTelemetryRecorder and CompositeTelemetryEmitter implement
+    - path: src/core/state-store.ts
+      purpose: SCHEMA constant + method-per-table pattern to follow for telemetry_events
+    - path: src/main.ts
+      purpose: the one construction-site change (composeService())

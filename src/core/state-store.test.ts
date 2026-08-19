@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { StateStore } from "./state-store.js";
+import { StateStore, resolveDefaultDbPath } from "./state-store.js";
 
 test("a declared lane with no recorded status reports down/unconfigured (REQ-07)", () => {
   const store = new StateStore(":memory:");
@@ -39,6 +39,44 @@ test("recordStatus() never violates the lanes FK, even without a prior upsertLan
 
   const status = store.getCurrentStatus("never-upserted");
   assert.equal(status?.status, "up");
+  store.close();
+});
+
+test("hdl-error-taxonomy: error_code round-trips through recordStatus/getCurrentStatus", () => {
+  const store = new StateStore(":memory:");
+  store.recordStatus({
+    lane_id: "claude@mathew.dostal",
+    status: "degraded",
+    reset_at: null,
+    reason: "rate limited",
+    error_code: "rate_limit",
+    signal_source: "active_probe",
+    observed_at: "2026-07-25T12:00:00.000Z",
+  });
+
+  assert.equal(store.getCurrentStatus("claude@mathew.dostal")?.error_code, "rate_limit");
+  store.close();
+});
+
+test("hdl-error-taxonomy: error_code defaults to null when the caller omits it entirely (backward-compatible call sites)", () => {
+  const store = new StateStore(":memory:");
+  store.recordStatus({
+    lane_id: "claude@mathew.dostal",
+    status: "up",
+    reset_at: null,
+    reason: null,
+    signal_source: "active_probe",
+    observed_at: "2026-07-25T12:00:00.000Z",
+  });
+
+  assert.equal(store.getCurrentStatus("claude@mathew.dostal")?.error_code, null);
+  store.close();
+});
+
+test("hdl-error-taxonomy: a lane with no status recorded yet reports error_code: null (REQ-07 unconfigured fallback)", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+  assert.equal(store.getCurrentStatus("claude@mathew.dostal")?.error_code, null);
   store.close();
 });
 
@@ -192,6 +230,38 @@ test("setManualOverride persists and getManualOverride reads it back (hdl-lo-01)
   store.close();
 });
 
+test("hdl-override-reason: getOverrideReason defaults to null, setManualOverride persists and reads it back", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+
+  assert.equal(store.getOverrideReason("claude@mathew.dostal"), null);
+
+  store.setManualOverride("claude@mathew.dostal", "disabled", "cost review in progress");
+  assert.equal(store.getOverrideReason("claude@mathew.dostal"), "cost review in progress");
+  store.close();
+});
+
+test("hdl-override-reason: setManualOverride(laneId, null, reason) discards the reason -- a reason with no active override is meaningless", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+
+  store.setManualOverride("claude@mathew.dostal", "disabled", "cost review in progress");
+  store.setManualOverride("claude@mathew.dostal", null, "this should be discarded");
+
+  assert.equal(store.getManualOverride("claude@mathew.dostal"), null);
+  assert.equal(store.getOverrideReason("claude@mathew.dostal"), null);
+  store.close();
+});
+
+test("hdl-override-reason: reason defaults to null when omitted", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+
+  store.setManualOverride("claude@mathew.dostal", "enabled");
+  assert.equal(store.getOverrideReason("claude@mathew.dostal"), null);
+  store.close();
+});
+
 test("setManualOverride works even when the lane was never upserted first (guards row existence like recordStatus)", () => {
   const store = new StateStore(":memory:");
 
@@ -316,6 +386,48 @@ test("a StateStore opened against a DB file created before manual_reset_at exist
       store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
       store.setManualResetAt("claude@mathew.dostal", "2026-08-13T18:00:00.000Z");
       assert.equal(store.getManualResetAt("claude@mathew.dostal"), "2026-08-13T18:00:00.000Z");
+      store.close();
+    });
+  } finally {
+    fs.rmSync(dbPath, { force: true });
+  }
+});
+
+test("hdl-error-taxonomy: a StateStore opened against a DB file created before error_code existed does not crash (defensive migration)", () => {
+  // Simulate a pre-hdl-error-taxonomy database — lane_status_history exists
+  // but has no error_code column yet.
+  const dbPath = path.join(os.tmpdir(), `heimdall-migration-test-error-code-${Date.now()}.sqlite`);
+  const legacyDb = new DatabaseSync(dbPath);
+  legacyDb.exec(`
+    CREATE TABLE lanes (
+      lane_id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      credential_ref TEXT NOT NULL
+    );
+    CREATE TABLE lane_status_history (
+      lane_id TEXT NOT NULL REFERENCES lanes(lane_id),
+      status TEXT NOT NULL,
+      reset_at TEXT,
+      reason TEXT,
+      signal_source TEXT NOT NULL,
+      observed_at TEXT NOT NULL
+    );
+  `);
+  legacyDb.close();
+
+  try {
+    assert.doesNotThrow(() => {
+      const store = new StateStore(dbPath);
+      store.recordStatus({
+        lane_id: "claude@mathew.dostal",
+        status: "degraded",
+        reset_at: null,
+        reason: "rate limited",
+        error_code: "rate_limit",
+        signal_source: "active_probe",
+        observed_at: "2026-08-16T00:00:00.000Z",
+      });
+      assert.equal(store.getCurrentStatus("claude@mathew.dostal")?.error_code, "rate_limit");
       store.close();
     });
   } finally {
@@ -459,4 +571,77 @@ test("hdl-mc-01: a StateStore opened against a DB file created before model_cata
   } finally {
     fs.rmSync(dbPath, { force: true });
   }
+});
+
+test("hdl-ot-01: recordTelemetryEvent + listRecentTelemetryEvents round-trip labels as an object, newest first", () => {
+  const store = new StateStore(":memory:");
+  store.recordTelemetryEvent("rotation_event", { provider: "claude", kind: "capped" }, "2026-08-14T00:00:00.000Z");
+  store.recordTelemetryEvent("rotation_event", { provider: "claude", kind: "rotated" }, "2026-08-14T00:00:01.000Z");
+
+  const events = store.listRecentTelemetryEvents();
+  assert.equal(events.length, 2);
+  assert.equal(events[0].labels.kind, "rotated", "newest first");
+  assert.equal(events[1].labels.kind, "capped");
+  store.close();
+});
+
+test("hdl-ot-01: getTelemetryEventCounts groups by distinct label combination within one event type", () => {
+  const store = new StateStore(":memory:");
+  store.recordTelemetryEvent("actuation_result", { provider: "claude", success: "true" });
+  store.recordTelemetryEvent("actuation_result", { provider: "claude", success: "true" });
+  store.recordTelemetryEvent("actuation_result", { provider: "claude", success: "false" });
+  store.recordTelemetryEvent("model_substitution", { provider: "gemini" }); // different event_type, must not leak in
+
+  const counts = store.getTelemetryEventCounts("actuation_result");
+  assert.equal(counts.length, 2);
+  const bySuccess = Object.fromEntries(counts.map((c) => [c.labels.success, c.count]));
+  assert.equal(bySuccess.true, 2);
+  assert.equal(bySuccess.false, 1);
+  store.close();
+});
+
+test("hdl-ot-01: getTelemetryEventCounts for an event type with zero events returns an empty array, never a crash", () => {
+  const store = new StateStore(":memory:");
+  assert.deepEqual(store.getTelemetryEventCounts("rotation_event"), []);
+  store.close();
+});
+
+test("hdl-ao-01: resolveDefaultDbPath honors HEIMDALL_DB_PATH when set", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "heimdall-home-"));
+  const resolved = resolveDefaultDbPath({ HEIMDALL_DB_PATH: "/custom/path/heimdall.db" }, home);
+  assert.equal(resolved, "/custom/path/heimdall.db");
+});
+
+test("hdl-ao-01: resolveDefaultDbPath falls back to a fixed per-machine path under homedir when HEIMDALL_DB_PATH is unset", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "heimdall-home-"));
+  const resolved = resolveDefaultDbPath({}, home);
+  assert.equal(resolved, path.join(home, ".local", "share", "heimdall", "heimdall.db"));
+});
+
+test("hdl-ao-01: resolveDefaultDbPath creates the parent directory if it doesn't exist", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "heimdall-home-"));
+  const resolved = resolveDefaultDbPath({}, home);
+  assert.ok(fs.existsSync(path.dirname(resolved)));
+  // A real StateStore can actually open a file at the resolved path — the
+  // whole point of resolving this default instead of ":memory:".
+  const store = new StateStore(resolved);
+  store.close();
+  assert.ok(fs.existsSync(resolved));
+  fs.rmSync(path.dirname(resolved), { recursive: true, force: true });
+});
+
+test("hdl-ao-01: resolveDefaultDbPath is idempotent when the parent directory already exists", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "heimdall-home-"));
+  resolveDefaultDbPath({}, home);
+  assert.doesNotThrow(() => resolveDefaultDbPath({}, home));
+});
+
+test("hdl-ao-01: StateStore enables WAL journal mode on a real database file", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "heimdall-home-"));
+  const dbPath = resolveDefaultDbPath({}, home);
+  const store = new StateStore(dbPath);
+  const row = store.database.prepare("PRAGMA journal_mode").get() as unknown as { journal_mode: string };
+  assert.equal(row.journal_mode, "wal");
+  store.close();
+  fs.rmSync(path.dirname(dbPath), { recursive: true, force: true });
 });

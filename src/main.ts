@@ -17,7 +17,7 @@
 
 import { buildLaneRegistry, createHttpServer, type RefreshLaneFn } from "./api/http-server.js";
 import type { Server } from "node:http";
-import { StateStore } from "./core/state-store.js";
+import { StateStore, resolveDefaultDbPath } from "./core/state-store.js";
 import type { LaneRegistry } from "./core/lane-registry.js";
 import {
   LanePipeline,
@@ -30,6 +30,8 @@ import {
   type ProviderAdapters,
 } from "./core/lane-pipeline.js";
 import { ArgusClient, startArgusSdk, type ArgusEmitter } from "./core/telemetry/argus-client.js";
+import { LocalTelemetryRecorder } from "./core/telemetry/local-recorder.js";
+import { CompositeTelemetryEmitter } from "./core/telemetry/composite-emitter.js";
 import { MulticaAutopilotScheduler } from "./core/scheduler/multica-autopilot-scheduler.js";
 import { InProcessScheduler } from "./core/scheduler/in-process-scheduler.js";
 import type { CommandRunner } from "./core/scheduler/command-runner.js";
@@ -123,10 +125,18 @@ function buildMulticaActuationStack(
 export function composeService(options: ComposeServiceOptions = {}): ComposedService {
   const port = options.port ?? Number(process.env.PORT ?? 4870);
   const env = options.env ?? process.env;
-  const argus = options.argus ?? new ArgusClient();
 
   const registry = buildLaneRegistry(env);
-  const store = new StateStore(env.HEIMDALL_DB_PATH ?? ":memory:");
+  const store = new StateStore(resolveDefaultDbPath(env));
+
+  // hdl-ot-01: Heimdall's own local record (telemetry_events) is the source
+  // of truth; Argus is one downstream consumer of the same facts, composed
+  // alongside it — never the only place they exist. Every existing call
+  // site below keeps its `argus: ArgusEmitter`-typed parameter unchanged.
+  const argus = new CompositeTelemetryEmitter([
+    new LocalTelemetryRecorder(store),
+    options.argus ?? new ArgusClient(),
+  ]);
 
   const resolver: LaneAgentResolver = new StaticLaneAgentResolver(env);
   const multicaStack = buildMulticaActuationStack(env, options.fetchImpl);

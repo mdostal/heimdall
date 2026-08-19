@@ -1,8 +1,8 @@
 # Heimdall
 
-**The health-aware lane gateway for [Pantheon](https://github.com/mdostal/pantheon-v2).**
+**The health-aware lane gateway and router for [Pantheon](https://github.com/mdostal/pantheon-v2).**
 
-Heimdall watches every LLM/runtime *lane* — a `provider × account × runtime` triple — reports whether each one is **up, down, out of credit, or degraded**, and actuates on that signal by disabling or re-enabling a lane's mapped Multica agents.
+Heimdall watches every LLM/runtime *lane* — a `provider × account × runtime` triple — reports whether each one is **up, down, out of credit, or degraded**, routes tasks to the best healthy one via a pluggable strategy (including a scored, A/B-testable strategy with outcome feedback), and actuates on that signal by disabling or re-enabling a lane's mapped Multica agents.
 
 ## What & Why
 
@@ -10,9 +10,9 @@ Agent fleets stall for boring reasons: one account hits its weekly cap while oth
 
 ## Role in Pantheon
 
-Heimdall is one god in **Pantheon**, the host of your agent ecosystem. It reads and actuates the orchestration substrate — **Multica** — and schedules its own health probes as **Multica autopilots**. 
+Heimdall is one god in **Pantheon**, the host of your agent ecosystem. It reads and actuates the orchestration substrate — **Multica** — and schedules its own health probes as **Multica autopilots**.
 
-Sibling gods: **Auriga** (router), **Vesta** (config), **Portunus** (secrets), and **Argus** (telemetry).
+Sibling gods: **Auriga** (router/orchestrator, consumes `GET /available-route`/`POST /route`), **Vesta** (config), **Portunus** (secrets — future). Heimdall keeps its own local metrics (`GET /metrics`); **Argus** is one optional OTEL consumer of them, not the source of truth.
 
 ## Architecture
 
@@ -67,4 +67,13 @@ Heimdall is open-source (MIT). We welcome contributions!
 
 - **Vision:** [vision.md](vision.md)
 - **Contribute:** See [CONTRIBUTING.md](../CONTRIBUTING.md)
-- **Support:** Sponsor on [GitHub](https://github.com/sponsors/mdostal) or [Buy Me a Coffee](https://www.buymeacoffee.com/mdostal)
+
+### Support this project
+
+Heimdall is free and built in the open by [Mathew Dostal](https://github.com/mdostal). If it's useful to you, here's how to help out:
+
+- **Use it** — run Heimdall, open issues, send PRs.
+- **Hire me to consult** — multi-agent orchestration, LLM infra, or anything adjacent: [mathew.dostal@gmail.com](mailto:mathew.dostal@gmail.com).
+- **Work with me** — open to collaborating on Pantheon or related projects, same email.
+- **Buy a coffee** — if you just like the tools or the content, that's appreciated too: [Buy Me a Coffee](https://www.buymeacoffee.com/mdostal).
+- **Sponsor** — [GitHub Sponsors](https://github.com/sponsors/mdostal).

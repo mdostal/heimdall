@@ -7,8 +7,35 @@
 // lane reports until its first real status is recorded by the signal
 // pipeline (lane-pipeline.ts, lhs-03f).
 
+import { mkdirSync } from "node:fs";
+import { homedir as osHomedir } from "node:os";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { LaneStatus, LaneStatusValue, SignalSource } from "./status-model.js";
+import type { ErrorCode, LaneStatus, LaneStatusValue, SignalSource } from "./status-model.js";
+
+// hdl-ao-01 — same shape as resolveDefaultPolicyPath (routing/policy-loader.ts):
+// honors HEIMDALL_DB_PATH when explicitly set, otherwise resolves to a fixed
+// per-machine path under the user's home directory (XDG-style data dir),
+// creating the parent directory if it doesn't exist yet. Before this, every
+// one of the four StateStore construction sites (main.ts, http-server.ts,
+// mcp-server.ts, cli.ts) fell back to `":memory:"` when no `.env` was
+// present — fine for dev processes sharing one `.env`, but a
+// globally-installed `heimdall mcp` spawned by an agent harness with no
+// shared `.env` got an empty, ephemeral, disconnected database (grill-record
+// H1). Factored as a pure-shaped function (env/homedir both injectable) for
+// the same reason resolveDefaultPolicyPath is: process.env is read once at
+// module load otherwise, which a test can't observe changing.
+export function resolveDefaultDbPath(
+  env: Record<string, string | undefined> = process.env,
+  homedir: string = osHomedir(),
+): string {
+  if (env.HEIMDALL_DB_PATH) {
+    return env.HEIMDALL_DB_PATH;
+  }
+  const dbPath = join(homedir, ".local", "share", "heimdall", "heimdall.db");
+  mkdirSync(dirname(dbPath), { recursive: true });
+  return dbPath;
+}
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS lanes (
@@ -16,13 +43,15 @@ CREATE TABLE IF NOT EXISTS lanes (
   provider TEXT NOT NULL,
   credential_ref TEXT NOT NULL,
   manual_override TEXT CHECK (manual_override IN ('enabled','disabled') OR manual_override IS NULL),
-  manual_reset_at TEXT
+  manual_reset_at TEXT,
+  override_reason TEXT
 );
 CREATE TABLE IF NOT EXISTS lane_status_history (
   lane_id TEXT NOT NULL REFERENCES lanes(lane_id),
   status TEXT NOT NULL CHECK (status IN ('up','down','out_of_credit','degraded')),
   reset_at TEXT,
   reason TEXT,
+  error_code TEXT,
   signal_source TEXT NOT NULL CHECK (signal_source IN ('passive','public_status','active_probe')),
   observed_at TEXT NOT NULL
 );
@@ -40,6 +69,13 @@ CREATE TABLE IF NOT EXISTS model_catalog (
   last_seen_at TEXT NOT NULL,
   PRIMARY KEY (provider, model_id)
 );
+CREATE TABLE IF NOT EXISTS telemetry_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_type TEXT NOT NULL,
+  labels TEXT NOT NULL,
+  occurred_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_telemetry_events_type_time ON telemetry_events(event_type, occurred_at DESC);
 `;
 
 export type ManualOverride = "enabled" | "disabled" | null;
@@ -54,6 +90,7 @@ interface StatusRow {
   status: LaneStatusValue;
   reset_at: string | null;
   reason: string | null;
+  error_code: ErrorCode | null;
   signal_source: SignalSource;
   observed_at: string;
 }
@@ -76,6 +113,18 @@ export interface ModelCatalogEntry {
   last_seen_at: string;
 }
 
+interface TelemetryEventRow {
+  event_type: string;
+  labels: string;
+  occurred_at: string;
+}
+
+export interface TelemetryEvent {
+  event_type: string;
+  labels: Record<string, string>;
+  occurred_at: string;
+}
+
 export class StateStore {
   private readonly db: DatabaseSync;
 
@@ -84,6 +133,13 @@ export class StateStore {
     // version (observed OFF on Node 22.9, ON on the hive's Node build) —
     // pinned explicitly so behavior is deterministic across environments.
     this.db = new DatabaseSync(path, { enableForeignKeyConstraints: true });
+    // hdl-ao-01: WAL mode is required for safe concurrent multi-process
+    // access — the whole point of resolveDefaultDbPath's shared per-machine
+    // default is that the dashboard server (http-server.ts), an MCP process
+    // (mcp-server.ts), and the CLI (cli.ts) can all open the same DB file at
+    // once. A no-op (SQLite reports "memory") against ":memory:" — WAL
+    // requires a real file, which is exactly the case that matters here.
+    this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec(SCHEMA);
     // Defensive migration (hdl-lo-01): CREATE TABLE IF NOT EXISTS only
     // affects fresh databases — a pre-existing persisted DB file created
@@ -101,6 +157,18 @@ export class StateStore {
     // hdl-lm-03: same defensive migration, second column (mirrors manual_override).
     try {
       this.db.exec(`ALTER TABLE lanes ADD COLUMN manual_reset_at TEXT`);
+    } catch {
+      // Column already exists — same reasoning as manual_override above.
+    }
+    // hdl-error-taxonomy: same defensive migration pattern, on lane_status_history this time.
+    try {
+      this.db.exec(`ALTER TABLE lane_status_history ADD COLUMN error_code TEXT`);
+    } catch {
+      // Column already exists — same reasoning as manual_override above.
+    }
+    // hdl-override-reason: same defensive migration pattern, third lanes column.
+    try {
+      this.db.exec(`ALTER TABLE lanes ADD COLUMN override_reason TEXT`);
     } catch {
       // Column already exists — same reasoning as manual_override above.
     }
@@ -126,6 +194,8 @@ export class StateStore {
     status: LaneStatusValue;
     reset_at: string | null;
     reason: string | null;
+    /** hdl-error-taxonomy — optional, defaults to null. Most call sites (tests, a genuine "up" status) have no error to classify. */
+    error_code?: ErrorCode | null;
     signal_source: SignalSource;
     observed_at: string;
   }): void {
@@ -142,14 +212,15 @@ export class StateStore {
     this.db
       .prepare(
         `INSERT INTO lane_status_history
-           (lane_id, status, reset_at, reason, signal_source, observed_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+           (lane_id, status, reset_at, reason, error_code, signal_source, observed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         entry.lane_id,
         entry.status,
         entry.reset_at,
         entry.reason,
+        entry.error_code ?? null,
         entry.signal_source,
         entry.observed_at,
       );
@@ -169,7 +240,7 @@ export class StateStore {
 
     const row = this.db
       .prepare(
-        `SELECT status, reset_at, reason, signal_source, observed_at
+        `SELECT status, reset_at, reason, error_code, signal_source, observed_at
          FROM lane_status_history
          WHERE lane_id = ?
          ORDER BY observed_at DESC, rowid DESC
@@ -187,6 +258,7 @@ export class StateStore {
         status: "down",
         reset_at: null,
         reason: "unconfigured — no status recorded yet",
+        error_code: null,
         last_updated: new Date(0).toISOString(),
         signal_source: "passive",
       };
@@ -198,6 +270,7 @@ export class StateStore {
       status: row.status,
       reset_at: row.reset_at,
       reason: row.reason,
+      error_code: row.error_code,
       last_updated: row.observed_at,
       signal_source: row.signal_source,
     };
@@ -230,7 +303,15 @@ export class StateStore {
    * desiredEnabled decision. null (the default) means "automatic" — status
    * alone decides, unchanged from pre-hdl-lo-01 behavior.
    */
-  setManualOverride(laneId: string, value: ManualOverride): void {
+  /**
+   * `reason` (hdl-override-reason) is optional free-text the operator gives
+   * for WHY a lane is overridden — surfaced next to the toggle so a second
+   * operator (or the same one, later) doesn't have to guess. Forced to
+   * `null` whenever `value` is `null` (auto) — a reason with no active
+   * override is meaningless and would be stale leftover text the next time
+   * the lane IS overridden.
+   */
+  setManualOverride(laneId: string, value: ManualOverride, reason: string | null = null): void {
     // Guard the row's existence regardless of call order (same pattern as
     // recordStatus) — a no-op via ON CONFLICT DO NOTHING when the lane was
     // already upserted, but never silently affects 0 rows if it wasn't.
@@ -240,7 +321,10 @@ export class StateStore {
          ON CONFLICT(lane_id) DO NOTHING`,
       )
       .run(laneId);
-    this.db.prepare(`UPDATE lanes SET manual_override = ? WHERE lane_id = ?`).run(value, laneId);
+    const effectiveReason = value === null ? null : reason;
+    this.db
+      .prepare(`UPDATE lanes SET manual_override = ?, override_reason = ? WHERE lane_id = ?`)
+      .run(value, effectiveReason, laneId);
   }
 
   getManualOverride(laneId: string): ManualOverride {
@@ -248,6 +332,13 @@ export class StateStore {
       .prepare(`SELECT manual_override FROM lanes WHERE lane_id = ?`)
       .get(laneId) as unknown as { manual_override: ManualOverride } | undefined;
     return row?.manual_override ?? null;
+  }
+
+  getOverrideReason(laneId: string): string | null {
+    const row = this.db
+      .prepare(`SELECT override_reason FROM lanes WHERE lane_id = ?`)
+      .get(laneId) as unknown as { override_reason: string | null } | undefined;
+    return row?.override_reason ?? null;
   }
 
   /**
@@ -358,6 +449,36 @@ export class StateStore {
       provider_created_at: row.provider_created_at,
       first_seen_at: row.first_seen_at,
       last_seen_at: row.last_seen_at,
+    }));
+  }
+
+  // hdl-ot-01: Heimdall's own local record of events that previously only
+  // existed as Argus OTEL spans (fire-and-forget, no local trace). Labels
+  // are stored as a JSON object — small, finite label sets in practice
+  // (provider, success, kind, ...), same simplicity precedent as
+  // model_catalog's flat columns.
+  recordTelemetryEvent(eventType: string, labels: Record<string, string>, occurredAt?: string): void {
+    this.db
+      .prepare(`INSERT INTO telemetry_events (event_type, labels, occurred_at) VALUES (?, ?, ?)`)
+      .run(eventType, JSON.stringify(labels), occurredAt ?? new Date().toISOString());
+  }
+
+  /** Grouped counts for one event type — one row per distinct label combination seen. Used by GET /metrics. */
+  getTelemetryEventCounts(eventType: string): Array<{ labels: Record<string, string>; count: number }> {
+    const rows = this.db
+      .prepare(`SELECT labels, COUNT(*) as count FROM telemetry_events WHERE event_type = ? GROUP BY labels`)
+      .all(eventType) as unknown as Array<{ labels: string; count: number }>;
+    return rows.map((row) => ({ labels: JSON.parse(row.labels) as Record<string, string>, count: row.count }));
+  }
+
+  listRecentTelemetryEvents(limit: number = 50): TelemetryEvent[] {
+    const rows = this.db
+      .prepare(`SELECT event_type, labels, occurred_at FROM telemetry_events ORDER BY occurred_at DESC LIMIT ?`)
+      .all(limit) as unknown as TelemetryEventRow[];
+    return rows.map((row) => ({
+      event_type: row.event_type,
+      labels: JSON.parse(row.labels) as Record<string, string>,
+      occurred_at: row.occurred_at,
     }));
   }
 

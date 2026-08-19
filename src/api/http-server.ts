@@ -10,19 +10,49 @@ import { loadLaneDeclarations, LaneRegistry } from "../core/lane-registry.js";
 import {
   getAvailableRoute,
   getScoredRoute,
+  reportRouteOutcome,
   parseTaskType,
   getActiveRoutingStrategyName,
   getRoutingStrategyNames,
   ROUTING_STRATEGY_SETTING_KEY,
 } from "../core/route-selector.js";
-import { StateStore, type ManualOverride } from "../core/state-store.js";
+import { StateStore, resolveDefaultDbPath, type ManualOverride } from "../core/state-store.js";
 import type { LaneStatus } from "../core/status-model.js";
 import { renderDashboardHtml } from "./ui/dashboard.js";
+import { DOC_ENTRIES, getDocBySlug, renderDocMarkdown, renderDocsIndexHtml, renderDocPageHtml } from "./ui/docs-viewer.js";
+import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { appendLane, deriveCredentialRef, laneIdAlreadyDeclared } from "../core/env-file.js";
 import { refreshModelCatalog, getModelCatalog, setModelEnabled } from "../core/model-catalog.js";
 import { NoHealthyAccountsAvailableError, type RotationController } from "../core/rotation-controller.js";
+import { renderMetrics } from "./metrics.js";
+import type { JsonValue } from "../core/routing/route-ledger.js";
+import { PolicyLoader } from "../core/routing/policy-loader.js";
 
 const DEFAULT_ENV_FILE_PATH = ".env";
+
+// hdl-docs-viewer: resolved once at module load, not per-request.
+// docsRepoRoot assumes cwd === repo root, true for every existing entrypoint
+// (npm run dev/cli/mcp already assume this for .env loading) — the
+// standalone desktop app wrapper sets this explicitly when it bundles docs/
+// alongside the compiled sidecar. mermaidBundlePath uses createRequire so it
+// resolves correctly regardless of node_modules hoisting/layout, not a
+// hardcoded relative path.
+const docsRepoRoot = process.env.HEIMDALL_REPO_ROOT ?? process.cwd();
+const mermaidBundlePath = createRequire(import.meta.url).resolve("mermaid/dist/mermaid.min.js");
+
+// hdl-icon-reconciliation: the icon-set PNGs live under a Tauri resource
+// dir that's a SIBLING of (not nested inside) the Node app's own bundled
+// resource dir (see app/src-tauri/tauri.conf.json's bundle.resources: both
+// "resources/heimdall" -> "heimdall" and "resources/icon-sets" ->
+// "icon-sets" map directly under Resources/, not one inside the other) --
+// so docsRepoRoot/HEIMDALL_REPO_ROOT can't reach them. Same env-var-
+// override-with-dev-fallback pattern as docsRepoRoot itself: the desktop
+// app sets HEIMDALL_ICON_SETS_ROOT explicitly; headless dev/CLI usage
+// falls back to the real path in this git checkout.
+const iconSetsRoot =
+  process.env.HEIMDALL_ICON_SETS_ROOT ?? join(process.cwd(), "app", "src-tauri", "resources", "icon-sets");
 
 /** Collects and JSON-parses a request body. Shared by every mutation route (override, reset-at, add-lane). */
 function readJsonBody(req: import("node:http").IncomingMessage): Promise<{ ok: true; data: unknown } | { ok: false }> {
@@ -56,6 +86,7 @@ function readJsonBody(req: import("node:http").IncomingMessage): Promise<{ ok: t
  */
 export interface LaneStatusWithOverride extends LaneStatus {
   manual_override: ManualOverride;
+  override_reason: string | null;
   credential_configured: boolean;
   manual_reset_at: string | null;
   model: string;
@@ -73,15 +104,17 @@ const VALID_OVERRIDE_STATES = new Set(["enabled", "disabled", "auto"]);
 // an MCP tool's structured content) translate the same result its own way.
 
 export type SetOverrideResult =
-  | { ok: true; lane_id: string; manual_override: ManualOverride }
+  | { ok: true; lane_id: string; manual_override: ManualOverride; override_reason: string | null }
   | { ok: false; error: "unknown_lane"; lane_id: string }
-  | { ok: false; error: "invalid_override_state"; allowed_states: string[] };
+  | { ok: false; error: "invalid_override_state"; allowed_states: string[] }
+  | { ok: false; error: "invalid_reason"; message: string };
 
 export function setLaneOverride(
   registry: LaneRegistry,
   store: StateStore,
   laneId: string,
   rawState: unknown,
+  rawReason?: unknown,
 ): SetOverrideResult {
   if (!registry.get(laneId)) {
     return { ok: false, error: "unknown_lane", lane_id: laneId };
@@ -89,9 +122,13 @@ export function setLaneOverride(
   if (typeof rawState !== "string" || !VALID_OVERRIDE_STATES.has(rawState)) {
     return { ok: false, error: "invalid_override_state", allowed_states: [...VALID_OVERRIDE_STATES] };
   }
+  if (rawReason !== undefined && rawReason !== null && typeof rawReason !== "string") {
+    return { ok: false, error: "invalid_reason", message: "reason must be a string or null" };
+  }
   const value: ManualOverride = rawState === "auto" ? null : (rawState as "enabled" | "disabled");
-  store.setManualOverride(laneId, value);
-  return { ok: true, lane_id: laneId, manual_override: value };
+  const reason = typeof rawReason === "string" && rawReason.trim() !== "" ? rawReason : null;
+  store.setManualOverride(laneId, value, reason);
+  return { ok: true, lane_id: laneId, manual_override: value, override_reason: store.getOverrideReason(laneId) };
 }
 
 export type SetResetAtResult =
@@ -187,6 +224,89 @@ export function setRoutingStrategy(store: StateStore, rawName: unknown): SetRout
   return { ok: true, active: rawName };
 }
 
+// hdl-unified-dashboard: dashboard visual theme, persisted the same way
+// routing_strategy is (a global settings-table key, mirrors
+// ROUTING_STRATEGY_SETTING_KEY/setRoutingStrategy exactly). Mission
+// Control is the default per operator direction during the UI-redesign
+// synthesis — the CSS itself also defaults to it (bare :root, no
+// [data-theme] override needed), so an unset setting and an explicit
+// "mission-control" setting render byte-identically.
+export const THEME_SETTING_KEY = "dashboard_theme";
+export const DASHBOARD_THEMES = ["mission-control", "harbor-watch", "terminal"] as const;
+export const DEFAULT_DASHBOARD_THEME = "mission-control";
+
+export function getActiveTheme(store: StateStore): string {
+  const stored = store.getSetting(THEME_SETTING_KEY);
+  return stored && (DASHBOARD_THEMES as readonly string[]).includes(stored) ? stored : DEFAULT_DASHBOARD_THEME;
+}
+
+export type SetThemeResult =
+  | { ok: true; active: string }
+  | { ok: false; error: "invalid_theme"; allowed_themes: string[] };
+
+export function setTheme(store: StateStore, rawName: unknown): SetThemeResult {
+  if (typeof rawName !== "string" || !(DASHBOARD_THEMES as readonly string[]).includes(rawName)) {
+    return { ok: false, error: "invalid_theme", allowed_themes: [...DASHBOARD_THEMES] };
+  }
+  store.setSetting(THEME_SETTING_KEY, rawName);
+  return { ok: true, active: rawName };
+}
+
+// hdl-desktop-icon-settings: which of the 3 bundled app-icon concepts the
+// desktop shell should use. Persisted here (same settings-table pattern)
+// so it's a single source of truth the Rust sidecar reads on startup --
+// this Node service has no way to reach into the Tauri process directly,
+// and the dashboard must keep working identically headless or wrapped, so
+// the preference lives on the server side, not in Tauri-only IPC. Watchtower
+// is the operator-chosen default (2026-08-18, same synthesis message that
+// picked Mission Control as the default theme).
+export const ICON_SETTING_KEY = "desktop_icon";
+export const DESKTOP_ICONS = ["watchtower", "routing-lanes", "signal-horn"] as const;
+export const DEFAULT_DESKTOP_ICON = "watchtower";
+
+export function getActiveIcon(store: StateStore): string {
+  const stored = store.getSetting(ICON_SETTING_KEY);
+  return stored && (DESKTOP_ICONS as readonly string[]).includes(stored) ? stored : DEFAULT_DESKTOP_ICON;
+}
+
+export type SetIconResult =
+  | { ok: true; active: string }
+  | { ok: false; error: "invalid_icon"; allowed_icons: string[] };
+
+export function setIcon(store: StateStore, rawName: unknown): SetIconResult {
+  if (typeof rawName !== "string" || !(DESKTOP_ICONS as readonly string[]).includes(rawName)) {
+    return { ok: false, error: "invalid_icon", allowed_icons: [...DESKTOP_ICONS] };
+  }
+  store.setSetting(ICON_SETTING_KEY, rawName);
+  return { ok: true, active: rawName };
+}
+
+// hdl-ao-07: whether the operator has dismissed the dashboard's "get
+// started" agent-onboarding panel (the install curl one-liner + `heimdall
+// agent init`). Same settings-table persistence as THEME_SETTING_KEY/
+// ICON_SETTING_KEY -- server-side, not localStorage, so the panel's
+// collapsed state is consistent whether the dashboard is loaded via a plain
+// browser or the desktop app's webview (both hit the same HTTP server).
+// Unset defaults to false (shown/expanded) so a first-time visitor with no
+// stored setting sees the panel.
+export const AGENT_ONBOARDING_DISMISSED_KEY = "agent_onboarding_dismissed";
+
+export function getAgentOnboardingDismissed(store: StateStore): boolean {
+  return store.getSetting(AGENT_ONBOARDING_DISMISSED_KEY) === "true";
+}
+
+export type SetAgentOnboardingDismissedResult =
+  | { ok: true; dismissed: boolean }
+  | { ok: false; error: "invalid_dismissed" };
+
+export function setAgentOnboardingDismissed(store: StateStore, rawValue: unknown): SetAgentOnboardingDismissedResult {
+  if (typeof rawValue !== "boolean") {
+    return { ok: false, error: "invalid_dismissed" };
+  }
+  store.setSetting(AGENT_ONBOARDING_DISMISSED_KEY, rawValue ? "true" : "false");
+  return { ok: true, dismissed: rawValue };
+}
+
 export function buildLaneRegistry(env: NodeJS.ProcessEnv = process.env): LaneRegistry {
   return new LaneRegistry(loadLaneDeclarations(env), new EnvCredentialSource(env));
 }
@@ -238,6 +358,7 @@ export function getLaneStatuses(registry: LaneRegistry, store: StateStore): Lane
     return {
       ...status,
       manual_override: store.getManualOverride(status.lane_id),
+      override_reason: store.getOverrideReason(status.lane_id),
       credential_configured: declared?.credential != null,
       manual_reset_at: store.getManualResetAt(status.lane_id),
       model: declared?.model ?? status.provider,
@@ -275,12 +396,122 @@ export function createHttpServer(
       return;
     }
 
+    // hdl-ot-03: Heimdall's own metrics, entirely local — Prometheus text
+    // format so any OTEL/Prometheus-compatible scraper (Argus included) can
+    // pull it later without Heimdall depending on any of them being present.
+    if (req.method === "GET" && req.url === "/metrics") {
+      res.writeHead(200, { "content-type": "text/plain; version=0.0.4; charset=utf-8" });
+      res.end(renderMetrics(registry, store));
+      return;
+    }
+
     // Read-only live-status dashboard (hdl-ui-01) — first vertical slice of
     // the standalone-mode UI requirement (has_ui: true). Pure consumer of
     // GET /lanes below; adds no new backend query logic.
     if (req.method === "GET" && req.url === "/") {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(renderDashboardHtml());
+      res.end(renderDashboardHtml(getActiveTheme(store), getAgentOnboardingDismissed(store)));
+      return;
+    }
+
+    // hdl-unified-dashboard: dashboard visual theme, same read/write shape
+    // as /routing-strategy.
+    if (req.method === "GET" && req.url === "/theme") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ active: getActiveTheme(store), available: [...DASHBOARD_THEMES] }));
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/theme") {
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+        const result = setTheme(store, (body.data as { theme?: unknown }).theme);
+        if (!result.ok) {
+          const { ok: _ok, ...wire } = result;
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify(wire));
+          return;
+        }
+        const { ok: _ok, ...wire } = result;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(wire));
+      });
+      return;
+    }
+
+    // hdl-ao-07: dismiss state for the dashboard's "get started" agent-
+    // onboarding panel, same read/write shape as /theme and /desktop-icon.
+    if (req.method === "GET" && req.url === "/agent-onboarding-dismissed") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ dismissed: getAgentOnboardingDismissed(store) }));
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/agent-onboarding-dismissed") {
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+        const result = setAgentOnboardingDismissed(store, (body.data as { dismissed?: unknown }).dismissed);
+        if (!result.ok) {
+          const { ok: _ok, ...wire } = result;
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify(wire));
+          return;
+        }
+        const { ok: _ok, ...wire } = result;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(wire));
+      });
+      return;
+    }
+
+    // hdl-docs-viewer: "see and navigate the docs and work with the
+    // diagrams" from inside the running service itself — the same content
+    // that ships in docs/, rendered locally (markdown server-side, Mermaid
+    // diagrams client-side against the vendored copy below — no CDN, no
+    // network call, matching the dashboard's own "no external calls" bar).
+    if (req.method === "GET" && req.url === "/docs") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(renderDocsIndexHtml());
+      return;
+    }
+
+    const docMatch = req.method === "GET" && req.url?.match(/^\/docs\/([^/]+)$/);
+    if (docMatch) {
+      const doc = getDocBySlug(decodeURIComponent(docMatch[1]));
+      if (!doc) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "unknown_doc" }));
+        return;
+      }
+      const bodyHtml = renderDocMarkdown(doc, docsRepoRoot);
+      if (bodyHtml === null) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "doc_file_missing", path: doc.path }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(renderDocPageHtml(doc, bodyHtml));
+      return;
+    }
+
+    // Vendored locally (see package.json's "marked"/"mermaid" dependencies)
+    // and served from node_modules directly — no build step, no CDN.
+    if (req.method === "GET" && req.url === "/vendor/mermaid.min.js") {
+      try {
+        res.writeHead(200, { "content-type": "text/javascript; charset=utf-8" });
+        res.end(readFileSync(mermaidBundlePath));
+      } catch {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "mermaid_bundle_missing" }));
+      }
       return;
     }
 
@@ -384,6 +615,82 @@ export function createHttpServer(
       return;
     }
 
+    // hdl-desktop-icon-settings: which bundled desktop-app icon concept is
+    // preferred. The Node service only persists the preference — it has no
+    // way to actually swap the running Tauri process's icon; the Rust
+    // sidecar reads this on startup (tray icon: live; Dock icon: next
+    // rebuild only, a real macOS/Tauri v2 limitation, not a gap in this
+    // implementation).
+    if (req.method === "GET" && req.url === "/desktop-icon") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ active: getActiveIcon(store), available: [...DESKTOP_ICONS] }));
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/desktop-icon") {
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+        const result = setIcon(store, (body.data as { icon?: unknown }).icon);
+        if (!result.ok) {
+          const { ok: _ok, ...wire } = result;
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify(wire));
+          return;
+        }
+        const { ok: _ok, ...wire } = result;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(wire));
+      });
+      return;
+    }
+
+    // hdl-icon-reconciliation: real thumbnail preview for the Settings
+    // picker -- it previously showed generic emoji standing in for each
+    // option, not the actual designed artwork the operator reviewed and
+    // picked between. :name is validated against the DESKTOP_ICONS
+    // allowlist before touching the filesystem (same discipline as the
+    // docs viewer's :slug handling -- never resolve an arbitrary
+    // caller-supplied path).
+    const iconThumbMatch = req.method === "GET" && req.url?.match(/^\/desktop-icon\/([^/]+)\/thumbnail\.png$/);
+    if (iconThumbMatch) {
+      const name = decodeURIComponent(iconThumbMatch[1]);
+      if (!(DESKTOP_ICONS as readonly string[]).includes(name)) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "unknown_icon" }));
+        return;
+      }
+      try {
+        const png = readFileSync(join(iconSetsRoot, name, "128x128.png"));
+        res.writeHead(200, { "content-type": "image/png", "cache-control": "public, max-age=86400" });
+        res.end(png);
+      } catch {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "thumbnail_missing" }));
+      }
+      return;
+    }
+
+    // Read-only view of config/routing-policy.yaml (the scored strategy's
+    // hand-edited policy file) so the dashboard doesn't require reading YAML
+    // to see the active task-type weights/experiments. Loaded fresh on every
+    // request (never cached) so a hand-edit is reflected immediately.
+    if (req.method === "GET" && req.url === "/routing-policy") {
+      try {
+        const policy = PolicyLoader.load();
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(policy));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        res.writeHead(503, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "policy_unavailable", message }));
+      }
+      return;
+    }
+
     // hdl-rr-03: always scored, regardless of the globally active strategy —
     // a caller hitting this endpoint is explicitly asking for the scored
     // contract (Auriga/Minerva's existing dispatch shape). GET
@@ -411,6 +718,37 @@ export function createHttpServer(
         }
         const estimatedCost = typeof data.estimated_cost === "number" ? data.estimated_cost : undefined;
         const result = getScoredRoute({ task_id: taskId, task_type: taskType, estimated_cost: estimatedCost }, registry, store);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(result));
+      });
+      return;
+    }
+
+    // hdl-rof-01: closes the loop RouteLedger was always designed for — a
+    // caller that got a decision_id from POST /route reports back what
+    // actually happened. 404 for an unrecognized decision id, never a crash.
+    const routeOutcomeMatch = req.method === "POST" && req.url?.match(/^\/route\/([^/]+)\/outcome$/);
+    if (routeOutcomeMatch) {
+      const decisionId = decodeURIComponent(routeOutcomeMatch[1]);
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+        const data = body.data as { outcome?: unknown; actual_cost?: unknown; metadata?: unknown };
+        const outcome = typeof data.outcome === "string" ? data.outcome : undefined;
+        const actualCost = typeof data.actual_cost === "number" ? data.actual_cost : undefined;
+        const metadata =
+          typeof data.metadata === "object" && data.metadata !== null && !Array.isArray(data.metadata)
+            ? (data.metadata as Record<string, JsonValue>)
+            : undefined;
+        const result = reportRouteOutcome({ decisionId, outcome, actualCost, metadata });
+        if (!result.ok) {
+          res.writeHead(404, { "content-type": "application/json" });
+          res.end(JSON.stringify(result));
+          return;
+        }
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(result));
       });
@@ -515,8 +853,8 @@ export function createHttpServer(
           res.end(JSON.stringify({ error: "invalid_json" }));
           return;
         }
-        const state = (body.data as { state?: unknown }).state;
-        const result = setLaneOverride(registry, store, laneId, state);
+        const { state, reason } = body.data as { state?: unknown; reason?: unknown };
+        const result = setLaneOverride(registry, store, laneId, state, reason);
         if (!result.ok) {
           const status = result.error === "unknown_lane" ? 404 : 400;
           const { ok: _ok, ...wire } = result;
@@ -596,7 +934,7 @@ const isMainModule =
 
 if (isMainModule) {
   const registry = buildLaneRegistry();
-  const store = new StateStore(process.env.HEIMDALL_DB_PATH ?? ":memory:");
+  const store = new StateStore(resolveDefaultDbPath());
   const port = Number(process.env.PORT ?? 4870);
   createHttpServer(registry, store).listen(port, () => {
     console.log(`heimdall dev server listening on http://localhost:${port}`);

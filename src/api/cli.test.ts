@@ -97,3 +97,29 @@ test("runRouteCommand prints JSON output for --json flag", async () => {
   assert.ok(stderrData.includes('"chosen_lane": null'));
 });
 
+test("hdl-rof-02: runRouteOutcomeCommand closes the loop for a real decision_id from getScoredRoute", async () => {
+  const { runRouteOutcomeCommand } = await import("../cli/route-command.js");
+  const { getScoredRoute } = await import("../core/route-selector.js");
+  const { LaneRegistry } = await import("../core/lane-registry.js");
+  const { StateStore } = await import("../core/state-store.js");
+
+  const registry = new LaneRegistry([], { resolve: () => "secret" });
+  const store = new StateStore(":memory:");
+  const routeResult = getScoredRoute({ task_id: "cli-outcome-test", task_type: "build" }, registry, store);
+
+  const originalLog = console.log;
+  let stdoutData = "";
+  console.log = (msg: string) => {
+    stdoutData += msg + "\n";
+  };
+
+  try {
+    runRouteOutcomeCommand(["--decision-id", routeResult.decision_id as string, "--outcome=success"]);
+  } finally {
+    console.log = originalLog;
+    store.close();
+  }
+
+  assert.ok(stdoutData.includes("Outcome recorded"));
+});
+

@@ -17,7 +17,7 @@ function fakeFetch(status: number, body: unknown = null): typeof fetch {
 
 test("a successful probe resolves to up", async () => {
   const result = await probeGeminiLane("fake-key", fakeFetch(200));
-  assert.deepEqual(result, { status: "up", reset_at: null, reason: null });
+  assert.deepEqual(result, { status: "up", reset_at: null, reason: null, error_code: null });
 });
 
 test("401/403 resolves to down (auth failure)", async () => {

@@ -1,0 +1,91 @@
+name: hdl-unified-dashboard
+title: Unified dashboard with a 3-theme token system, Fleet Scope radar, Model Catalog tree, Settings page
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: dev
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [large-scope, ui-architecture, design-synthesis]
+  roster: [technical-writer]
+  per_tag_reasoning:
+    large-scope: full CSS token-system rewrite of dashboard.ts, two new complex widgets ported from verified mockups, new settings persistence layer.
+    ui-architecture: introduces a real theme system (3 named palettes, operator-selectable) where none existed before -- every existing panel needed migrating onto tokens, not just new panels added.
+    design-synthesis: not a single design pick -- operator explicitly synthesized specific pieces from 2 of the 3 independently-designed mockups into one unified feature set, then asked for the third theme to remain selectable.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (operator's synthesis message WAS the design decision -- verbatim source for this epic's scope, not reinterpreted)
+    hv_planning: not_applicable (single-operator execution following an explicit operator spec)
+    structured_outline: not_applicable (same)
+
+description: >
+  Operator, after reviewing the 3 independent UI-redesign mockups
+  (hdl-desktop-app's UI pass) side by side: "the lane control is my
+  favorite with the moving radar and the dots... The model catalog with
+  the tree underneath is clearer and cleaner... most of the rest of it
+  actually is the same, so we should be able to just swap the theming and
+  styles and offer that in a settings page... Let's roll with a unified
+  feature view like that and settings swaps."
+
+  Real, verified synthesis, not a re-interpretation: Mission Control's
+  Fleet Scope radar+dots (an SVG, not canvas -- ported by back-computing
+  the mockup's own real blip geometry: angle = index/N * 360 clockwise
+  from top, radius by severity tier) and Terminal's tree-connector Model
+  Catalog become PERMANENT, UNIVERSAL widgets across every theme, not
+  exclusive to their origin mockup. A new CSS custom-property token system
+  (3 named palettes: mission-control [default], harbor-watch, terminal),
+  ported from each mockup's own real token values, replaces every
+  hardcoded color across the whole file -- every existing panel (routing
+  strategy, routing policy, telemetry, add-lane) inherits theming
+  automatically since they already used the shared CSS classes converted
+  to tokens.
+
+  New GET/POST /theme (persisted, mirrors /routing-strategy's settings-
+  table pattern exactly) and a new Settings panel with a live theme
+  picker -- applies instantly client-side, no reload, and the server also
+  sets data-theme on the initial HTML response so the correct theme paints
+  on first load, never a flash of the wrong one.
+
+  Desktop-icon preference (GET/POST /desktop-icon) is also wired here on
+  the Node/persistence side, sharing the same Settings panel -- the actual
+  Rust-side tray-icon consumption is a separate follow-up epic
+  (hdl-desktop-icon-settings), since Tauri v2 on macOS has a real,
+  confirmed platform limit: no supported way to swap the Dock icon at
+  runtime, only the tray icon. The Settings panel is honest about this
+  (shows the real rebuild command) rather than implying a full live swap.
+
+  Live-verified in a real browser, not just the test suite: all 3 themes
+  render with their real, distinct token colors; theme switching persists
+  across a page reload (server-rendered data-theme); real button clicks
+  (not direct fetch calls) confirmed for both pickers. Found and fixed a
+  real bug during that verification: the 10-column lanes table could
+  overflow the viewport at real browser widths, with no scroll container --
+  fixed with overflow-x:auto scoped to #root, matching the artifact-design
+  skill's own "wide content scrolls in its own box, the page body never
+  scrolls sideways" rule.
+
+stories:
+  - id: hdl-ud-01-token-system
+    title: Extract and port 3-theme CSS token system from the verified mockups
+    complexity: high
+    depends_on: []
+  - id: hdl-ud-02-fleet-scope
+    title: Fleet Scope radar+dots widget, ported from Mission Control's real SVG geometry, wired to live data
+    complexity: high
+    depends_on: [hdl-ud-01-token-system]
+  - id: hdl-ud-03-model-catalog-tree
+    title: Model Catalog tree widget, ported from Terminal's real markup, keeps existing checkbox interactivity
+    complexity: medium
+    depends_on: [hdl-ud-01-token-system]
+  - id: hdl-ud-04-settings-and-persistence
+    title: GET/POST /theme + /desktop-icon, Settings panel with theme/icon pickers
+    complexity: medium
+    depends_on: [hdl-ud-02-fleet-scope, hdl-ud-03-model-catalog-tree]
+  - id: hdl-ud-05-verify-and-ship
+    title: Live browser verification across all 3 themes, overflow bug found and fixed
+    complexity: low
+    depends_on: [hdl-ud-04-settings-and-persistence]

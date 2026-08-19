@@ -21,12 +21,13 @@ function fakeFetch(
 
 test("a successful probe resolves to up", async () => {
   const result = await probeCodexLane("sk-fake", fakeFetch(200));
-  assert.deepEqual(result, { status: "up", reset_at: null, reason: null });
+  assert.deepEqual(result, { status: "up", reset_at: null, reason: null, error_code: null });
 });
 
 test("401/403 resolves to down (auth failure)", async () => {
   const result401 = await probeCodexLane("bad-key", fakeFetch(401));
   assert.equal(result401.status, "down");
+  assert.equal(result401.error_code, "auth_failed");
   const result403 = await probeCodexLane("bad-key", fakeFetch(403));
   assert.equal(result403.status, "down");
 });
@@ -38,15 +39,31 @@ test("429 with an insufficient_quota error code resolves to out_of_credit", asyn
   );
   assert.equal(result.status, "out_of_credit");
   assert.equal(result.reason, "You exceeded your quota");
+  assert.equal(result.error_code, "billing_error");
 });
 
-test("429 without a quota-specific code resolves to degraded (plain rate limit)", async () => {
+test("hdl-error-taxonomy: 429 with an organization_usage_limit_exceeded code resolves to out_of_credit/quota_exceeded, not billing_error", async () => {
+  const result = await probeCodexLane(
+    "sk-fake",
+    fakeFetch(429, { error: { code: "organization_usage_limit_exceeded", message: "Organization usage limit reached" } }),
+  );
+  assert.equal(result.status, "out_of_credit");
+  assert.equal(result.error_code, "quota_exceeded");
+});
+
+test("429 without a quota-specific code resolves to degraded (plain rate limit), reset_at converted to an absolute timestamp", async () => {
   const result = await probeCodexLane(
     "sk-fake",
     fakeFetch(429, { error: { code: "rate_limit_exceeded" } }, { "retry-after": "30" }),
   );
   assert.equal(result.status, "degraded");
-  assert.equal(result.reset_at, "30");
+  assert.equal(result.error_code, "rate_limit");
+  // hdl-error-taxonomy: CONFIRMED BUG FIX — this used to pass "30" straight
+  // through (Date.parse("30") === NaN, silently discarded by the
+  // scheduler). Now a real, parseable absolute ISO timestamp ~30s out.
+  assert.ok(result.reset_at !== null && !Number.isNaN(Date.parse(result.reset_at)), `expected a real timestamp, got ${result.reset_at}`);
+  const deltaMs = Date.parse(result.reset_at!) - Date.now();
+  assert.ok(deltaMs > 25_000 && deltaMs < 35_000, `expected ~30s out, got ${deltaMs}ms`);
 });
 
 test("429 with a malformed (non-JSON) body still resolves to degraded, doesn't throw", async () => {

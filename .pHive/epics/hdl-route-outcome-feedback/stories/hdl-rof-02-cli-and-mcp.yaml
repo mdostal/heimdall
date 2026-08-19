@@ -1,0 +1,36 @@
+id: hdl-rof-02-cli-and-mcp
+epic: hdl-route-outcome-feedback
+title: CLI route-outcome + MCP heimdall.route.reportOutcome
+status: pending
+complexity: low
+methodology: classic
+depends_on: [hdl-rof-01-shared-function-and-http]
+
+description: |
+  CLI subcommand `route-outcome --decision-id=<id> [--outcome=<value>]
+  [--actual-cost=<n>] [--json]`, mirroring route-command.ts's existing flag
+  parsing style. MCP tool heimdall.route.reportOutcome, mirroring
+  route_selection's existing thin-wrapper shape. Both call the same
+  reportRouteOutcome() shared function — no duplicated logic.
+
+acceptance_criteria:
+  - "Given npm run cli -- route-outcome --decision-id=<real-id> --outcome=success, when run, then it exits 0 and prints confirmation"
+  - "Given an unknown decision-id, when the CLI command runs, then it prints an error and exits non-zero, never an uncaught crash"
+  - "Given heimdall.route.reportOutcome is called via MCP with a valid decision_id, then it returns {ok:true} as structured text content"
+
+steps:
+  - id: implement
+    description: Add the CLI subcommand and MCP tool
+    agent: developer
+  - id: test
+    description: CLI + MCP tests mirroring the existing route/route_selection test patterns
+    agent: tester
+    depends_on: [implement]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - path: src/cli/route-command.ts
+      purpose: existing CLI flag-parsing style to mirror
+    - path: src/api/mcp-server.ts
+      purpose: existing route_selection tool + dispatch table pattern to mirror

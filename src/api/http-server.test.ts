@@ -273,6 +273,53 @@ test("GET /available-route returns an up lane with headroom and a token ref for 
   }
 });
 
+test("hdl-ot-02: GET /available-route records a model_substitution telemetry event when the declared model is disabled", async () => {
+  const registry = registryWithRouteLanes();
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "codex", provider: "codex", credential_ref: "CODEX_TOKEN" });
+  store.recordStatus({ lane_id: "codex", status: "up", reset_at: null, reason: null, signal_source: "active_probe", observed_at: "2026-08-05T16:00:00.000Z" });
+  store.upsertModelSeen({ provider: "codex", model_id: "gpt-codex", default_enabled: false, provider_created_at: "2024-01-01T00:00:00Z", seen_at: "2026-08-14T00:00:00Z" });
+  store.upsertModelSeen({ provider: "codex", model_id: "gpt-codex-newer", default_enabled: true, provider_created_at: "2026-06-01T00:00:00Z", seen_at: "2026-08-14T00:00:00Z" });
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/available-route?task-type=build`);
+    const body = await res.json();
+    assert.equal(body.model_substituted, true);
+    assert.equal(body.model, "gpt-codex-newer");
+
+    const counts = store.getTelemetryEventCounts("model_substitution");
+    assert.equal(counts.length, 1);
+    assert.equal(counts[0].labels.declaredModel, "gpt-codex");
+    assert.equal(counts[0].labels.effectiveModel, "gpt-codex-newer");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-ot-02: GET /available-route does NOT record a model_substitution event when the declared model is used as-is", async () => {
+  const registry = registryWithRouteLanes();
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "codex", provider: "codex", credential_ref: "CODEX_TOKEN" });
+  store.recordStatus({ lane_id: "codex", status: "up", reset_at: null, reason: null, signal_source: "active_probe", observed_at: "2026-08-05T16:00:00.000Z" });
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/available-route?task-type=build`);
+    const body = await res.json();
+    assert.equal(body.model_substituted, false);
+    assert.deepEqual(store.getTelemetryEventCounts("model_substitution"), []);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
 test("hdl-rs-01: GET /available-route skips a lane whose manual_override is 'disabled', even though its sensed status is 'up'", async () => {
   const registry = registryWithRouteLanes();
   const store = new StateStore(":memory:");
@@ -489,6 +536,335 @@ test("GET /available-route returns 404 when no usable lane has headroom and a va
   }
 });
 
+test("hdl-unified-dashboard: GET /theme defaults to 'mission-control' active with all 3 themes listed", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/theme`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.active, "mission-control");
+    assert.deepEqual(body.available.sort(), ["harbor-watch", "mission-control", "terminal"]);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-unified-dashboard: POST /theme sets the active theme, GET /theme and GET / (data-theme attribute) both reflect it", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const setRes = await fetch(`http://localhost:${port}/theme`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ theme: "terminal" }),
+    });
+    assert.equal(setRes.status, 200);
+    assert.equal((await setRes.json()).active, "terminal");
+
+    const getRes = await fetch(`http://localhost:${port}/theme`);
+    assert.equal((await getRes.json()).active, "terminal");
+
+    const pageRes = await fetch(`http://localhost:${port}/`);
+    const body = await pageRes.text();
+    assert.match(body, /<html lang="en" data-theme="terminal">/, "the server-rendered page must set data-theme so the correct theme paints on first load, not just after client JS runs");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-unified-dashboard: POST /theme with an unrecognized name returns 400 and does NOT change the active theme", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/theme`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ theme: "not-a-real-theme" }),
+    });
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).error, "invalid_theme");
+
+    const getRes = await fetch(`http://localhost:${port}/theme`);
+    assert.equal((await getRes.json()).active, "mission-control", "an invalid POST must not change the persisted setting");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-unified-dashboard: GET / does not set a data-theme attribute for the default mission-control theme", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /<html lang="en">/, "Mission Control needs no data-theme attribute -- the bare :root CSS already IS Mission Control");
+    assert.doesNotMatch(
+      body,
+      /<html lang="en" data-theme=/,
+      "the <html> tag itself must not carry data-theme for the default theme (CSS legitimately contains data-theme= as selector text for the other two themes' blocks, so this must check the tag specifically, not the whole document)",
+    );
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-desktop-icon-settings: GET /desktop-icon defaults to 'watchtower' active with all 3 icons listed", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/desktop-icon`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.active, "watchtower");
+    assert.deepEqual(body.available.sort(), ["routing-lanes", "signal-horn", "watchtower"]);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-icon-reconciliation: GET /desktop-icon/:name/thumbnail.png serves a real PNG for each valid icon", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    for (const name of ["watchtower", "routing-lanes", "signal-horn"]) {
+      const res = await fetch(`http://localhost:${port}/desktop-icon/${name}/thumbnail.png`);
+      assert.equal(res.status, 200, `${name} thumbnail should exist`);
+      assert.equal(res.headers.get("content-type"), "image/png");
+      const buf = Buffer.from(await res.arrayBuffer());
+      assert.ok(buf.length > 100, `${name} thumbnail should be a real, non-trivial PNG`);
+      // PNG magic bytes
+      assert.deepEqual([...buf.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    }
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-icon-reconciliation: GET /desktop-icon/:name/thumbnail.png rejects an unrecognized or path-traversal name", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const badName = await fetch(`http://localhost:${port}/desktop-icon/not-a-real-icon/thumbnail.png`);
+    assert.equal(badName.status, 404);
+    assert.equal((await badName.json()).error, "unknown_icon");
+
+    const traversal = await fetch(`http://localhost:${port}/desktop-icon/..%2F..%2F..%2Fetc%2Fpasswd/thumbnail.png`);
+    assert.equal(traversal.status, 404, "must never resolve an arbitrary caller-supplied path");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-icon-reconciliation: GET / (dashboard) icon picker uses real thumbnail images, not emoji placeholders", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /icon-thumb/, "must render an <img class=\"icon-thumb\"> per option");
+    assert.match(body, /\/desktop-icon\/" \+ escapeHtml\(name\) \+\s*"\/thumbnail\.png/, "must load each thumbnail from the real per-icon route");
+    assert.doesNotMatch(body, /ICON_GLYPHS/, "the emoji-placeholder table must be gone, not just unused");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-desktop-icon-settings: POST /desktop-icon sets the preference, invalid values are rejected without changing it", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const setRes = await fetch(`http://localhost:${port}/desktop-icon`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ icon: "signal-horn" }),
+    });
+    assert.equal(setRes.status, 200);
+    assert.equal((await setRes.json()).active, "signal-horn");
+
+    const badRes = await fetch(`http://localhost:${port}/desktop-icon`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ icon: "not-a-real-icon" }),
+    });
+    assert.equal(badRes.status, 400);
+    assert.equal((await badRes.json()).error, "invalid_icon");
+
+    const getRes = await fetch(`http://localhost:${port}/desktop-icon`);
+    assert.equal((await getRes.json()).active, "signal-horn", "the invalid POST must not have changed the persisted setting");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-unified-dashboard: GET / (dashboard) includes a Settings panel with theme and icon pickers", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /id="theme-picker"/);
+    assert.match(body, /fetch\("\/theme"\)/, "theme picker must load from GET /theme");
+    assert.match(body, /id="icon-picker"/);
+    assert.match(body, /fetch\("\/desktop-icon"\)/, "icon picker must load from GET /desktop-icon");
+    assert.match(body, /cargo tauri build/, "must be honest that the Dock icon needs a rebuild, not silently imply a full live swap");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-ao-07: GET /agent-onboarding-dismissed defaults to false", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/agent-onboarding-dismissed`);
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).dismissed, false);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-ao-07: POST /agent-onboarding-dismissed persists true, GET reflects it, and GET / renders the panel collapsed", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const setRes = await fetch(`http://localhost:${port}/agent-onboarding-dismissed`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ dismissed: true }),
+    });
+    assert.equal(setRes.status, 200);
+    assert.equal((await setRes.json()).dismissed, true);
+
+    const getRes = await fetch(`http://localhost:${port}/agent-onboarding-dismissed`);
+    assert.equal((await getRes.json()).dismissed, true);
+
+    const pageRes = await fetch(`http://localhost:${port}/`);
+    const body = await pageRes.text();
+    assert.match(
+      body,
+      /id="agent-onboarding-collapsed" style="display:flex;"/,
+      "reload after dismiss must render the panel already collapsed server-side, not rely on client JS alone",
+    );
+    assert.match(body, /id="agent-onboarding-expanded" style="display:none;"/);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-ao-07: POST /agent-onboarding-dismissed with a non-boolean value returns 400 and does not change the setting", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/agent-onboarding-dismissed`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ dismissed: "yes" }),
+    });
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).error, "invalid_dismissed");
+
+    const getRes = await fetch(`http://localhost:${port}/agent-onboarding-dismissed`);
+    assert.equal((await getRes.json()).dismissed, false, "an invalid POST must not change the persisted setting");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-ao-07: GET / (dashboard) first panel has the real, live curl one-liner and heimdall agent init command, not placeholder text", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /curl -fsSL https:\/\/mdostal\.github\.io\/heimdall\/install\.sh \| bash/);
+    assert.match(body, /heimdall agent init/);
+    assert.match(body, /~\/\.claude\/skills\//);
+    assert.match(body, /id="agent-onboarding-panel"/);
+    // Above Fleet Scope: the panel markup must appear earlier in the BODY
+    // than the Fleet Scope heading (the CSS block, which legitimately
+    // contains the substring "Fleet Scope" in a comment, precedes the body
+    // entirely, so this checks the real <h2> heading specifically).
+    assert.ok(
+      body.indexOf("id=\"agent-onboarding-panel\"") < body.indexOf("<h2>Fleet Scope</h2>"),
+      "the get-started panel must render as the first panel, above Fleet Scope",
+    );
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
 test("hdl-rr-03: GET /routing-strategy defaults to 'priority' active with all 4 strategies listed as available", async () => {
   const registry = registryWithOneConfiguredLane();
   const store = new StateStore(":memory:");
@@ -553,6 +929,28 @@ test("hdl-rs-03: POST /routing-strategy with an unrecognized name returns 400 an
 
     const getRes = await fetch(`http://localhost:${port}/routing-strategy`);
     assert.equal((await getRes.json()).active, "priority", "an invalid POST must not change the persisted setting");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-da-03: GET /routing-policy returns the real config/routing-policy.yaml, read-only", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/routing-policy`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.version, "1.0");
+    assert.ok(body.task_type_weights.planning, "expected the real policy's planning task-type weights");
+    assert.equal(typeof body.headroom_floor, "number");
+    assert.ok(["quality", "balanced", "economy"].includes(body.cost_preference));
+    assert.equal(typeof body.experiments.enabled, "boolean");
   } finally {
     server.close();
     store.close();
@@ -669,7 +1067,15 @@ test("GET / (hdl-ui-01) returns 200 text/html and references /lanes for its data
     const body = await res.text();
     assert.match(body, /<table|<div id="root"/);
     assert.match(body, /fetch\("\/lanes"\)/, "the dashboard must fetch its data from Heimdall's own /lanes endpoint");
-    assert.doesNotMatch(body, /https?:\/\/(?!localhost)/, "no external network requests (CDN scripts/styles etc.)");
+    // hdl-ao-07: the get-started panel legitimately displays a real external
+    // URL as copy-paste text (the live install.sh curl one-liner) — that's
+    // documentation content, not a network call the page itself makes. What
+    // this test actually guards against is the page fetching assets FROM an
+    // external host (CDN scripts/styles/fetches), so it checks those tags
+    // specifically rather than banning any https:// substring in the body.
+    assert.doesNotMatch(body, /<script[^>]+src="https?:\/\/(?!localhost)/, "no external <script src> (CDN scripts)");
+    assert.doesNotMatch(body, /<link[^>]+href="https?:\/\/(?!localhost)/, "no external <link href> (CDN styles)");
+    assert.doesNotMatch(body, /fetch\("https?:\/\/(?!localhost)/, "no external fetch() calls");
   } finally {
     server.close();
     store.close();
@@ -720,7 +1126,12 @@ test("hdl-mcp-01: setLaneOverride is independently callable without an HTTP serv
   const store = new StateStore(":memory:");
   try {
     const result = setLaneOverride(registry, store, "claude@mathew.dostal", "disabled");
-    assert.deepEqual(result, { ok: true, lane_id: "claude@mathew.dostal", manual_override: "disabled" });
+    assert.deepEqual(result, {
+      ok: true,
+      lane_id: "claude@mathew.dostal",
+      manual_override: "disabled",
+      override_reason: null,
+    });
     assert.equal(store.getManualOverride("claude@mathew.dostal"), "disabled");
   } finally {
     store.close();
@@ -1199,6 +1610,40 @@ test("hdl-lo-01: POST /lanes/:laneId/override sets the override and GET /lanes r
   }
 });
 
+test("hdl-override-reason: POST /lanes/:laneId/override accepts an optional reason, GET /lanes reflects it, and auto discards it", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const overrideRes = await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/override`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ state: "disabled", reason: "cost review in progress" }),
+    });
+    assert.equal(overrideRes.status, 200);
+    const overrideBody = await overrideRes.json();
+    assert.equal(overrideBody.override_reason, "cost review in progress");
+
+    const lanesRes = await fetch(`http://localhost:${port}/lanes`);
+    const lanes = await lanesRes.json();
+    assert.equal(lanes[0].override_reason, "cost review in progress");
+
+    const clearRes = await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/override`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ state: "auto", reason: "should be discarded" }),
+    });
+    const clearBody = await clearRes.json();
+    assert.equal(clearBody.override_reason, null, "auto must discard any reason, not carry it forward");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
 test("hdl-lo-01: POST /lanes/:laneId/override with state: auto clears a previously-set override", async () => {
   const registry = registryWithOneConfiguredLane();
   const store = new StateStore(":memory:");
@@ -1330,6 +1775,29 @@ test("hdl-lo-02: GET / (dashboard) renders an override indicator distinct from t
   }
 });
 
+test("hdl-override-reason: GET / (dashboard) renders a reason input next to the override controls, sent along with state on click", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /override-reason-input/, "must render a reason input the operator can type into before overriding");
+    assert.match(
+      body,
+      /body: JSON\.stringify\(\{ state: state, reason: reason \}\)/,
+      "the click handler must send the reason input's current value alongside state",
+    );
+    assert.match(body, /override-reason-note/, "must render the persisted reason as a distinct, scoped element (not the shared .reason class also used for status text and the routing-policy panel)");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
 test("hdl-rs-04: GET / (dashboard) includes a Routing strategy panel that loads from and saves to /routing-strategy", async () => {
   const registry = registryWithOneConfiguredLane();
   const store = new StateStore(":memory:");
@@ -1345,6 +1813,24 @@ test("hdl-rs-04: GET / (dashboard) includes a Routing strategy panel that loads 
     assert.match(body, /id="routing-strategy-status"/);
     assert.match(body, /fetch\("\/routing-strategy"\)/, "the panel must load its state from GET /routing-strategy");
     assert.match(body, /"\/routing-strategy"/, "the save control must POST to /routing-strategy");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-da-03: GET / (dashboard) includes a Routing policy panel that loads from /routing-policy", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /id="routing-policy-root"/);
+    assert.match(body, /fetch\("\/routing-policy"\)/, "the panel must load its state from GET /routing-policy");
   } finally {
     server.close();
     store.close();
@@ -1557,6 +2043,44 @@ test("hdl-mcd-01: GET / (dashboard) includes a Model catalog panel with a Refres
   }
 });
 
+test("hdl-unified-dashboard: GET / renders the model catalog as a tree (Terminal-origin widget, now universal)", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /catalog-tree/, "must render the tree container class");
+    assert.match(body, /tree-glyph/, "must render tree connector glyphs, not a flat table");
+    assert.match(body, /model-flag/, "must render an enabled\\/disabled flag per model");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-unified-dashboard: GET / includes a Fleet Scope radar plotting lanes by severity", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /id="fleet-scope-root"/);
+    assert.match(body, /SCOPE_RING/, "severity-to-ring mapping must be present");
+    assert.match(body, /renderFleetScope/, "must render from the same live lane data render() receives, not separately fetched");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
 test("hdl-mcd-01: GET / does not change existing routes' behavior (model-catalog panel is additive only)", async () => {
   const registry = registryWithOneConfiguredLane();
   const store = new StateStore(":memory:");
@@ -1654,6 +2178,258 @@ test("hdl-rr-04: POST /rotation/:provider/rotate advances to the next healthy la
     const getRes = await fetch(`http://localhost:${port}/rotation/claude`);
     const getBody = await getRes.json();
     assert.equal(getBody.active_lane_id, "claude-b");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-ot-03: GET /metrics returns 200 with valid Prometheus text format on an empty store, never a crash", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/metrics`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /^text\/plain/);
+    const body = await res.text();
+    assert.match(body, /^# HELP heimdall_lanes /m);
+    assert.match(body, /^# TYPE heimdall_lanes gauge$/m);
+    // A declared-but-never-probed lane still counts as a lane (status
+    // defaults to "down" — same fallback GET /lanes already uses).
+    assert.match(body, /heimdall_lanes\{provider="claude",status="down"\} 1/);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-ot-03: GET /metrics reflects real telemetry_events counts with correct labels", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  store.recordTelemetryEvent("actuation_result", { provider: "claude", action: "disable", success: "true" });
+  store.recordTelemetryEvent("actuation_result", { provider: "claude", action: "disable", success: "true" });
+  store.recordTelemetryEvent("actuation_result", { provider: "claude", action: "enable", success: "false" });
+  store.recordTelemetryEvent("rotation_event", { provider: "claude", kind: "capped" });
+  store.recordTelemetryEvent("model_substitution", { provider: "claude" });
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/metrics`);
+    const body = await res.text();
+    assert.match(body, /heimdall_actuation_results_total\{provider="claude",action="disable",success="true"\} 2/);
+    assert.match(body, /heimdall_actuation_results_total\{provider="claude",action="enable",success="false"\} 1/);
+    assert.match(body, /heimdall_rotation_events_total\{provider="claude",kind="capped"\} 1/);
+    assert.match(body, /heimdall_model_substitutions_total\{provider="claude"\} 1/);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-ot-04: GET / (dashboard) includes a Telemetry panel that loads from GET /metrics", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/`);
+    const body = await res.text();
+    assert.match(body, /id="telemetry-root"/);
+    assert.match(body, /fetch\("\/metrics"\)/, "the panel must load its state from GET /metrics");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-ot-04: GET / does not change existing routes' behavior (Telemetry panel is additive only)", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const lanesRes = await fetch(`http://localhost:${port}/lanes`);
+    assert.equal(lanesRes.status, 200);
+    const metricsRes = await fetch(`http://localhost:${port}/metrics`);
+    assert.equal(metricsRes.status, 200);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-rof-01: POST /route/:decisionId/outcome closes the loop for a real decision_id from POST /route", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const routeRes = await fetch(`http://localhost:${port}/route`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ task_id: "rof-test-1", task_type: "build" }),
+    });
+    const routeBody = await routeRes.json();
+    assert.ok(routeBody.decision_id, "POST /route must return a decision_id");
+
+    const outcomeRes = await fetch(`http://localhost:${port}/route/${routeBody.decision_id}/outcome`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ outcome: "success", actual_cost: 0.42 }),
+    });
+    assert.equal(outcomeRes.status, 200);
+    const outcomeBody = await outcomeRes.json();
+    assert.deepEqual(outcomeBody, { ok: true });
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-rof-01: POST /route/:decisionId/outcome for an unknown decision_id returns 404, never a crash", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/route/never-existed/outcome`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ outcome: "failure" }),
+    });
+    assert.equal(res.status, 404);
+    const body = await res.json();
+    assert.deepEqual(body, { ok: false, error: "unknown_decision" });
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-rof-01: POST /route/:decisionId/outcome with malformed JSON returns 400, not a crash", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/route/some-id/outcome`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{not json",
+    });
+    assert.equal(res.status, 400);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-docs-viewer: GET /docs returns the index with links to every doc", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/docs`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /text\/html/);
+    const body = await res.text();
+    assert.match(body, /href="\/docs\/architecture"/);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-docs-viewer: GET /docs/:slug renders a real doc, including a live Mermaid diagram", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/docs/architecture`);
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    assert.match(body, /Heimdall Architecture/);
+    assert.match(body, /<pre class="mermaid">/);
+    assert.match(body, /\/vendor\/mermaid\.min\.js/);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-docs-viewer: GET /docs/:slug for an unknown slug returns 404, never a crash", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/docs/nonexistent`);
+    assert.equal(res.status, 404);
+    const body = await res.json();
+    assert.equal(body.error, "unknown_doc");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-docs-viewer: GET /vendor/mermaid.min.js serves the real vendored bundle locally, no redirect/CDN", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/vendor/mermaid.min.js`, { redirect: "manual" });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /javascript/);
+    const body = await res.text();
+    assert.ok(body.length > 100_000, "expected the real mermaid bundle, not a stub");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-docs-viewer: GET / (dashboard) links to /docs, and existing routes are unaffected (additive only)", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const dashRes = await fetch(`http://localhost:${port}/`);
+    const dashBody = await dashRes.text();
+    assert.match(dashBody, /href="\/docs"/);
+
+    const lanesRes = await fetch(`http://localhost:${port}/lanes`);
+    assert.equal(lanesRes.status, 200);
   } finally {
     server.close();
     store.close();

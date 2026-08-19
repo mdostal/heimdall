@@ -1,0 +1,53 @@
+name: hdl-policy-path-fix
+title: Fix PolicyLoader's default path against the desktop app's cwd redirection
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: dev
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [bug-fix, cross-epic-interaction]
+  roster: []
+  per_tag_reasoning:
+    bug-fix: a real, confirmed-live defect, not a design choice.
+    cross-epic-interaction: two independently-correct epics (hdl-desktop-app's cwd redirection, hdl-routing-policy-dashboard's cwd-relative default path) combined into a real bug neither one alone would have had.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (bug fix with an obvious, already-proven-correct precedent to follow)
+    hv_planning: not_applicable (small, well-understood fix)
+    structured_outline: not_applicable (same)
+
+description: >
+  Found by actually installing and running the real desktop app end-to-end
+  after the operator asked to keep it installed for real dogfooding (not
+  found by the test suite, since no test exercised the packaged app's cwd).
+  PolicyLoader.load()'s default path is `join(process.cwd(), "config",
+  "routing-policy.yaml")` -- correct for every existing entrypoint, but the
+  desktop app's sidecar deliberately sets cwd to a per-user app-data
+  directory (for .env/DB persistence, from hdl-desktop-app), so the real
+  policy file couldn't be found there. This affected not just the new
+  read-only dashboard panel but the scored routing strategy itself, which
+  also calls PolicyLoader.load() with no override.
+
+  Fixed by mirroring the exact precedent hdl-docs-viewer already
+  established for the same class of problem (HEIMDALL_REPO_ROOT taking
+  precedence over cwd) -- and by staging config/ into the bundled resource
+  directory in build-resources.sh, since the file didn't physically exist
+  there at all, path fix or not. Confirmed fixed live: reinstalled the real
+  .app bundle and curled /routing-policy through it successfully.
+
+  The path-resolution logic was factored into a small pure function
+  (resolveDefaultPolicyPath) specifically so this class of bug is
+  unit-testable going forward -- the original inline module-level constant
+  couldn't be regression-tested since process.env is read once at import
+  time.
+
+stories:
+  - id: hdl-ppf-01-fix-and-verify
+    title: Fix path resolution + bundle staging, add regression test, verify live against the real installed app
+    complexity: low
+    depends_on: []

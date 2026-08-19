@@ -1,0 +1,45 @@
+id: hdl-ot-02-instrument-rotation-and-model-substitution
+epic: hdl-own-telemetry
+title: Record rotation events and model substitutions locally
+status: pending
+complexity: low
+methodology: classic
+depends_on: [hdl-ot-01-telemetry-events-table-and-recorder]
+
+description: |
+  Neither RotationController nor route-selector.ts ever emitted telemetry of
+  any kind (not even to Argus) — this is genuinely new instrumentation, not
+  a bridge of existing behavior.
+
+  rotation-controller.ts: `markCapped()` and `rotateToNextHealthy()` each
+  call `this.store.recordTelemetryEvent("rotation_event", {provider,
+  laneId, kind: "capped"|"rotated"})` — both already hold `store` directly,
+  no new constructor param needed.
+
+  route-selector.ts: wherever `resolveEffectiveModel()`'s `substituted` comes
+  back true (both in getAvailableRoute and getScoredRoute's shared path),
+  call `store.recordTelemetryEvent("model_substitution", {provider,
+  declaredModel, effectiveModel})`.
+
+acceptance_criteria:
+  - "Given RotationController.markCapped is called, when telemetry_events is queried, then one rotation_event row exists with kind='capped'"
+  - "Given RotationController.rotateToNextHealthy succeeds, when telemetry_events is queried, then one rotation_event row exists with kind='rotated'"
+  - "Given GET /available-route substitutes a model, when telemetry_events is queried, then one model_substitution row exists with the declared and effective model names"
+  - "Given a route with no substitution, when GET /available-route is called, then no model_substitution row is written (never a silent always-on emit)"
+
+steps:
+  - id: implement
+    description: Add the two inline recordTelemetryEvent calls
+    agent: developer
+  - id: test
+    description: Extend rotation-controller.test.ts and route-selector-adjacent http-server.test.ts coverage
+    agent: tester
+    depends_on: [implement]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - path: src/core/rotation-controller.ts
+      purpose: markCapped/rotateToNextHealthy — both already hold store
+    - path: src/core/route-selector.ts
+      purpose: getAvailableRoute/getScoredRoute's shared resolveEffectiveModel call sites

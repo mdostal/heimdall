@@ -1,0 +1,90 @@
+id: hdl-ao-03-agent-init-status
+epic: hdl-agent-onboarding
+title: heimdall agent init/status detect and register Claude Code and Codex
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [hdl-ao-02-packaged-cli]
+parallel_allowed: false
+
+description: >
+  Adds `heimdall agent init [--harness claude|codex]` and `heimdall agent
+  status [--harness ...] [--json]` as a new "agent" branch inside
+  src/api/cli.ts's existing dispatcher, backed by new
+  src/cli/agent-command.ts. Mirrors Portunus's real agent_setup.py shape:
+  detectHarnesses() via `which`, registerMcp(harness) shelling to the
+  real confirmed `claude mcp add --scope user heimdall -- heimdall mcp` /
+  `codex mcp add heimdall -- heimdall mcp`, mcpRegistered(harness) using
+  the targeted `claude mcp get heimdall` (the exact slowness bug Portunus
+  already found and fixed for Claude) with a `codex mcp list` fallback for
+  Codex. Idempotent on repeat invocation.
+
+acceptance_criteria:
+  - `heimdall agent init` detects installed Claude Code / Codex via `which`
+    and registers Heimdall's MCP server for each detected harness using the
+    real confirmed command syntax.
+  - `heimdall agent status` reports registration state per harness without
+    mutating anything; supports `--json`.
+  - Both subcommands support repeatable `--harness claude`/`--harness codex`
+    to narrow scope.
+  - Running `heimdall agent init` a second time does not error or duplicate
+    registration (idempotent).
+  - Live-verified against this machine's real claude/codex binaries, not
+    mocked only.
+
+steps:
+  - id: s1
+    description: Add the "agent" branch to cli.ts's dispatcher and write
+      src/cli/agent-command.ts's detectHarnesses/registerMcp/mcpRegistered
+      logic.
+    agent: developer
+  - id: s2
+    description: Wire `agent init`/`agent status` subcommand parsing
+      (--harness repeatable, --json).
+    agent: developer
+  - id: s3
+    description: Live run against this machine's real claude/codex
+      binaries — register for real, confirm via `claude mcp get heimdall`,
+      re-run init and confirm idempotency.
+    agent: developer
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - src/api/cli.ts
+    - src/cli/agent-command.ts
+    - src/cli/route-command.ts
+  tech_stack: [typescript, node, child_process]
+
+design_decisions:
+  - decision: Use `claude mcp get heimdall` (targeted) instead of `claude
+      mcp list` for the Claude-side registration check.
+    rationale: Portunus's own agent_setup.py already found and fixed this
+      — `claude mcp list` health-checks every registered server (30+s on a
+      machine with many configured); `claude mcp get <name>` is a targeted,
+      fast lookup. Confirmed still the right call against current
+      `claude mcp add --help` syntax.
+
+risks:
+  - severity: medium
+    description: Codex has no per-server targeted lookup equivalent to
+      `claude mcp get`; mcpRegistered's `codex mcp list` fallback could hit
+      the same slowness Portunus fixed for Claude but never fixed for
+      Codex, if a machine's Codex config grows large.
+    mitigation: Not blocking at v1 (Codex configs are typically small);
+      note the gap explicitly in agent status output rather than silently
+      inheriting Portunus's own unfixed limitation.
+
+metric:
+  applies: true
+  name: heimdall.agent_init_success_rate
+  direction: up
+  unit: ratio
+  baseline: null
+  target: 1.0
+  window: "first cycle post-merge"
+  source:
+    kind: manual
+    ref: "run `heimdall agent init` on a clean machine profile with claude and/or codex installed; success = registration confirmed via `claude mcp get heimdall`/`codex mcp list` with no manual intervention"
+  verify_at: "story integrate step"
+  owner: developer

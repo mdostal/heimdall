@@ -65,7 +65,15 @@ Option **C** is the best fit for what the spike actually recommended and for `no
 
 **Awaiting operator decision:** keep A, implement C, or accept B's tradeoff explicitly (and if B, should Codex's equivalent 429/usage-limit handling — currently unexamined — get the same treatment for consistency?).
 
-## Consequences (once a choice is made)
+## Resolution (2026-08-16, operator decision)
 
-- Whichever option is chosen, update this doc's Status to Accepted and record the choice + reasoning here (matching this repo's other `DEC-*.md` records) — don't let the decision live only in a commit message.
-- If C is chosen, it likely also affects the Codex/other-provider probe adapters (same false-positive class of problem), and should be designed as an `escalation.ts`-level concern rather than duplicated per-provider.
+**Status: Accepted.** Neither A, B, nor C as originally framed — a fourth option the CBA above didn't consider, motivated directly by the operator's own reasoning: *"we had to have multiple statuses AND reason and the 429 usually has a reason with it."*
+
+**D — keep the immediate, uncorroborated verdict (Option A's simplicity), but stop discarding the real diagnostic content Anthropic actually sends.** Real research (2026-08-16, against `platform.claude.com`'s official API docs) confirmed Anthropic's 429 responses carry far more than a bare status code: a real `error.message` body plus multiple `anthropic-ratelimit-{requests,tokens,input-tokens,output-tokens}-{limit,remaining,reset}` headers and `retry-after`. Heimdall was discarding all of it in favor of a hardcoded `"rate limited (429)"` string.
+
+Implemented in `src/core/signal-sources/active-probe/claude.ts`:
+- The real `error.message` now becomes `reason`, via the same `parseClaudeCapSignal()` extraction `rotation-controller.ts`'s cap-signal detection already uses — one implementation, not a second one.
+- A message naming a **weekly limit** now resolves to `out_of_credit` instead of `degraded` — the multiple-statuses part of "multiple statuses AND reason": a weekly cap is functionally the same severity class as billing `out_of_credit` (won't recover until reset), not a transient rate limit.
+- `reset_at` still prefers the specific `anthropic-ratelimit-requests-reset` header (proven-correct, unchanged), falling back to `retry-after` when that header is absent.
+
+This resolves the original tension without adding corroboration complexity: the false-positive risk the lhs-00 spike flagged (a transient 429 wrongly excluding a usable lane) is mitigated because the *reason* itself now tells the operator (and `/lanes` observers) what's actually happening, rather than corroboration state trying to guess it blind. Codex's equivalent 429/usage-limit handling was not touched — flagged as a separate follow-up if the same enrichment is wanted there, not bundled into this decision.

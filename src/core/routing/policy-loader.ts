@@ -1,9 +1,45 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir as osHomedir } from "node:os";
 import { join } from "node:path";
 import { parseDocument } from "yaml";
 import { TASK_TYPES, type TaskType } from "../task-type.js";
 
-export const DEFAULT_POLICY_PATH = join(process.cwd(), "config", "routing-policy.yaml");
+// HEIMDALL_REPO_ROOT (introduced for the docs viewer, see http-server.ts's
+// docsRepoRoot) takes precedence over cwd for the same reason here: the
+// desktop app sets cwd to a per-user app-data directory (for .env/DB), not
+// the bundled resource root that actually contains config/. Without this,
+// PolicyLoader silently can't find the real policy file when running
+// packaged -- confirmed live, not hypothetical (ENOENT against the
+// app-data dir). Factored into a pure function (rather than inlined into
+// the module-level constant below) so the precedence is unit-testable --
+// process.env is read once at module load otherwise, which a test can't
+// observe changing.
+//
+// hdl-ao-01: a third, global-install-safe tier, same rationale as
+// resolveDefaultDbPath (state-store.ts) -- a plain `npm install -g` has
+// neither HEIMDALL_REPO_ROOT (desktop sidecar sets it explicitly) nor a real
+// repo checkout at cwd() (the dev/`npm test` flow), so `cwd()` alone
+// resolves to nonsense (grill-record H2). When HEIMDALL_REPO_ROOT is unset,
+// this checks whether cwd() actually has a real config/routing-policy.yaml
+// (the dev-checkout case, preserved exactly) before falling all the way
+// back to a fixed per-machine config dir under the user's home directory
+// (XDG-style, mirrors resolveDefaultDbPath's data dir).
+export function resolveDefaultPolicyPath(
+  env: Record<string, string | undefined> = process.env,
+  cwd: string = process.cwd(),
+  homedir: string = osHomedir(),
+): string {
+  if (env.HEIMDALL_REPO_ROOT) {
+    return join(env.HEIMDALL_REPO_ROOT, "config", "routing-policy.yaml");
+  }
+  const cwdPolicyPath = join(cwd, "config", "routing-policy.yaml");
+  if (existsSync(cwdPolicyPath)) {
+    return cwdPolicyPath;
+  }
+  return join(homedir, ".config", "heimdall", "routing-policy.yaml");
+}
+
+export const DEFAULT_POLICY_PATH = resolveDefaultPolicyPath();
 export const POLICY_SCHEMA_VERSION = "1.0";
 export const COST_PREFERENCES = ["quality", "balanced", "economy"] as const;
 

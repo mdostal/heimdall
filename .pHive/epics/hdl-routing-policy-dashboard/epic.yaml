@@ -1,0 +1,42 @@
+name: hdl-routing-policy-dashboard
+title: Read-only config/routing-policy.yaml dashboard panel
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: dev
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [small-scope, dashboard]
+  roster: []
+  per_tag_reasoning:
+    small-scope: one new read-only GET endpoint wrapping the existing PolicyLoader, one dashboard panel following an established pattern (telemetry/model-catalog).
+    dashboard: pure UI addition to the self-contained no-build-step dashboard.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: skipped (no design fork — explicitly named in docs/vision.md's Goals/Good-first-contributions as a well-scoped, read-only-first item)
+    hv_planning: not_applicable (single-operator execution, small well-understood scope)
+    structured_outline: not_applicable (same)
+
+description: >
+  docs/vision.md named this explicitly under both "Goals" and "Good first
+  contributions": the scored strategy's config/routing-policy.yaml is
+  hand-edited with no dashboard visibility. New GET /routing-policy wraps
+  the existing PolicyLoader.load() (already fully validated, already used
+  by the scored strategy) read-only, loaded fresh on every request so a
+  hand-edit is reflected immediately without a restart. Dashboard gets a
+  "Routing policy" panel — per-task-type provider weights table, headroom
+  floor, cost preference, and experiment arm status — following the same
+  "summary surface loaded once on page load" pattern as the existing
+  Telemetry and Model catalog panels. Live-verified in a real browser via
+  Playwright (not just curl): the panel renders the real policy file's
+  actual weights correctly.
+
+stories:
+  - id: hdl-rpd-01-endpoint-and-panel
+    title: GET /routing-policy + dashboard panel + tests
+    complexity: low
+    depends_on: []

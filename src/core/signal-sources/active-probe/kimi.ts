@@ -17,10 +17,15 @@
 // (engine_overloaded, too_many_requests) from longer-lived quota exhaustion
 // (billing_quota_exhausted, monthly_quota_exhausted, rolling_quota_exceeded).
 //
-// reset_at passes the raw retry-after header value straight through with NO
-// relative-to-absolute conversion — mirroring codex.ts's own already-
-// accepted simplification for the identical header shape, not a new gap
-// introduced here.
+// hdl-error-taxonomy (2026-08-16): CONFIRMED BUG FIXED — reset_at used to
+// pass the raw retry-after header value straight through with NO
+// relative-to-absolute conversion (this file's own prior comment admitted
+// it, "mirroring codex.ts's own already-accepted simplification" — codex.ts
+// has since been fixed too, see that file). Now uses the same
+// parseRetryAfter() helper every provider adapter reuses.
+
+import { parseRetryAfter } from "../../error-parser.js";
+import type { ErrorCode } from "../../status-model.js";
 
 export type ProbeStatusValue = "up" | "down" | "out_of_credit" | "degraded";
 
@@ -28,6 +33,7 @@ export interface ProbeResult {
   status: ProbeStatusValue;
   reset_at: string | null;
   reason: string | null;
+  error_code: ErrorCode | null;
 }
 
 const KIMI_MODELS_URL = "https://api.moonshot.ai/v1/models";
@@ -59,6 +65,7 @@ export async function probeKimiLane(
       status: "down",
       reset_at: null,
       reason: `probe request failed: ${err instanceof Error ? err.message : String(err)}`,
+      error_code: "network_error",
     };
   }
 
@@ -73,6 +80,7 @@ export async function probeKimiLane(
       status: "down",
       reset_at: null,
       reason: body.error?.message ?? `auth failed (${response.status})`,
+      error_code: "auth_failed",
     };
   }
 
@@ -85,29 +93,31 @@ export async function probeKimiLane(
     }
     const type = body.error?.type ?? "";
     if (AUTH_ERROR_TYPES.has(type)) {
-      return { status: "down", reset_at: null, reason: body.error?.message ?? "auth failed" };
+      return { status: "down", reset_at: null, reason: body.error?.message ?? "auth failed", error_code: "auth_failed" };
     }
     if (OUT_OF_CREDIT_ERROR_TYPES.has(type)) {
       return {
         status: "out_of_credit",
-        reset_at: null,
+        reset_at: parseRetryAfter(response.headers.get("retry-after"), new Date()),
         reason: body.error?.message ?? "quota exceeded",
+        error_code: "quota_exceeded",
       };
     }
     return {
       status: "degraded",
-      reset_at: response.headers.get("retry-after"),
+      reset_at: parseRetryAfter(response.headers.get("retry-after"), new Date()),
       reason: body.error?.message ?? `rate limited (${response.status})`,
+      error_code: "rate_limit",
     };
   }
 
   if (response.status >= 500) {
-    return { status: "down", reset_at: null, reason: `server error (${response.status})` };
+    return { status: "down", reset_at: null, reason: `server error (${response.status})`, error_code: "server_error" };
   }
 
   if (response.ok) {
-    return { status: "up", reset_at: null, reason: null };
+    return { status: "up", reset_at: null, reason: null, error_code: null };
   }
 
-  return { status: "degraded", reset_at: null, reason: `unexpected status ${response.status}` };
+  return { status: "degraded", reset_at: null, reason: `unexpected status ${response.status}`, error_code: "unknown" };
 }

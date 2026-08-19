@@ -21,6 +21,18 @@ developer:
 planning:
   collaborative_review: true
 
+# Pinned explicitly (2026-08-18) because resolveGitFlow's `auto` mode only
+# probes for a branch literally named `develop` -- this repo's real
+# integration branch is `dev`, so `auto` silently fell back to `main` and
+# would have planned this epic on the wrong base. Established, repeatedly-
+# confirmed convention this session: feature branches off `dev`, merged back
+# to `dev`; `main` only moves on a deliberate `dev`-cut release (see the
+# hdl-routing-reconciliation epic, which existed specifically to fix work
+# mistakenly built off `main` instead of `dev`).
+git_flow:
+  default_pr_base: dev
+  branch_strategy: per-epic
+
 meta_team:
   github_forwarding: false
 

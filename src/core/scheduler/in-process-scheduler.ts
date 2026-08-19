@@ -13,9 +13,22 @@ import type { LanePipeline } from "../lane-pipeline.js";
 import type { StateStore } from "../state-store.js";
 import type { Lane } from "../lane-registry.js";
 import type { ArgusEmitter } from "../telemetry/argus-client.js";
-import type { LaneStatusValue } from "../status-model.js";
+import type { ErrorCode, LaneStatusValue } from "../status-model.js";
 
 const SUSPECT_STATUSES: readonly LaneStatusValue[] = ["degraded", "down", "out_of_credit"];
+
+// hdl-error-taxonomy: the fine ~5s cadence exists to catch a lane
+// self-healing within the 10-second SLA (test/sla-harness's own finding:
+// slower than ~5s risks missing the 2-tick corroboration window — see
+// docs/vision.md's "Goals" section). That guarantee only matters for error
+// classes that CAN self-heal on their own timer (rate_limit, quota_exceeded,
+// server_error, network_error, unknown). auth_failed cannot — no amount of
+// re-probing detects a credential fixing itself faster; only an operator
+// action does. Backing off ONLY this one class is therefore safe: there is
+// no self-healing event to risk missing within the SLA window. 5 minutes
+// balances "stop wasting probes on a lane that won't recover on its own"
+// against "notice reasonably soon once an operator does fix it".
+const AUTH_FAILED_BACKOFF_MS = 5 * 60_000;
 
 export interface InProcessSchedulerOptions {
   lane: Lane;
@@ -72,8 +85,14 @@ export class InProcessScheduler implements Scheduler {
    * this.intervalMs so a past/near/malformed reset_at (clock skew, stale
    * data) can never produce a zero/negative/busy-loop delay. No ceiling —
    * a reset_at far in the future is honored in full, that's the point.
+   *
+   * errorCode is consulted FIRST: auth_failed always backs off to a fixed
+   * long interval regardless of reset_at (which is always null for this
+   * class anyway — see file header for why this is the one safe exception
+   * to the SLA-driven fine cadence).
    */
-  private computeDelayMs(resetAt: string | null): number {
+  private computeDelayMs(resetAt: string | null, errorCode: ErrorCode | null): number {
+    if (errorCode === "auth_failed") return AUTH_FAILED_BACKOFF_MS;
     if (!resetAt) return this.intervalMs;
     const resetAtMs = Date.parse(resetAt);
     if (Number.isNaN(resetAtMs)) return this.intervalMs;
@@ -148,8 +167,18 @@ export class InProcessScheduler implements Scheduler {
     // wins over the sensed reset_at, same precedence as manual_override
     // wins over sensed status in MulticaControlAdapter — scheduling-only,
     // does not touch ReconcileContext/ControlAdapter/Argus.
+    // hdl-lm-03: an operator-supplied manual_reset_at wins outright — over
+    // BOTH the sensed reset_at and the auth_failed backoff below. An
+    // explicit operator signal is always the highest-precedence input,
+    // matching every other override in this codebase (manual_override,
+    // priority, etc.) — never silently overridden by an automatic
+    // error-code-driven heuristic.
     const manualResetAt = this.opts.store.getManualResetAt(this.opts.lane.lane_id);
-    const delayMs = stillSuspect ? this.computeDelayMs(manualResetAt ?? latest!.reset_at) : this.intervalMs;
+    const delayMs = !stillSuspect
+      ? this.intervalMs
+      : manualResetAt !== null
+        ? this.computeDelayMs(manualResetAt, null)
+        : this.computeDelayMs(latest!.reset_at, latest!.error_code);
     this.scheduleNext(delayMs);
   }
 }

@@ -17,7 +17,7 @@ function fakeFetch(status: number, body: unknown = null, headers: Record<string,
 
 test("a successful probe resolves to up", async () => {
   const result = await probeKimiLane("fake-key", fakeFetch(200));
-  assert.deepEqual(result, { status: "up", reset_at: null, reason: null });
+  assert.deepEqual(result, { status: "up", reset_at: null, reason: null, error_code: null });
 });
 
 test("401 with invalid_api_key resolves to down", async () => {
@@ -26,15 +26,22 @@ test("401 with invalid_api_key resolves to down", async () => {
     fakeFetch(401, { error: { type: "invalid_api_key", message: "The API Key appears to be invalid" } }),
   );
   assert.equal(result.status, "down");
+  assert.equal(result.error_code, "auth_failed");
 });
 
-test("429 with engine_overloaded resolves to degraded and carries raw retry-after as reset_at", async () => {
+test("429 with engine_overloaded resolves to degraded, reset_at converted to an absolute timestamp", async () => {
   const result = await probeKimiLane(
     "fake-key",
     fakeFetch(429, { error: { type: "engine_overloaded", message: "try again later" } }, { "retry-after": "30" }),
   );
   assert.equal(result.status, "degraded");
-  assert.equal(result.reset_at, "30");
+  assert.equal(result.error_code, "rate_limit");
+  // hdl-error-taxonomy: CONFIRMED BUG FIX — this file's own prior comment
+  // admitted reset_at passed the raw "30" through unconverted. Now a real,
+  // parseable absolute ISO timestamp ~30s out.
+  assert.ok(result.reset_at !== null && !Number.isNaN(Date.parse(result.reset_at)), `expected a real timestamp, got ${result.reset_at}`);
+  const deltaMs = Date.parse(result.reset_at!) - Date.now();
+  assert.ok(deltaMs > 25_000 && deltaMs < 35_000, `expected ~30s out, got ${deltaMs}ms`);
 });
 
 test("429 with too_many_requests resolves to degraded", async () => {
