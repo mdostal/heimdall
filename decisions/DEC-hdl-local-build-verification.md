@@ -5,8 +5,8 @@
 ## Decision
 
 GitHub Actions is no longer the merge gate for this repo. The build box is
-**the hive** (`dostal@100.75.161.82` / `thes-mac-studio.lan`) — a dedicated,
-build-only checkout at `/Users/dostal/hive-ci/heimdall`, verified via
+**the hive** (`<build-box-user>@<build-box-ip>` / `<build-box-host>`) — a
+dedicated, build-only checkout at `/path/to/hive-ci/heimdall`, verified via
 [`scripts/hive-verify.sh`](../../scripts/hive-verify.sh) (`git reset --hard`
 to the target ref → `npm ci` → `npm run build` → `npm test`). A `PASS` from
 that script is what gates a merge to `main` now, not a GitHub Actions check.
@@ -48,15 +48,15 @@ not a one-off workaround.
 
 ## Consequences
 
-- Before merging a PR to `main`, run `ssh dostal@100.75.161.82
-  /Users/dostal/hive-ci/verify-heimdall.sh <ref>` (or the equivalent local
+- Before merging a PR to `main`, run `ssh <build-box-user>@<build-box-ip>
+  /path/to/hive-ci/verify-heimdall.sh <ref>` (or the equivalent local
   script at `scripts/hive-verify.sh` if run directly on the hive box) and
   confirm `PASS` before merging — this replaces "wait for the green check."
 - If GitHub Actions billing gets resolved later, re-enabling `ci.yml`'s
   `pull_request:` trigger is a one-line revert of this doc's change — the
   workflow file itself is untouched otherwise.
-- The hive-box build checkout (`/Users/dostal/hive-ci/heimdall`) needs the
-  same Node version Heimdall requires (`>=22.5.0`) — confirmed present via
+- The hive-box build checkout (`/path/to/hive-ci/heimdall`) needs the
+  same Node version Heimdall requires (`>=22.13.0`) — confirmed present via
   `nvm` (`v24.18.1` at time of writing) — `hive-verify.sh` sources `nvm.sh`
   itself so it works whether invoked interactively or over a bare `ssh
   host command` (non-login shell, no profile sourced by default).

@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 # scripts/install.sh — Heimdall install-and-onboard script.
 #
-# NOTE: This script is not yet reachable via a live curl URL (e.g.
-# `curl -fsSL https://.../install.sh | bash`). Publishing it to GitHub Pages
-# so it can be curled is story hdl-ao-06, not this one — for now it's meant
-# to be run locally from a checkout (`bash scripts/install.sh`) or fetched
-# manually.
+# Live on GitHub Pages (hdl-ao-06) — fetch and run directly with:
+#   curl -fsSL https://mdostal.github.io/heimdall/install.sh | bash
 #
+
 # Core logic (intentionally just these two steps):
 #   1. npm install -g pantheon-heimdall
 #   2. heimdall agent init
