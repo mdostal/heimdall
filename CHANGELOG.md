@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-08-19
+
+13 epics accumulated in `[Unreleased]` since `v0.20.0` (2026-08-14): route-outcome-feedback, own-telemetry, 429-corroboration, error-taxonomy, docs-viewer, desktop-app, routing-policy-dashboard, policy-path-fix, override-reason, unified-dashboard, desktop-icon-settings, icon-reconciliation, and agent-onboarding. Each entry below documents its own version bump inline.
+
 ### Added
 
 - **`hdl-agent-onboarding` epic complete — Heimdall gets a real install story for the first time.** Operator: *"every agent, harness, etc that uses this needs a way to install and interact with it -- it should be top and forward so people can see when installing and working and what to feed the agent or harness to get interactivity,"* modeled on (not copied from) Portunus's own real, shipped `agent init`/`agent status` pattern. Heimdall started this epic with zero `bin` entrypoint, no packaged CLI, no MCP-registration story, zero skills, and a dashboard with no onboarding surface at all.
