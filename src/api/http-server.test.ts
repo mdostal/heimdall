@@ -13,6 +13,7 @@ import {
   setLaneCostTier,
   addLane,
   setBackoffPolicy,
+  setBackoffPolicyOverride,
 } from "./http-server.js";
 import { LaneRegistry } from "../core/lane-registry.js";
 import { StateStore } from "../core/state-store.js";
@@ -20,6 +21,9 @@ import { EnvCredentialSource } from "../core/credential-source.js";
 import { LANE_STATUS_VALUES, SIGNAL_SOURCES } from "../core/status-model.js";
 import { LanePipeline, claudeAdapters } from "../core/lane-pipeline.js";
 import { RotationController, ProviderScopedLaneRegistry } from "../core/rotation-controller.js";
+import { InProcessScheduler } from "../core/scheduler/in-process-scheduler.js";
+import type { Lane } from "../core/lane-registry.js";
+import type { ArgusEmitter } from "../core/telemetry/argus-client.js";
 
 /** Never the real repo .env — every POST /lanes test uses one of these, cleaned up after. */
 function tmpEnvPath(): string {
@@ -2747,6 +2751,427 @@ test("hdl-bp-04: setBackoffPolicy rejects a non-string name the same way (return
     const result = setBackoffPolicy(store, 42);
     assert.equal(result.ok, false);
   } finally {
+    store.close();
+  }
+});
+
+// hdl-bp-05: GET/POST /backoff-policy — mirrors GET/POST /routing-strategy's
+// real shape exactly.
+
+test("hdl-bp-05: GET /backoff-policy defaults to 'static' active with all 3 policies listed as available", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/backoff-policy`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.active, "static");
+    assert.deepEqual(body.available.sort(), ["exponential", "progressive", "static"]);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-bp-05: POST /backoff-policy with a valid name updates the setting, and GET /backoff-policy reflects it", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const setRes = await fetch(`http://localhost:${port}/backoff-policy`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ policy: "exponential" }),
+    });
+    assert.equal(setRes.status, 200);
+    const setBody = await setRes.json();
+    assert.equal(setBody.active, "exponential");
+
+    const getRes = await fetch(`http://localhost:${port}/backoff-policy`);
+    assert.equal((await getRes.json()).active, "exponential");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-bp-05: POST /backoff-policy with an invalid name returns a structured 400 {error, allowed_policies}, does not throw, and does not change the active policy", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/backoff-policy`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ policy: "not-a-real-policy" }),
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.error, "invalid_policy");
+    assert.deepEqual(body.allowed_policies.sort(), ["exponential", "progressive", "static"]);
+
+    const getRes = await fetch(`http://localhost:${port}/backoff-policy`);
+    assert.equal((await getRes.json()).active, "static", "an invalid POST must not change the persisted setting");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+// hdl-bp-05: real integration test — POST /backoff-policy through the HTTP
+// layer must actually change InProcessScheduler's computed delay via
+// hdl-bp-04's live-settings wiring, not just persist an inert setting row.
+// Same StateStore instance backs both the HTTP server and the scheduler, no
+// scheduler restart between the POST and the next poll() tick.
+
+test("hdl-bp-05: POST /backoff-policy against a real server changes InProcessScheduler's actual next-tick delay, live, no restart", async () => {
+  const LANE: Lane = {
+    lane_id: "claude@mathew.dostal",
+    provider: "claude",
+    credential_ref: "CLAUDE_TOKEN",
+    credential: "fake",
+  };
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: LANE.lane_id, provider: LANE.provider, credential_ref: LANE.credential_ref });
+  store.recordStatus({
+    lane_id: LANE.lane_id,
+    status: "degraded",
+    reset_at: null,
+    reason: null,
+    error_code: null,
+    signal_source: "active_probe",
+    observed_at: "2026-08-19T12:00:00.000Z",
+  });
+
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  const delays: number[] = [];
+  const argus: ArgusEmitter = { emitTick: () => {}, emitStatusFlip: () => {}, emitActuationResult: () => {} };
+  const scheduler = new InProcessScheduler({
+    lane: LANE,
+    pipeline: { refresh: async () => {} } as unknown as LanePipeline,
+    store,
+    argus,
+    setTimeoutImpl: ((fn: () => void, ms: number) => {
+      delays.push(ms);
+      return {} as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+  });
+
+  try {
+    scheduler.start(); // delays[0]: default interval, unrelated to this test
+    await scheduler.poll(); // 1st suspect tick, unset settings -> 'static' default: flat 5000
+    assert.equal(delays.at(-1), 5_000, "byte-identical static default before any POST");
+
+    // The live HTTP mutation under test — no scheduler restart follows this.
+    const setRes = await fetch(`http://localhost:${port}/backoff-policy`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ policy: "exponential" }),
+    });
+    assert.equal(setRes.status, 200);
+    await fetch(`http://localhost:${port}/backoff-policy/exponential-multiplier`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: 2 }),
+    });
+
+    await scheduler.poll(); // 2nd suspect tick: exponential(2) = 5000 * 2**(2-1) = 10000
+    assert.equal(
+      delays.at(-1),
+      10_000,
+      "the POST /backoff-policy change must take effect on the scheduler's very next tick, live, without a restart",
+    );
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+// hdl-bp-05: per-provider override routes.
+
+test("hdl-bp-05: GET /backoff-policy/override/:provider for an unknown provider returns 404 unknown_provider", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/backoff-policy/override/not-a-real-provider`);
+    assert.equal(res.status, 404);
+    const body = await res.json();
+    assert.equal(body.error, "unknown_provider");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-bp-05: GET /backoff-policy/override/:provider for a known provider with no override set reports override:null, effective:global choice", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/backoff-policy/override/claude`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body, { provider: "claude", override: null, effective: "static" });
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-bp-05: POST /backoff-policy/override/:provider sets the override, GET reflects it, and clearing with policy:null falls back to the global choice", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const setRes = await fetch(`http://localhost:${port}/backoff-policy/override/ollama`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ policy: "static" }),
+    });
+    assert.equal(setRes.status, 200);
+    assert.deepEqual(await setRes.json(), { provider: "ollama", override: "static" });
+
+    const getRes = await fetch(`http://localhost:${port}/backoff-policy/override/ollama`);
+    const getBody = await getRes.json();
+    assert.equal(getBody.override, "static");
+    assert.equal(getBody.effective, "static");
+
+    const clearRes = await fetch(`http://localhost:${port}/backoff-policy/override/ollama`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ policy: null }),
+    });
+    assert.equal(clearRes.status, 200);
+    assert.deepEqual(await clearRes.json(), { provider: "ollama", override: null });
+
+    const afterClearRes = await fetch(`http://localhost:${port}/backoff-policy/override/ollama`);
+    assert.equal((await afterClearRes.json()).override, null);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-bp-05: POST /backoff-policy/override/:provider with an invalid policy name returns a structured 400, does not throw", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/backoff-policy/override/codex`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ policy: "not-a-real-policy" }),
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.error, "invalid_policy");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-bp-05: POST /backoff-policy/override/:provider for an unknown provider returns 404, not a 400", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/backoff-policy/override/not-a-real-provider`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ policy: "static" }),
+    });
+    assert.equal(res.status, 404);
+    assert.equal((await res.json()).error, "unknown_provider");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-bp-05: setBackoffPolicyOverride is independently callable without an HTTP server", () => {
+  const store = new StateStore(":memory:");
+  try {
+    const result = setBackoffPolicyOverride(store, "kimi", "progressive");
+    assert.deepEqual(result, { ok: true, provider: "kimi", override: "progressive" });
+    assert.equal(store.getSetting("backoff_policy_override_kimi"), "progressive");
+  } finally {
+    store.close();
+  }
+});
+
+// hdl-bp-05: per-policy-parameter routes — individually GET/POST-able.
+
+test("hdl-bp-05: GET/POST /backoff-policy/progressive-level-cap defaults to 10 and is independently settable", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const defaultRes = await fetch(`http://localhost:${port}/backoff-policy/progressive-level-cap`);
+    assert.deepEqual(await defaultRes.json(), { value: 10 });
+
+    const setRes = await fetch(`http://localhost:${port}/backoff-policy/progressive-level-cap`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: 4 }),
+    });
+    assert.equal(setRes.status, 200);
+    assert.deepEqual(await setRes.json(), { value: 4 });
+
+    const getRes = await fetch(`http://localhost:${port}/backoff-policy/progressive-level-cap`);
+    assert.deepEqual(await getRes.json(), { value: 4 });
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-bp-05: POST /backoff-policy/progressive-level-cap rejects zero, negative, and non-integer values with a structured 400", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    for (const value of [0, -3, 2.5, "10", null]) {
+      const res = await fetch(`http://localhost:${port}/backoff-policy/progressive-level-cap`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ value }),
+      });
+      assert.equal(res.status, 400, `expected 400 for value=${JSON.stringify(value)}`);
+      assert.equal((await res.json()).error, "invalid_level_cap");
+    }
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-bp-05: GET/POST /backoff-policy/exponential-multiplier defaults to 2 and is independently settable", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    assert.deepEqual(await (await fetch(`http://localhost:${port}/backoff-policy/exponential-multiplier`)).json(), { value: 2 });
+
+    const setRes = await fetch(`http://localhost:${port}/backoff-policy/exponential-multiplier`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: 3.5 }),
+    });
+    assert.equal(setRes.status, 200);
+    assert.deepEqual(await setRes.json(), { value: 3.5 });
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-bp-05: POST /backoff-policy/exponential-multiplier rejects values <= 1 with a structured 400", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    for (const value of [1, 0.5, -2]) {
+      const res = await fetch(`http://localhost:${port}/backoff-policy/exponential-multiplier`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ value }),
+      });
+      assert.equal(res.status, 400, `expected 400 for value=${value}`);
+      assert.equal((await res.json()).error, "invalid_multiplier");
+    }
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-bp-05: GET/POST /backoff-policy/exponential-ceiling-ms defaults to 300000 and is independently settable", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    assert.deepEqual(await (await fetch(`http://localhost:${port}/backoff-policy/exponential-ceiling-ms`)).json(), {
+      value: 300_000,
+    });
+
+    const setRes = await fetch(`http://localhost:${port}/backoff-policy/exponential-ceiling-ms`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: 60_000 }),
+    });
+    assert.equal(setRes.status, 200);
+    assert.deepEqual(await setRes.json(), { value: 60_000 });
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-bp-05: POST /backoff-policy/exponential-ceiling-ms rejects a value at or below the base interval (5000ms) with a structured 400", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    for (const value of [5_000, 4_999, 0, -1]) {
+      const res = await fetch(`http://localhost:${port}/backoff-policy/exponential-ceiling-ms`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ value }),
+      });
+      assert.equal(res.status, 400, `expected 400 for value=${value}`);
+      assert.equal((await res.json()).error, "invalid_ceiling_ms");
+    }
+  } finally {
+    server.close();
     store.close();
   }
 });

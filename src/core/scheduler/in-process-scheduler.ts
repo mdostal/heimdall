@@ -59,7 +59,11 @@ export interface InProcessSchedulerOptions {
   nowImpl?: () => string;
 }
 
-const DEFAULT_INTERVAL_MS = 5_000;
+// hdl-bp-05: exported so http-server.ts can validate a new ceiling_ms
+// against the actual base interval, rather than a second hardcoded copy of
+// this number — main.ts never passes intervalMs, so this constant is the
+// real effective base interval for every existing deployment today.
+export const DEFAULT_INTERVAL_MS = 5_000;
 
 export class InProcessScheduler implements Scheduler {
   private readonly intervalMs: number;

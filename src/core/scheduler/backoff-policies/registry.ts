@@ -87,6 +87,25 @@ function readNumberSetting(store: StateStore, key: string, fallback: number): nu
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+// hdl-bp-05: read-side getters for the individually GET/POST-able parameter
+// routes in http-server.ts — same split ownership as everything else in
+// this file (core owns the setting keys and read access; http-server.ts
+// owns the write side + wire format). Each just exposes readNumberSetting's
+// resolved value (raw-or-default) for one parameter, so the HTTP layer never
+// re-implements the parsing/fallback logic getBackoffPolicyConfig already
+// has.
+export function getBackoffProgressiveLevelCap(store: StateStore): number {
+  return readNumberSetting(store, BACKOFF_PROGRESSIVE_LEVEL_CAP_SETTING_KEY, DEFAULT_PROGRESSIVE_LEVEL_CAP);
+}
+
+export function getBackoffExponentialMultiplier(store: StateStore): number {
+  return readNumberSetting(store, BACKOFF_EXPONENTIAL_MULTIPLIER_SETTING_KEY, DEFAULT_EXPONENTIAL_MULTIPLIER);
+}
+
+export function getBackoffExponentialCeilingMs(store: StateStore): number {
+  return readNumberSetting(store, BACKOFF_EXPONENTIAL_CEILING_MS_SETTING_KEY, DEFAULT_EXPONENTIAL_CEILING_MS);
+}
+
 /**
  * Builds the `config` object a BackoffPolicy.nextDelayMs() expects for
  * whichever policy is active — `{levelCap}` for progressive,
