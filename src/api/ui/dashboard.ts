@@ -263,6 +263,28 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
     border: 1px solid var(--hd-border-strong);
     border-radius: var(--hd-radius);
   }
+  /* hdl-bp-06: per-lane headroom/cost-tier controls reuse the reset-at
+     control's exact visual pattern (same wrapper class, same button rule
+     already scoped to .reset-at-controls button above) -- only the input
+     type differs. */
+  .reset-at-controls input[type="number"] {
+    font-size: 0.78rem;
+    padding: 0.1rem 0.3rem;
+    width: 4.5rem;
+    background: var(--hd-surface);
+    color: var(--hd-text);
+    border: 1px solid var(--hd-border-strong);
+    border-radius: var(--hd-radius);
+  }
+  .reset-at-controls select {
+    font-size: 0.78rem;
+    padding: 0.1rem 0.3rem;
+    max-width: 8rem;
+    background: var(--hd-surface);
+    color: var(--hd-text);
+    border: 1px solid var(--hd-border-strong);
+    border-radius: var(--hd-radius);
+  }
   .panel {
     background: var(--hd-surface);
     border: 1px solid var(--hd-border);
@@ -515,6 +537,45 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
     <div class="strategy-status" style="margin-top:1rem;">Desktop app icon</div>
     <div class="icon-picker" id="icon-picker"></div>
     <div class="settings-note" id="icon-settings-note"></div>
+
+    <div class="strategy-status" style="margin-top:1rem;">Probe backoff</div>
+    <div class="settings-note">
+      How fast Heimdall backs off on re-probing a lane that keeps failing, versus how quickly it notices a self-healed lane again. <strong>Conservative</strong> keeps today's flat retry interval — the existing ~10-second-class responsiveness for self-healing errors. <strong>Balanced</strong> and <strong>Aggressive</strong> trade some of that responsiveness for far fewer wasted probes against a lane that's genuinely staying down.
+    </div>
+    <div class="theme-picker" id="backoff-preset-picker" style="margin-top:0.5rem;"></div>
+    <div id="backoff-preset-descriptions" style="margin-top:0.4rem;"></div>
+    <div class="row" style="margin-top:0.6rem;">
+      <button type="button" id="backoff-advanced-toggle">Show advanced</button>
+    </div>
+    <div id="backoff-advanced-panel" style="display:none; margin-top:0.5rem;">
+      <div class="settings-note">Raw parameter values behind Balanced/Aggressive above — editing these changes what those presets actually do.</div>
+      <div class="row" style="margin-top:0.5rem;">
+        <span class="strategy-status">Progressive level cap (ticks until the delay holds flat)</span>
+      </div>
+      <div class="row">
+        <input type="number" min="1" step="1" id="backoff-level-cap-input">
+        <button type="button" id="backoff-level-cap-save">Save</button>
+      </div>
+      <div class="row">
+        <span class="strategy-status">Exponential multiplier (delay growth per tick)</span>
+      </div>
+      <div class="row">
+        <input type="number" min="1.01" step="0.1" id="backoff-multiplier-input">
+        <button type="button" id="backoff-multiplier-save">Save</button>
+      </div>
+      <div class="row">
+        <span class="strategy-status">Exponential ceiling, ms (hard cap on the delay)</span>
+      </div>
+      <div class="row">
+        <input type="number" min="1" step="1000" id="backoff-ceiling-input">
+        <button type="button" id="backoff-ceiling-save">Save</button>
+      </div>
+      <div id="backoff-advanced-banner"></div>
+    </div>
+
+    <div class="strategy-status" style="margin-top:1rem;">Per-provider override</div>
+    <div class="settings-note">Replace the global choice above for one provider's lanes only. Clear the override to fall back to whatever's globally active.</div>
+    <div id="backoff-provider-root" style="margin-top:0.4rem;">Loading…</div>
   </div>
 
   <div id="root">Loading…</div>
@@ -616,6 +677,54 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
     );
   }
 
+  // hdl-bp-06: per-lane headroom, live-editable -- same visual pattern as
+  // resetAtCell above (a display line with a "manual" badge when set, plus
+  // an inline input+Save, with a Clear button appearing only once a manual
+  // value exists). Wired to POST /lanes/:laneId/headroom {headroom} from
+  // hdl-bp-01 (null clears back to the env-var/registry default).
+  function headroomCell(lane) {
+    var hasManual = lane.manual_headroom !== null && lane.manual_headroom !== undefined;
+    var manualBadge = hasManual ? "<span class=\\"override-badge\\">manual</span>" : "";
+    var laneAttr = escapeHtml(lane.lane_id);
+    var display = hasManual ? escapeHtml(String(lane.manual_headroom)) : "auto";
+    var inputValue = hasManual ? String(lane.manual_headroom) : "";
+    var clearBtn = hasManual
+      ? "<button type=\\"button\\" data-lane=\\"" + laneAttr + "\\" data-headroom-clear=\\"1\\">Clear</button>"
+      : "";
+    return (
+      "<div>" + display + manualBadge + "</div>" +
+      "<div class=\\"reset-at-controls\\">" +
+      "<input type=\\"number\\" step=\\"any\\" min=\\"0\\" placeholder=\\"auto\\" data-headroom-input=\\"1\\" data-lane=\\"" + laneAttr + "\\" value=\\"" + inputValue + "\\">" +
+      "<button type=\\"button\\" data-lane=\\"" + laneAttr + "\\" data-headroom-save=\\"1\\">Save</button>" +
+      clearBtn +
+      "</div>"
+    );
+  }
+
+  // hdl-bp-06: per-lane cost tier, live-editable -- same pattern as
+  // headroomCell above, a dropdown instead of a free-form number. Wired to
+  // POST /lanes/:laneId/cost-tier {cost_tier} from hdl-bp-01 (the "auto"
+  // option sends null, clearing back to the registry default).
+  var COST_TIERS = ["low", "medium", "high"];
+
+  function costTierCell(lane) {
+    var current = lane.manual_cost_tier;
+    var hasManual = current !== null && current !== undefined;
+    var manualBadge = hasManual ? "<span class=\\"override-badge\\">manual</span>" : "";
+    var laneAttr = escapeHtml(lane.lane_id);
+    var options = "<option value=\\"\\">auto</option>" + COST_TIERS.map(function (tier) {
+      var selected = current === tier ? " selected" : "";
+      return "<option value=\\"" + tier + "\\"" + selected + ">" + tier + "</option>";
+    }).join("");
+    return (
+      "<div>" + escapeHtml(current || "auto") + manualBadge + "</div>" +
+      "<div class=\\"reset-at-controls\\">" +
+      "<select data-cost-tier-select=\\"1\\" data-lane=\\"" + laneAttr + "\\">" + options + "</select>" +
+      "<button type=\\"button\\" data-lane=\\"" + laneAttr + "\\" data-cost-tier-save=\\"1\\">Save</button>" +
+      "</div>"
+    );
+  }
+
   function errorCodeChip(lane) {
     // hdl-error-taxonomy: the normalized code, distinct from the native
     // reason text — "degraded from X" at a glance, full detail still in the
@@ -636,6 +745,8 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       "<td>" + tokenChip(lane) + "</td>" +
       "<td class=\\"reason\\">" + errorCodeChip(lane) + escapeHtml(lane.reason) + "</td>" +
       "<td>" + resetAtCell(lane) + "</td>" +
+      "<td>" + headroomCell(lane) + "</td>" +
+      "<td>" + costTierCell(lane) + "</td>" +
       "<td>" + escapeHtml(lane.last_updated) + "</td>" +
       "<td>" + escapeHtml(lane.signal_source) + "</td>" +
       "<td>" + overrideControls(lane) + "</td>" +
@@ -665,7 +776,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
         seenGroupHeader[key] = true;
         htmlParts.push(
           "<tr class=\\"gateway-header\\">" +
-          "<td colspan=\\"10\\">" + escapeHtml(lane.provider) + " gateway — credential: " + escapeHtml(key) + "</td>" +
+          "<td colspan=\\"12\\">" + escapeHtml(lane.provider) + " gateway — credential: " + escapeHtml(key) + "</td>" +
           "</tr>",
         );
       }
@@ -744,7 +855,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       "<table>" +
       "<thead><tr>" +
       "<th>Lane</th><th>Provider</th><th>Model</th><th>Status</th><th>Token</th><th>Reason</th>" +
-      "<th>Reset at</th><th>Last updated</th><th>Signal source</th><th>Override</th>" +
+      "<th>Reset at</th><th>Headroom</th><th>Cost tier</th><th>Last updated</th><th>Signal source</th><th>Override</th>" +
       "</tr></thead>" +
       "<tbody>" + rows + "</tbody>" +
       "</table>";
@@ -809,6 +920,59 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       })
         .then(poll)
         .catch(function () { clearBtn.disabled = false; });
+      return;
+    }
+
+    // hdl-bp-06: per-lane headroom Save/Clear -- same delegation pattern as
+    // the reset-at controls just above (event delegation survives the 5s
+    // re-render; direct listeners on the buttons wouldn't).
+    var headroomSaveBtn = event.target.closest("button[data-headroom-save]");
+    if (headroomSaveBtn) {
+      var hLaneId = headroomSaveBtn.getAttribute("data-lane");
+      var hInput = document.querySelector('input[data-headroom-input][data-lane="' + CSS.escape(hLaneId) + '"]');
+      if (!hInput) return;
+      var headroomValue = hInput.value === "" ? null : Number(hInput.value);
+      headroomSaveBtn.disabled = true;
+      fetch("/lanes/" + encodeURIComponent(hLaneId) + "/headroom", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ headroom: headroomValue })
+      })
+        .then(poll)
+        .catch(function () { headroomSaveBtn.disabled = false; });
+      return;
+    }
+
+    var headroomClearBtn = event.target.closest("button[data-headroom-clear]");
+    if (headroomClearBtn) {
+      var hcLaneId = headroomClearBtn.getAttribute("data-lane");
+      headroomClearBtn.disabled = true;
+      fetch("/lanes/" + encodeURIComponent(hcLaneId) + "/headroom", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ headroom: null })
+      })
+        .then(poll)
+        .catch(function () { headroomClearBtn.disabled = false; });
+      return;
+    }
+
+    // hdl-bp-06: per-lane cost-tier Save -- the "auto" select option sends
+    // null, clearing the manual override back to the registry default.
+    var costTierSaveBtn = event.target.closest("button[data-cost-tier-save]");
+    if (costTierSaveBtn) {
+      var ctLaneId = costTierSaveBtn.getAttribute("data-lane");
+      var ctSelect = document.querySelector('select[data-cost-tier-select][data-lane="' + CSS.escape(ctLaneId) + '"]');
+      if (!ctSelect) return;
+      var costTierValue = ctSelect.value === "" ? null : ctSelect.value;
+      costTierSaveBtn.disabled = true;
+      fetch("/lanes/" + encodeURIComponent(ctLaneId) + "/cost-tier", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ cost_tier: costTierValue })
+      })
+        .then(poll)
+        .catch(function () { costTierSaveBtn.disabled = false; });
     }
   });
 
@@ -1199,6 +1363,183 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       });
   });
 
+  // Probe backoff (hdl-bp-06) — named-preset framing over the pluggable
+  // BackoffPolicy registry from hdl-bp-02/03/04/05. Same "loaded once, not
+  // on the 5s lane poll" reasoning as routing-strategy/theme/icon above:
+  // this is a config panel, not a live status row. Real worked numbers from
+  // design-discussion.md §3 item 2 (grill H2's fix) baked directly into the
+  // copy, not left as bare formulas: at the shipped defaults (multiplier=2,
+  // ceilingMs=300_000, baseIntervalMs=5_000), progressive hits its levelCap
+  // (10) at tick 10 (~50s/probe by then), ~275 cumulative seconds from the
+  // first suspect tick; exponential hits its 5-minute ceiling at tick 7,
+  // ~10 cumulative minutes from the first suspect tick.
+  var BACKOFF_PRESETS = [
+    {
+      policy: "static",
+      label: "Conservative",
+      description: "Flat retry interval, no backoff growth — byte-identical to Heimdall's original behavior. Keeps the existing ~10-second-class responsiveness for self-healing errors. The safe default."
+    },
+    {
+      policy: "progressive",
+      label: "Balanced",
+      description: "Delay grows by one base interval (~5s) per consecutive failed probe, capping at tick 10 around 50s/probe — about 275 cumulative seconds from a lane first going suspect to reaching that cap. Fewer wasted probes on a lane that's staying down, at some cost to how fast recovery is noticed."
+    },
+    {
+      policy: "exponential",
+      label: "Aggressive",
+      description: "Delay doubles each consecutive failed probe, capping at a 5-minute ceiling reached by tick 7 — about 10 cumulative minutes from a lane first going suspect to reaching that ceiling. Fewest wasted probes against a lane that's genuinely down; slowest of the three to notice it come back."
+    }
+  ];
+  var BACKOFF_POLICY_LABELS = { static: "Conservative", progressive: "Balanced", exponential: "Aggressive" };
+
+  function renderBackoffPresetPicker(active) {
+    var picker = document.getElementById("backoff-preset-picker");
+    picker.innerHTML = BACKOFF_PRESETS.map(function (preset) {
+      var activeClass = preset.policy === active ? " active" : "";
+      return "<button type=\\"button\\" class=\\"theme-option" + activeClass + "\\" data-backoff-preset=\\"" +
+        escapeHtml(preset.policy) + "\\">" + escapeHtml(preset.label) + "</button>";
+    }).join("");
+    document.getElementById("backoff-preset-descriptions").innerHTML = BACKOFF_PRESETS.map(function (preset) {
+      var weight = preset.policy === active ? "font-weight:600;" : "";
+      return "<div class=\\"settings-note\\" style=\\"" + weight + "\\"><strong>" + escapeHtml(preset.label) +
+        ":</strong> " + escapeHtml(preset.description) + "</div>";
+    }).join("");
+  }
+
+  function loadBackoffPolicy() {
+    fetch("/backoff-policy")
+      .then(function (res) { return res.json(); })
+      .then(function (data) { renderBackoffPresetPicker(data.active); });
+  }
+
+  document.getElementById("backoff-preset-picker").addEventListener("click", function (event) {
+    var btn = event.target.closest("button[data-backoff-preset]");
+    if (!btn) return;
+    var policy = btn.getAttribute("data-backoff-preset");
+    btn.disabled = true;
+    fetch("/backoff-policy", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ policy: policy })
+    })
+      .then(function (res) { return res.json(); })
+      .then(function (result) {
+        if (result.active) renderBackoffPresetPicker(result.active);
+      })
+      .then(function () { btn.disabled = false; })
+      .catch(function () { btn.disabled = false; });
+  });
+
+  // Advanced toggle — reveals the raw levelCap/multiplier/ceilingMs values
+  // behind the Balanced/Aggressive presets above, directly editable.
+  document.getElementById("backoff-advanced-toggle").addEventListener("click", function () {
+    var panel = document.getElementById("backoff-advanced-panel");
+    var showing = panel.style.display === "none";
+    panel.style.display = showing ? "block" : "none";
+    document.getElementById("backoff-advanced-toggle").textContent = showing ? "Hide advanced" : "Show advanced";
+  });
+
+  function loadBackoffAdvancedValues() {
+    fetch("/backoff-policy/progressive-level-cap")
+      .then(function (res) { return res.json(); })
+      .then(function (data) { document.getElementById("backoff-level-cap-input").value = data.value; });
+    fetch("/backoff-policy/exponential-multiplier")
+      .then(function (res) { return res.json(); })
+      .then(function (data) { document.getElementById("backoff-multiplier-input").value = data.value; });
+    fetch("/backoff-policy/exponential-ceiling-ms")
+      .then(function (res) { return res.json(); })
+      .then(function (data) { document.getElementById("backoff-ceiling-input").value = data.value; });
+  }
+
+  function saveBackoffAdvancedField(route, inputId, valueParser, okMessage) {
+    var input = document.getElementById(inputId);
+    var banner = document.getElementById("backoff-advanced-banner");
+    banner.innerHTML = "";
+    fetch(route, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: valueParser(input.value) })
+    })
+      .then(function (res) { return res.json().then(function (body) { return { status: res.status, body: body }; }); })
+      .then(function (result) {
+        if (result.status === 200) {
+          banner.innerHTML = "<div class=\\"banner banner-ok\\">" + escapeHtml(okMessage) + "</div>";
+          input.value = result.body.value;
+        } else {
+          banner.innerHTML = "<div class=\\"banner banner-error\\">" + escapeHtml(result.body.message || result.body.error || "save_failed") + "</div>";
+        }
+      })
+      .catch(function (err) {
+        banner.innerHTML = "<div class=\\"banner banner-error\\">" + escapeHtml(err) + "</div>";
+      });
+  }
+
+  document.getElementById("backoff-level-cap-save").addEventListener("click", function () {
+    saveBackoffAdvancedField("/backoff-policy/progressive-level-cap", "backoff-level-cap-input", Number, "Progressive level cap saved.");
+  });
+  document.getElementById("backoff-multiplier-save").addEventListener("click", function () {
+    saveBackoffAdvancedField("/backoff-policy/exponential-multiplier", "backoff-multiplier-input", Number, "Exponential multiplier saved.");
+  });
+  document.getElementById("backoff-ceiling-save").addEventListener("click", function () {
+    saveBackoffAdvancedField("/backoff-policy/exponential-ceiling-ms", "backoff-ceiling-input", Number, "Exponential ceiling saved.");
+  });
+
+  // Per-provider override — six known providers (claude, codex, gemini,
+  // kimi, openrouter, ollama), each independently GET/POST-able via
+  // /backoff-policy/override/:provider (hdl-bp-05). "effective" is the
+  // resolved override-or-global policy this provider's lanes actually use
+  // right now, so the row never needs a second request to be meaningful.
+  var BACKOFF_OVERRIDE_PROVIDERS = ["claude", "codex", "gemini", "kimi", "openrouter", "ollama"];
+
+  function renderBackoffProviderOverrides(rows) {
+    var html = "<table><thead><tr><th>Provider</th><th>Effective</th><th>Override</th></tr></thead><tbody>";
+    rows.forEach(function (row) {
+      var options = "<option value=\\"\\">(none — use global)</option>" + Object.keys(BACKOFF_POLICY_LABELS).map(function (policy) {
+        var selected = row.override === policy ? " selected" : "";
+        return "<option value=\\"" + policy + "\\"" + selected + ">" + BACKOFF_POLICY_LABELS[policy] + "</option>";
+      }).join("");
+      var effectiveLabel = BACKOFF_POLICY_LABELS[row.effective] || row.effective;
+      var manualBadge = row.override ? "<span class=\\"override-badge\\">manual</span>" : "";
+      html +=
+        "<tr><td>" + escapeHtml(row.provider) + "</td>" +
+        "<td>" + escapeHtml(effectiveLabel) + manualBadge + "</td>" +
+        "<td><select data-provider-select=\\"1\\" data-provider=\\"" + escapeHtml(row.provider) + "\\">" + options + "</select> " +
+        "<button type=\\"button\\" data-provider-save=\\"" + escapeHtml(row.provider) + "\\">Save</button></td></tr>";
+    });
+    html += "</tbody></table>";
+    document.getElementById("backoff-provider-root").innerHTML = html;
+  }
+
+  function loadBackoffProviderOverrides() {
+    Promise.all(
+      BACKOFF_OVERRIDE_PROVIDERS.map(function (provider) {
+        return fetch("/backoff-policy/override/" + encodeURIComponent(provider)).then(function (res) { return res.json(); });
+      })
+    )
+      .then(renderBackoffProviderOverrides)
+      .catch(function (err) {
+        document.getElementById("backoff-provider-root").innerHTML =
+          "<div class=\\"empty-state\\">Failed to load provider overrides: " + escapeHtml(err) + "</div>";
+      });
+  }
+
+  document.getElementById("backoff-provider-root").addEventListener("click", function (event) {
+    var btn = event.target.closest("button[data-provider-save]");
+    if (!btn) return;
+    var provider = btn.getAttribute("data-provider-save");
+    var select = document.querySelector('select[data-provider-select][data-provider="' + CSS.escape(provider) + '"]');
+    if (!select) return;
+    var policy = select.value === "" ? null : select.value;
+    btn.disabled = true;
+    fetch("/backoff-policy/override/" + encodeURIComponent(provider), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ policy: policy })
+    })
+      .then(function () { loadBackoffProviderOverrides(); })
+      .catch(function () { btn.disabled = false; });
+  });
+
   // Get started / agent onboarding (hdl-ao-07) — dismiss/show toggle,
   // persisted server-side via AGENT_ONBOARDING_DISMISSED_KEY so it stays
   // consistent across a plain browser and the desktop app's webview (same
@@ -1236,6 +1577,9 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
   loadRoutingPolicy();
   loadTheme();
   loadIcon();
+  loadBackoffPolicy();
+  loadBackoffAdvancedValues();
+  loadBackoffProviderOverrides();
   poll();
   setInterval(poll, 5000);
 })();

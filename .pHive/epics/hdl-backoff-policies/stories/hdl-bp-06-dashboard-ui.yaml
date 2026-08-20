@@ -1,0 +1,71 @@
+id: hdl-bp-06-dashboard-ui
+epic: hdl-backoff-policies
+title: Dashboard "Probe backoff" Settings section + per-lane headroom/cost-tier fields
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [hdl-bp-05-http-api, hdl-bp-02-backoff-policy-core]
+parallel_allowed: false
+
+description: >
+  The operator-facing finish: a new "Probe backoff" Settings section with
+  named-preset framing (Conservative = static, Balanced = progressive,
+  Aggressive = exponential), showing the real worked wall-clock numbers
+  from hdl-bp-02 (not placeholder text), a per-provider override control,
+  an "Advanced" toggle revealing raw parameter values, and per-lane
+  headroom/cost-tier editable fields in the existing lane rows with a
+  "manual" badge, matching every other override surface in this
+  dashboard.
+
+acceptance_criteria:
+  - "Probe backoff" section renders with real preset copy showing the
+    actual worked numbers (exponential reaches its ceiling around 10
+    cumulative minutes; progressive reaches its cap around 275 cumulative
+    seconds at the shipped defaults) — not placeholder text.
+  - Picking a preset persists via the real /backoff-policy route and
+    survives reload.
+  - Per-provider override control works and persists independently.
+  - "Advanced" toggle reveals raw parameter values (levelCap, multiplier,
+    ceilingMs) for direct editing.
+  - Per-lane headroom/cost-tier fields render in existing lane rows, show
+    a "manual" badge when set, and round-trip through hdl-bp-01's routes.
+  - Real Playwright verification: pick a preset, confirm persistence
+    across reload; edit a lane's headroom, confirm the badge and
+    round-trip.
+
+steps:
+  - id: s1
+    description: Build the "Probe backoff" Settings section with real
+      preset copy and the Advanced raw-parameter toggle.
+    agent: developer
+  - id: s2
+    description: Add per-lane headroom/cost-tier editable fields with the
+      manual badge, matching the existing override/reset-at control
+      pattern.
+    agent: developer
+  - id: s3
+    description: Real Playwright verification of both surfaces against a
+      running server.
+    agent: tester
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - src/api/ui/dashboard.ts
+  tech_stack: [typescript, html, css]
+
+design_decisions:
+  - decision: Named presets (Conservative/Balanced/Aggressive) with real
+      worked numbers as copy, not a bare policy-name picker or raw
+      sliders.
+    rationale: Preserves the framing the operator's original scoping
+      Artifact asked for (show the SLA tradeoff plainly) even after the
+      design moved from "pick one tradeoff" to "pluggable architecture" —
+      the pluggable redesign shouldn't lose that spirit to raw values with
+      no context.
+
+metric:
+  applies: false
+  justification: UI/copy work whose success criterion (real numbers, not
+    placeholders; persisted state) is directly covered by acceptance
+    criteria and Playwright verification at integrate.

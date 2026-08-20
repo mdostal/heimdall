@@ -6,7 +6,7 @@
 
 import { createServer, type Server } from "node:http";
 import { EnvCredentialSource } from "../core/credential-source.js";
-import { loadLaneDeclarations, LaneRegistry } from "../core/lane-registry.js";
+import { loadLaneDeclarations, LaneRegistry, type LaneCostTier } from "../core/lane-registry.js";
 import {
   getAvailableRoute,
   getScoredRoute,
@@ -16,6 +16,21 @@ import {
   getRoutingStrategyNames,
   ROUTING_STRATEGY_SETTING_KEY,
 } from "../core/route-selector.js";
+import {
+  BACKOFF_POLICY_SETTING_KEY,
+  getBackoffPolicyNames,
+  getActiveBackoffPolicyName,
+  getBackoffPolicyNameForProvider,
+  KNOWN_BACKOFF_OVERRIDE_PROVIDERS,
+  backoffPolicyOverrideSettingKey,
+  BACKOFF_PROGRESSIVE_LEVEL_CAP_SETTING_KEY,
+  BACKOFF_EXPONENTIAL_MULTIPLIER_SETTING_KEY,
+  BACKOFF_EXPONENTIAL_CEILING_MS_SETTING_KEY,
+  getBackoffProgressiveLevelCap,
+  getBackoffExponentialMultiplier,
+  getBackoffExponentialCeilingMs,
+} from "../core/scheduler/backoff-policies/registry.js";
+import { DEFAULT_INTERVAL_MS as BACKOFF_BASE_INTERVAL_MS } from "../core/scheduler/in-process-scheduler.js";
 import { StateStore, resolveDefaultDbPath, type ManualOverride } from "../core/state-store.js";
 import type { LaneStatus } from "../core/status-model.js";
 import { renderDashboardHtml } from "./ui/dashboard.js";
@@ -92,6 +107,10 @@ export interface LaneStatusWithOverride extends LaneStatus {
   model: string;
   credential_ref: string;
   priority: number | null;
+  /** hdl-bp-01 — live-editable per-lane scoring inputs, same "null means
+   * unset, env-var default decides" shape as manual_reset_at above. */
+  manual_headroom: number | null;
+  manual_cost_tier: LaneCostTier | null;
 }
 
 const VALID_OVERRIDE_STATES = new Set(["enabled", "disabled", "auto"]);
@@ -164,6 +183,67 @@ export function setLaneResetAt(
   return { ok: true, lane_id: laneId, manual_reset_at: rawResetAt };
 }
 
+export type SetHeadroomResult =
+  | { ok: true; lane_id: string; manual_headroom: number | null }
+  | { ok: false; error: "unknown_lane"; lane_id: string }
+  | { ok: false; error: "invalid_headroom"; message: string };
+
+// hdl-bp-01: live-edit validation rejects with a structured 400 rather than
+// mirroring lane-registry.ts's startup-time "warn and skip the lane"
+// behavior for a malformed env var — a bad live HTTP edit has an operator
+// right there who should get an immediate, actionable rejection instead
+// (grill finding U1, design-discussion.md §3 item 7). Never drops the lane.
+export function setLaneHeadroom(
+  registry: LaneRegistry,
+  store: StateStore,
+  laneId: string,
+  rawHeadroom: unknown,
+): SetHeadroomResult {
+  if (!registry.get(laneId)) {
+    return { ok: false, error: "unknown_lane", lane_id: laneId };
+  }
+  if (rawHeadroom === null) {
+    store.setManualHeadroom(laneId, null);
+    return { ok: true, lane_id: laneId, manual_headroom: null };
+  }
+  if (typeof rawHeadroom !== "number" || !Number.isFinite(rawHeadroom) || rawHeadroom < 0) {
+    return {
+      ok: false,
+      error: "invalid_headroom",
+      message: "headroom must be a finite, non-negative number, or null to clear the override",
+    };
+  }
+  store.setManualHeadroom(laneId, rawHeadroom);
+  return { ok: true, lane_id: laneId, manual_headroom: rawHeadroom };
+}
+
+const VALID_COST_TIERS = new Set<string>(["low", "medium", "high"]);
+
+export type SetCostTierResult =
+  | { ok: true; lane_id: string; manual_cost_tier: LaneCostTier | null }
+  | { ok: false; error: "unknown_lane"; lane_id: string }
+  | { ok: false; error: "invalid_cost_tier"; allowed_cost_tiers: string[] };
+
+export function setLaneCostTier(
+  registry: LaneRegistry,
+  store: StateStore,
+  laneId: string,
+  rawCostTier: unknown,
+): SetCostTierResult {
+  if (!registry.get(laneId)) {
+    return { ok: false, error: "unknown_lane", lane_id: laneId };
+  }
+  if (rawCostTier === null) {
+    store.setManualCostTier(laneId, null);
+    return { ok: true, lane_id: laneId, manual_cost_tier: null };
+  }
+  if (typeof rawCostTier !== "string" || !VALID_COST_TIERS.has(rawCostTier)) {
+    return { ok: false, error: "invalid_cost_tier", allowed_cost_tiers: [...VALID_COST_TIERS] };
+  }
+  store.setManualCostTier(laneId, rawCostTier as LaneCostTier);
+  return { ok: true, lane_id: laneId, manual_cost_tier: rawCostTier as LaneCostTier };
+}
+
 export interface AddLaneInput {
   lane_id?: unknown;
   provider?: unknown;
@@ -222,6 +302,117 @@ export function setRoutingStrategy(store: StateStore, rawName: unknown): SetRout
   }
   store.setSetting(ROUTING_STRATEGY_SETTING_KEY, rawName);
   return { ok: true, active: rawName };
+}
+
+export type SetBackoffPolicyResult =
+  | { ok: true; active: string }
+  | { ok: false; error: "invalid_policy"; allowed_policies: string[] };
+
+// hdl-bp-04/hdl-bp-05: mirrors setRoutingStrategy's exact validation/return
+// shape — the write side + wire format for BACKOFF_POLICY_SETTING_KEY
+// (src/core/scheduler/backoff-policies/registry.ts owns the setting key and
+// the read side, getActiveBackoffPolicyName, the same split ownership
+// routing_strategy already establishes). Wired to GET/POST /backoff-policy
+// below.
+export function setBackoffPolicy(store: StateStore, rawName: unknown): SetBackoffPolicyResult {
+  const allowedPolicies = getBackoffPolicyNames();
+  if (typeof rawName !== "string" || !allowedPolicies.includes(rawName)) {
+    return { ok: false, error: "invalid_policy", allowed_policies: allowedPolicies };
+  }
+  store.setSetting(BACKOFF_POLICY_SETTING_KEY, rawName);
+  return { ok: true, active: rawName };
+}
+
+// hdl-bp-05: per-provider override — whole-policy replacement, one flat
+// settings key per known provider (design-discussion.md §3 item 6). The
+// provider itself is validated against KNOWN_BACKOFF_OVERRIDE_PROVIDERS
+// here, in the shared function, not just the route — the same "validation
+// lives in the function, the HTTP layer only translates the result to a
+// status code" discipline as setLaneOverride/setLaneHeadroom above. Passing
+// `null` clears the override back to the global choice; stored as "" rather
+// than deleted (StateStore's settings table has no delete — matches
+// getBackoffPolicyNameForProvider's existing `override && policies[override]`
+// falsy-on-empty-string fallthrough exactly).
+export type SetBackoffPolicyOverrideResult =
+  | { ok: true; provider: string; override: string | null }
+  | { ok: false; error: "unknown_provider"; known_providers: string[] }
+  | { ok: false; error: "invalid_policy"; allowed_policies: string[] };
+
+export function setBackoffPolicyOverride(
+  store: StateStore,
+  rawProvider: string,
+  rawPolicy: unknown,
+): SetBackoffPolicyOverrideResult {
+  if (!(KNOWN_BACKOFF_OVERRIDE_PROVIDERS as readonly string[]).includes(rawProvider)) {
+    return { ok: false, error: "unknown_provider", known_providers: [...KNOWN_BACKOFF_OVERRIDE_PROVIDERS] };
+  }
+  if (rawPolicy === null) {
+    store.setSetting(backoffPolicyOverrideSettingKey(rawProvider), "");
+    return { ok: true, provider: rawProvider, override: null };
+  }
+  const allowedPolicies = getBackoffPolicyNames();
+  if (typeof rawPolicy !== "string" || !allowedPolicies.includes(rawPolicy)) {
+    return { ok: false, error: "invalid_policy", allowed_policies: allowedPolicies };
+  }
+  store.setSetting(backoffPolicyOverrideSettingKey(rawProvider), rawPolicy);
+  return { ok: true, provider: rawProvider, override: rawPolicy };
+}
+
+/** Raw stored override value, normalized: "" (the clear-sentinel above) and
+ * an absent row both read back as null — matching every other "null means
+ * unset" field in this file (manual_reset_at, manual_headroom, ...). */
+export function getBackoffPolicyOverride(store: StateStore, provider: string): string | null {
+  const raw = store.getSetting(backoffPolicyOverrideSettingKey(provider));
+  return raw && raw !== "" ? raw : null;
+}
+
+// hdl-bp-05: per-policy parameters (progressive's levelCap, exponential's
+// multiplier/ceilingMs) — each independently GET/POST-able, own flat
+// settings key, matching every other settings row in this table
+// (design-discussion.md §3 item 6). Validation per the story spec: levelCap
+// a positive integer, multiplier > 1, ceilingMs a positive number greater
+// than the actual scheduler base interval (BACKOFF_BASE_INTERVAL_MS) — a
+// ceiling at or below the base interval would make exponential's delay
+// sequence never actually grow past the first tick, defeating the whole
+// point of picking it over `static`.
+export type SetBackoffLevelCapResult =
+  | { ok: true; value: number }
+  | { ok: false; error: "invalid_level_cap"; message: string };
+
+export function setBackoffProgressiveLevelCap(store: StateStore, rawValue: unknown): SetBackoffLevelCapResult {
+  if (typeof rawValue !== "number" || !Number.isInteger(rawValue) || rawValue <= 0) {
+    return { ok: false, error: "invalid_level_cap", message: "level_cap must be a positive integer" };
+  }
+  store.setSetting(BACKOFF_PROGRESSIVE_LEVEL_CAP_SETTING_KEY, String(rawValue));
+  return { ok: true, value: rawValue };
+}
+
+export type SetBackoffMultiplierResult =
+  | { ok: true; value: number }
+  | { ok: false; error: "invalid_multiplier"; message: string };
+
+export function setBackoffExponentialMultiplier(store: StateStore, rawValue: unknown): SetBackoffMultiplierResult {
+  if (typeof rawValue !== "number" || !Number.isFinite(rawValue) || rawValue <= 1) {
+    return { ok: false, error: "invalid_multiplier", message: "multiplier must be a finite number greater than 1" };
+  }
+  store.setSetting(BACKOFF_EXPONENTIAL_MULTIPLIER_SETTING_KEY, String(rawValue));
+  return { ok: true, value: rawValue };
+}
+
+export type SetBackoffCeilingMsResult =
+  | { ok: true; value: number }
+  | { ok: false; error: "invalid_ceiling_ms"; message: string };
+
+export function setBackoffExponentialCeilingMs(store: StateStore, rawValue: unknown): SetBackoffCeilingMsResult {
+  if (typeof rawValue !== "number" || !Number.isFinite(rawValue) || rawValue <= BACKOFF_BASE_INTERVAL_MS) {
+    return {
+      ok: false,
+      error: "invalid_ceiling_ms",
+      message: `ceiling_ms must be a finite number greater than the base interval (${BACKOFF_BASE_INTERVAL_MS}ms)`,
+    };
+  }
+  store.setSetting(BACKOFF_EXPONENTIAL_CEILING_MS_SETTING_KEY, String(rawValue));
+  return { ok: true, value: rawValue };
 }
 
 // hdl-unified-dashboard: dashboard visual theme, persisted the same way
@@ -364,6 +555,8 @@ export function getLaneStatuses(registry: LaneRegistry, store: StateStore): Lane
       model: declared?.model ?? status.provider,
       credential_ref: declared?.credential_ref ?? "",
       priority: declared?.priority ?? null,
+      manual_headroom: store.getManualHeadroom(status.lane_id),
+      manual_cost_tier: store.getManualCostTier(status.lane_id),
     };
   });
 }
@@ -602,6 +795,178 @@ export function createHttpServer(
           return;
         }
         const result = setRoutingStrategy(store, (body.data as { strategy?: unknown }).strategy);
+        if (!result.ok) {
+          const { ok: _ok, ...wire } = result;
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify(wire));
+          return;
+        }
+        const { ok: _ok, ...wire } = result;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(wire));
+      });
+      return;
+    }
+
+    // hdl-bp-05: which BackoffPolicy InProcessScheduler resolves to for a
+    // suspect lane's next-poll delay (static | progressive | exponential —
+    // see src/core/scheduler/backoff-policies/). Same read/write shape as
+    // /routing-strategy exactly (GET returns {active, available}, POST
+    // validates and returns a structured {error, allowed_policies} on an
+    // invalid name rather than throwing).
+    if (req.method === "GET" && req.url === "/backoff-policy") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          active: getActiveBackoffPolicyName(store),
+          available: getBackoffPolicyNames(),
+        }),
+      );
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/backoff-policy") {
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+        const result = setBackoffPolicy(store, (body.data as { policy?: unknown }).policy);
+        if (!result.ok) {
+          const { ok: _ok, ...wire } = result;
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify(wire));
+          return;
+        }
+        const { ok: _ok, ...wire } = result;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(wire));
+      });
+      return;
+    }
+
+    // hdl-bp-05: per-provider whole-policy override (design-discussion.md
+    // §3 item 6) — :provider validated against the real known-provider list
+    // (KNOWN_BACKOFF_OVERRIDE_PROVIDERS), 404 for anything else, same
+    // discipline as /desktop-icon/:name/thumbnail.png's allowlist check
+    // above. `effective` on GET is the resolved policy this provider's
+    // lanes actually use right now (override-or-global), so a caller never
+    // needs a second request to know what's really in effect.
+    const backoffOverrideMatch = req.url?.match(/^\/backoff-policy\/override\/([^/]+)$/);
+    if (req.method === "GET" && backoffOverrideMatch) {
+      const provider = decodeURIComponent(backoffOverrideMatch[1]);
+      if (!(KNOWN_BACKOFF_OVERRIDE_PROVIDERS as readonly string[]).includes(provider)) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "unknown_provider", known_providers: [...KNOWN_BACKOFF_OVERRIDE_PROVIDERS] }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          provider,
+          override: getBackoffPolicyOverride(store, provider),
+          effective: getBackoffPolicyNameForProvider(store, provider),
+        }),
+      );
+      return;
+    }
+
+    if (req.method === "POST" && backoffOverrideMatch) {
+      const provider = decodeURIComponent(backoffOverrideMatch[1]);
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+        const result = setBackoffPolicyOverride(store, provider, (body.data as { policy?: unknown }).policy);
+        if (!result.ok) {
+          const status = result.error === "unknown_provider" ? 404 : 400;
+          const { ok: _ok, ...wire } = result;
+          res.writeHead(status, { "content-type": "application/json" });
+          res.end(JSON.stringify(wire));
+          return;
+        }
+        const { ok: _ok, ...wire } = result;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(wire));
+      });
+      return;
+    }
+
+    // hdl-bp-05: progressive's levelCap — independently GET/POST-able, same
+    // {value} wire shape as the two exponential parameter routes below.
+    if (req.method === "GET" && req.url === "/backoff-policy/progressive-level-cap") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ value: getBackoffProgressiveLevelCap(store) }));
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/backoff-policy/progressive-level-cap") {
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+        const result = setBackoffProgressiveLevelCap(store, (body.data as { value?: unknown }).value);
+        if (!result.ok) {
+          const { ok: _ok, ...wire } = result;
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify(wire));
+          return;
+        }
+        const { ok: _ok, ...wire } = result;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(wire));
+      });
+      return;
+    }
+
+    // hdl-bp-05: exponential's multiplier.
+    if (req.method === "GET" && req.url === "/backoff-policy/exponential-multiplier") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ value: getBackoffExponentialMultiplier(store) }));
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/backoff-policy/exponential-multiplier") {
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+        const result = setBackoffExponentialMultiplier(store, (body.data as { value?: unknown }).value);
+        if (!result.ok) {
+          const { ok: _ok, ...wire } = result;
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify(wire));
+          return;
+        }
+        const { ok: _ok, ...wire } = result;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(wire));
+      });
+      return;
+    }
+
+    // hdl-bp-05: exponential's ceilingMs.
+    if (req.method === "GET" && req.url === "/backoff-policy/exponential-ceiling-ms") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ value: getBackoffExponentialCeilingMs(store) }));
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/backoff-policy/exponential-ceiling-ms") {
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+        const result = setBackoffExponentialCeilingMs(store, (body.data as { value?: unknown }).value);
         if (!result.ok) {
           const { ok: _ok, ...wire } = result;
           res.writeHead(400, { "content-type": "application/json" });
@@ -884,6 +1249,65 @@ export function createHttpServer(
         }
         const resetAt = (body.data as { reset_at?: unknown }).reset_at;
         const result = setLaneResetAt(registry, store, laneId, resetAt);
+        if (!result.ok) {
+          const status = result.error === "unknown_lane" ? 404 : 400;
+          const { ok: _ok, ...wire } = result;
+          res.writeHead(status, { "content-type": "application/json" });
+          res.end(JSON.stringify(wire));
+          return;
+        }
+        const { ok: _ok, ...wire } = result;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(wire));
+      });
+      return;
+    }
+
+    // hdl-bp-01: manual headroom — live-editable per-lane scoring input,
+    // same route shape as /reset-at above. Wins over LaneRegistry's
+    // env-var-parsed default in ScoredStrategy's headroom_floor gating
+    // (src/core/routing-strategies/scored-strategy.ts). Rejects a
+    // non-finite/negative headroom with a structured 400 — never silently
+    // drops the lane the way a malformed startup-time env var does (grill
+    // finding U1).
+    const headroomMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/headroom$/);
+    if (headroomMatch) {
+      const laneId = decodeURIComponent(headroomMatch[1]);
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+        const headroom = (body.data as { headroom?: unknown }).headroom;
+        const result = setLaneHeadroom(registry, store, laneId, headroom);
+        if (!result.ok) {
+          const status = result.error === "unknown_lane" ? 404 : 400;
+          const { ok: _ok, ...wire } = result;
+          res.writeHead(status, { "content-type": "application/json" });
+          res.end(JSON.stringify(wire));
+          return;
+        }
+        const { ok: _ok, ...wire } = result;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(wire));
+      });
+      return;
+    }
+
+    // hdl-bp-01: manual cost tier — same route shape and validation
+    // discipline as /headroom above.
+    const costTierMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/cost-tier$/);
+    if (costTierMatch) {
+      const laneId = decodeURIComponent(costTierMatch[1]);
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+        const costTier = (body.data as { cost_tier?: unknown }).cost_tier;
+        const result = setLaneCostTier(registry, store, laneId, costTier);
         if (!result.ok) {
           const status = result.error === "unknown_lane" ? 404 : 400;
           const { ok: _ok, ...wire } = result;

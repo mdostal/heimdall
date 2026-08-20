@@ -1,0 +1,98 @@
+id: hdl-bp-03-scheduler-integration
+epic: hdl-backoff-policies
+title: InProcessScheduler delegates to a BackoffPolicy while preserving auth_failed/resetAt/recovery invariants
+status: pending
+complexity: high
+methodology: classic
+depends_on: [hdl-bp-02-backoff-policy-core]
+parallel_allowed: false
+
+description: >
+  The epic's single highest-risk story — restructures
+  InProcessScheduler.computeDelayMs to delegate to a (hardcoded-default,
+  not yet settings-driven) BackoffPolicy for ordinary self-healing errors,
+  while auth_failed and known-resetAt handling stay COMPLETELY unchanged
+  as pre-policy invariants checked before the pluggable policy ever runs.
+  This is the fix for grill finding H1: the epic's first design draft had
+  every policy silently ignoring resetAt, which would have regressed the
+  existing reset_at-aware scheduling optimization for every installation,
+  not just ones opting into a new policy. Externally invisible after this
+  story — static stays the hardcoded default, byte-identical behavior to
+  today.
+
+acceptance_criteria:
+  - computeDelayMs checks auth_failed first (unchanged), then a known
+    resetAt (unchanged — wait until it, floored at baseIntervalMs), and
+    ONLY THEN delegates to the selected BackoffPolicy.nextDelayMs() for
+    every other case.
+  - InProcessScheduler gains a consecutiveSuspectTicks instance field,
+    incremented BEFORE the delay computation whenever stillSuspect (so
+    the first suspect tick passes 1), reset to exactly 0 the instant
+    stillSuspect is false.
+  - src/core/scheduler/in-process-scheduler.test.ts's existing 17 tests
+    (auth_failed/resetAt/manual_reset_at precedence) pass byte-identically
+    with static as the hardcoded active policy.
+  - A new, dedicated test simulates suspect -> healthy -> suspect-again
+    and asserts consecutiveSuspectTicks resets to exactly 0 on recovery,
+    not just decrements or holds.
+  - manual_reset_at still wins outright over both the sensed resetAt and
+    any backoff computation — unchanged, verified by existing test
+    coverage.
+
+steps:
+  - id: s1
+    description: Restructure computeDelayMs into the two pre-policy
+      invariant checks (auth_failed, resetAt) followed by delegation to
+      the (hardcoded static, for now) BackoffPolicy.
+    agent: developer
+  - id: s2
+    description: Add and wire the consecutiveSuspectTicks instance field
+      into poll(), incremented before delay computation, reset on
+      recovery.
+    agent: developer
+  - id: s3
+    description: Add the dedicated reset-on-recovery test; re-run the full
+      existing in-process-scheduler.test.ts suite and confirm byte-identical
+      pass.
+    agent: tester
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - src/core/scheduler/in-process-scheduler.ts
+    - src/core/scheduler/in-process-scheduler.test.ts
+    - docs/scheduler-constraints.md
+  tech_stack: [typescript, node]
+
+design_decisions:
+  - decision: resetAt-awareness is a hard invariant checked before the
+      pluggable policy runs, same tier as auth_failed — not a policy input.
+    rationale: Grill finding H1. resetAt-awareness is a factual "we
+      already know when this recovers" optimization, not a backoff
+      heuristic preference, so it doesn't belong in the "try different
+      heuristics" surface any more than auth_failed's safety-critical
+      fixed backoff does.
+
+risks:
+  - severity: high
+    description: This is the one story in the epic touching existing,
+      safety-documented scheduler behavior (the "backs off immediately on
+      recovery" guarantee, explicitly documented in this file's own header
+      comment and docs/scheduler-constraints.md).
+    mitigation: The dedicated reset-on-recovery test (acceptance criterion
+      4) is non-negotiable, not a nice-to-have — code review alone is not
+      sufficient verification for this story.
+
+metric:
+  applies: true
+  name: heimdall.scheduler_regression_test_pass_rate
+  direction: up
+  unit: ratio
+  baseline: null
+  target: 1.0
+  window: "story integrate step"
+  source:
+    kind: manual
+    ref: "node --test src/core/scheduler/in-process-scheduler.test.ts — all existing 17 tests plus the new reset-on-recovery test must pass"
+  verify_at: "story integrate step"
+  owner: developer

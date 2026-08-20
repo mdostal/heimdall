@@ -1,0 +1,94 @@
+id: hdl-bp-02-backoff-policy-core
+epic: hdl-backoff-policies
+title: BackoffPolicy interface + registry + 3 pure policy implementations
+status: pending
+complexity: medium
+methodology: classic
+depends_on: []
+parallel_allowed: true
+parallel_rationale: bounded-slice
+files_to_modify:
+  - file: src/core/scheduler/backoff-policies/types.ts
+    change: new — BackoffPolicy interface
+  - file: src/core/scheduler/backoff-policies/static-backoff.ts
+    change: new
+  - file: src/core/scheduler/backoff-policies/progressive-backoff.ts
+    change: new
+  - file: src/core/scheduler/backoff-policies/exponential-progressive-backoff.ts
+    change: new
+  - file: src/core/scheduler/backoff-policies/registry.ts
+    change: new — createBackoffPolicyRegistry() factory
+
+description: >
+  The pluggable backoff heuristic itself — pure functions, no I/O, no
+  scheduler coupling — mirroring src/core/routing-strategies/'s real,
+  existing pattern exactly (interface + one-file-per-strategy + registry
+  factory). Ships 3 policies: static (flat interval, today's behavior),
+  progressive (linear step growth capped at levelCap), exponential-
+  progressive (multiplicative growth with a mandatory ceiling). Nothing in
+  this story wires into the running scheduler yet — that's hdl-bp-03.
+
+acceptance_criteria:
+  - BackoffPolicy interface: nextDelayMs(ctx) where ctx =
+    {consecutiveSuspectTicks, baseIntervalMs, config}. No errorCode or
+    resetAt in context (those are pre-policy invariants, handled in
+    hdl-bp-03, not policy inputs).
+  - consecutiveSuspectTicks is documented and implemented as 1-indexed —
+    the first suspect tick passes 1, not 0.
+  - static returns baseIntervalMs unconditionally.
+  - progressive returns baseIntervalMs * min(consecutiveSuspectTicks,
+    levelCap), levelCap default 10.
+  - exponential-progressive returns min(baseIntervalMs * multiplier **
+    (consecutiveSuspectTicks - 1), ceilingMs); ceilingMs is a required
+    config field, never optional/unbounded.
+  - createBackoffPolicyRegistry() returns all 3, keyed by name
+    ("static"|"progressive"|"exponential").
+  - Unit tests independently re-derive the design-discussion's worked
+    wall-clock numbers (exponential reaches the 300s ceiling at tick 7 at
+    multiplier=2/ceilingMs=300_000/baseIntervalMs=5_000; progressive
+    reaches its 50s cap at tick 10 at levelCap=10/baseIntervalMs=5_000),
+    not just assert them.
+
+steps:
+  - id: s1
+    description: Write types.ts (BackoffPolicy interface) and the 3 policy
+      implementation files.
+    agent: developer
+  - id: s2
+    description: Write registry.ts's factory function.
+    agent: developer
+  - id: s3
+    description: Exhaustive unit tests per policy, including boundary
+      ticks (exactly at levelCap/ceiling, one tick past it) and the
+      worked wall-clock numbers.
+    agent: tester
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - src/core/routing-strategies/types.ts
+    - src/core/routing-strategies/priority-strategy.ts
+    - src/core/routing-strategies/registry.ts
+  tech_stack: [typescript, node]
+
+design_decisions:
+  - decision: consecutiveSuspectTicks is 1-indexed, and exponential's
+      formula uses (consecutiveSuspectTicks - 1) as its exponent.
+    rationale: Found during this epic's own collaborative-review pass — an
+      earlier draft's two formulas silently assumed different indexing
+      conventions and produced numbers that didn't actually match. 1-indexed
+      with the -1 exponent makes the first suspect tick (consecutiveSuspectTicks=1)
+      yield exactly baseIntervalMs for every policy, matching static's
+      first delay, and reproduces the design-discussion's worked numbers
+      exactly, independently re-derivable.
+  - decision: ceilingMs is a required, not optional, config field for
+      exponential-progressive.
+    rationale: Operator's own explicit instruction — "say when to stop so
+      put a limit on it" — an unbounded exponential backoff was never on
+      the table.
+
+metric:
+  applies: false
+  justification: Pure internal library code with no standalone observable
+    surface until hdl-bp-03/04 wire it into the running scheduler; covered
+    directly by this story's own exhaustive unit tests.

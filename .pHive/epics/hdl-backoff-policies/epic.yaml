@@ -1,0 +1,86 @@
+name: hdl-backoff-policies
+title: Pluggable, tunable probe-backoff policies + live-editable headroom/cost-tier
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: dev
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [scheduler-core-change, pluggable-architecture, medium-scope]
+  roster: [researcher]
+  per_tag_reasoning:
+    scheduler-core-change: touches InProcessScheduler's SLA-critical computeDelayMs/poll() logic, requiring explicit safety-invariant preservation (auth_failed, resetAt, reset-on-recovery), not routine feature work.
+    pluggable-architecture: introduces a new BackoffPolicy interface + registry, directly mirroring the existing RoutingStrategy pattern — an established precedent, not a novel one, but still real cross-file architecture work.
+    medium-scope: cross-stack (scheduler core, settings, HTTP, dashboard UI) needing explicit sequencing (the pluggable architecture must exist and be proven safe before the dashboard exposes it), but bounded to one repo with no migration and no new external dependency.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: ran (plugin-hive:grill adversarial pass — found and the draft resolved 4 real findings: a high-severity hidden assumption that the naive policy design would silently regress the existing resetAt-aware scheduling for every installation on day one, a wall-clock-framing gap, a self-contradiction between the settings-table's "scalar rows only" principle and a proposed JSON-blob row, and a missing validation story for the new live-editable fields — full record at docs/grill-record.md)
+    hv_planning: ran (horizontal-plan.md + vertical-plan.md, 7 layers / 6 vertical slices; collaborative review pass against both documents caught 3 further real corrections — an arithmetic inconsistency between the two policies' worked wall-clock examples that grill's own H2 finding only half-fixed, a false claim about which file owns the routing-strategy settings key precedent, and a wrong test-suite citation that would have provided zero real regression coverage for the epic's highest-risk change)
+    structured_outline: not_applicable (Medium, not Large — single repo, no migration, no new external dependency, bounded and well-understood after Phase A research + H/V planning)
+
+description: >
+  Operator, closing out two long-standing docs/vision.md "Goals" items
+  (probe-cadence backoff tuning, headroom/cost-tier defaults) both
+  explicitly flagged as needing an operator call rather than a routine
+  pass: "as long as we can tweak and configure and tune it to an
+  exponential backoff or different policies and heuristics and try or
+  choose, then it should just be wrapping a backoff provider call and we
+  can implement more of them as we see fit and try them out -- just do a
+  couple defaults -- static, increase with a rule and level up to like 10
+  -- progressive -- then an exponential progressive and say when to stop
+  so put a limit on it."
+
+  Replaces InProcessScheduler's hardcoded backoff logic with a pluggable
+  BackoffPolicy architecture (static/progressive/exponential-progressive,
+  extensible with more later), mirroring the existing RoutingStrategy
+  pattern exactly — interface, one-file-per-policy, registry factory,
+  settings-table persistence, HTTP routes, dashboard picker. Also brings
+  headroom/cost-tier out of env-var-only invisibility into live-editable
+  per-lane settings, mirroring manual_override/manual_reset_at's existing
+  precedence pattern. Automatic headroom inference (the fancier idea
+  vision.md floated) is explicitly deferred to a future epic — this one
+  ships manual tunability only.
+
+  Adversarial review (grill) and a collaborative-review pass on the H/V
+  planning documents caught real, substantive corrections before any code
+  was written: the first design draft had every policy silently ignoring
+  a lane's known reset_at, which would have regressed an existing,
+  load-bearing scheduling optimization for every installation on day one
+  — not just installations that opted into a new policy. The
+  collaborative-review pass then caught that grill's own fix was only
+  half-complete (the two policies' worked wall-clock examples used
+  inconsistent indexing and produced numbers that didn't actually
+  match), a wrong file-ownership claim for the settings-key pattern being
+  mirrored, and a verification-plan citation (test/sla-harness) that
+  would have provided zero real regression coverage for the epic's
+  highest-risk scheduler change. All resolved in planning.
+
+stories:
+  - id: hdl-bp-01-headroom-cost-tier-live-editable
+    title: Headroom and cost-tier become live-editable per-lane settings, independently of backoff policy
+    complexity: low
+    depends_on: []
+  - id: hdl-bp-02-backoff-policy-core
+    title: BackoffPolicy interface + registry + 3 pure policy implementations
+    complexity: medium
+    depends_on: []
+  - id: hdl-bp-03-scheduler-integration
+    title: InProcessScheduler delegates to a BackoffPolicy while preserving auth_failed/resetAt/recovery invariants
+    complexity: high
+    depends_on: [hdl-bp-02-backoff-policy-core]
+  - id: hdl-bp-04-settings-driven-selection
+    title: Backoff policy selection reads from settings, not a hardcoded default
+    complexity: medium
+    depends_on: [hdl-bp-03-scheduler-integration]
+  - id: hdl-bp-05-http-api
+    title: GET/POST /backoff-policy HTTP routes, tying both threads together
+    complexity: low
+    depends_on: [hdl-bp-04-settings-driven-selection, hdl-bp-01-headroom-cost-tier-live-editable]
+  - id: hdl-bp-06-dashboard-ui
+    title: Dashboard "Probe backoff" Settings section + per-lane headroom/cost-tier fields
+    complexity: medium
+    depends_on: [hdl-bp-05-http-api, hdl-bp-02-backoff-policy-core]
