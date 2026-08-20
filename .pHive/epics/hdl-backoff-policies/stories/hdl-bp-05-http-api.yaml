@@ -1,0 +1,52 @@
+id: hdl-bp-05-http-api
+epic: hdl-backoff-policies
+title: GET/POST /backoff-policy HTTP routes, tying both threads together
+status: pending
+complexity: low
+methodology: classic
+depends_on: [hdl-bp-04-settings-driven-selection, hdl-bp-01-headroom-cost-tier-live-editable]
+parallel_allowed: false
+
+description: >
+  New GET/POST /backoff-policy HTTP routes, mirroring GET/POST
+  /routing-strategy's real shape exactly (GET returns {active,
+  available}, POST validates and returns a structured {error,
+  allowed_policies} on an invalid name rather than throwing). Confirms
+  the headroom/cost-tier routes from hdl-bp-01 and the new backoff-policy
+  routes together form a complete, curlable API surface for both epic
+  threads before any dashboard UI work begins.
+
+acceptance_criteria:
+  - GET /backoff-policy returns {active, available}.
+  - POST /backoff-policy with a valid name updates the setting (verified
+    against hdl-bp-04's settings-driven scheduler wiring).
+  - POST /backoff-policy with an invalid name returns a structured 400
+    {error, allowed_policies}, does not throw.
+  - Routes for per-provider override and per-policy parameters (from
+    hdl-bp-04) are also exposed and independently GET/POST-able.
+  - hdl-bp-01's headroom/cost-tier routes are live-verified together with
+    the new backoff-policy routes in one real curl session.
+
+steps:
+  - id: s1
+    description: Add GET/POST /backoff-policy routes plus routes for
+      per-provider override and per-policy parameters.
+    agent: developer
+  - id: s2
+    description: Real curl verification of the full API surface for both
+      threads (backoff-policy + headroom/cost-tier) against a running
+      server.
+    agent: developer
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - src/api/http-server.ts
+  tech_stack: [typescript, node]
+
+metric:
+  applies: false
+  justification: API-surface story whose correctness is directly covered
+    by acceptance criteria (structured error shape, real curl
+    verification); no separate quantitative target is meaningful at this
+    scale.

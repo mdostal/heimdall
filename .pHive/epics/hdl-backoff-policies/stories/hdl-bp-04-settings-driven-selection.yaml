@@ -1,0 +1,93 @@
+id: hdl-bp-04-settings-driven-selection
+epic: hdl-backoff-policies
+title: Backoff policy selection reads from settings, not a hardcoded default
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [hdl-bp-03-scheduler-integration]
+parallel_allowed: false
+
+description: >
+  Replaces hdl-bp-03's hardcoded "static" policy selection with real
+  settings-table-driven selection, mirroring routing_strategy's real,
+  split-ownership pattern exactly: BACKOFF_POLICY_SETTING_KEY and
+  getActiveBackoffPolicyName live in
+  src/core/scheduler/backoff-policies/registry.ts (the core file
+  InProcessScheduler imports from), not in http-server.ts. Adds
+  per-provider override (one flat settings key per provider, falling
+  through to the global choice) and per-policy parameter settings
+  (progressive's levelCap, exponential's multiplier/ceilingMs) — every
+  row a simple scalar, no JSON blobs, consistent with every existing
+  settings-table row. No HTTP routes yet (hdl-bp-05) — an operator could
+  only change this by writing directly to the settings table today.
+
+acceptance_criteria:
+  - BACKOFF_POLICY_SETTING_KEY (default "static") and
+    getActiveBackoffPolicyName live in
+    src/core/scheduler/backoff-policies/registry.ts, not http-server.ts.
+  - One flat settings key per provider for the override
+    (backoff_policy_override_<provider>, 6 providers), each optional,
+    absent/null falls through to the global choice.
+  - One flat settings key per policy parameter
+    (backoff_progressive_level_cap, backoff_exponential_multiplier,
+    backoff_exponential_ceiling_ms), each with the design-discussion's
+    worked-example defaults.
+  - InProcessScheduler reads the resolved policy name + parameters from
+    settings (via the per-lane provider) instead of a hardcoded constant.
+  - A test writes a non-default policy + parameters directly to the
+    settings table and confirms the scheduler's next tick uses it.
+  - A test confirms per-provider override resolution: a provider-specific
+    key present is used; absent falls through to the global choice.
+
+steps:
+  - id: s1
+    description: Add BACKOFF_POLICY_SETTING_KEY + getActiveBackoffPolicyName
+      to registry.ts; setBackoffPolicy in http-server.ts's core-adjacent
+      shared function layer (not yet exposed via HTTP route).
+    agent: developer
+  - id: s2
+    description: Add per-provider override keys and per-policy parameter
+      keys; wire resolution logic (provider override -> global choice,
+      parameters resolved per selected policy).
+    agent: developer
+  - id: s3
+    description: Wire InProcessScheduler to read resolved
+      policy+parameters from settings instead of the hdl-bp-03 hardcoded
+      default.
+    agent: developer
+  - id: s4
+    description: Tests for settings-driven selection and per-provider
+      override fallback.
+    agent: tester
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - src/core/route-selector.ts
+    - src/core/scheduler/backoff-policies/registry.ts
+    - src/core/scheduler/in-process-scheduler.ts
+    - src/api/http-server.ts
+  tech_stack: [typescript, node, sqlite]
+
+design_decisions:
+  - decision: BACKOFF_POLICY_SETTING_KEY/getActiveBackoffPolicyName live
+      in the core scheduler/backoff-policies layer, not http-server.ts.
+    rationale: Found during this epic's own collaborative-review pass —
+      the real routing_strategy pattern already splits ownership this way
+      (ROUTING_STRATEGY_SETTING_KEY/getActiveRoutingStrategyName in
+      src/core/route-selector.ts, only setRoutingStrategy + HTTP handlers
+      in http-server.ts); an earlier draft wrongly attributed the whole
+      pattern to http-server.ts.
+  - decision: Per-provider override replaces the whole policy choice
+      rather than overriding individual parameters of the global policy.
+    rationale: Design-discussion open question 1 — a provider needing a
+      genuinely different heuristic (e.g. Ollama, which never rate-limits,
+      reasonably wanting static even when the global default is
+      exponential) is the more likely real use case than wanting the same
+      heuristic with different numbers.
+
+metric:
+  applies: false
+  justification: Backend plumbing story with no standalone user-facing
+    surface until hdl-bp-05/06 expose it; covered directly by this
+    story's own acceptance criteria and tests.
