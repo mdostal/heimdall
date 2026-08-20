@@ -12,6 +12,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { Lane } from "../lane-registry.js";
+import type { StateStore } from "../state-store.js";
 import { assignExperimentArm } from "../routing/experiment-assigner.js";
 import { PolicyLoader, type CostPreference, type Policy } from "../routing/policy-loader.js";
 import { generateRationale } from "../routing/rationale-generator.js";
@@ -42,12 +43,19 @@ export interface ScoredStrategyOptions {
   generateDecisionId?: () => string;
 }
 
-function toLaneHealth(lane: Lane): LaneHealth {
+// hdl-bp-01: resolves the manual-or-default headroom/cost_tier for one
+// candidate lane. A StateStore manual value (set via POST
+// /lanes/:laneId/headroom or /cost-tier) wins over the LaneRegistry
+// env-var-parsed default when set — same operator-value-wins-over-default
+// precedence manual_override already establishes elsewhere in this
+// codebase. null (unset) falls through to lane.headroom/lane.cost_tier,
+// byte-identical to pre-hdl-bp-01 behavior.
+function toLaneHealth(lane: Lane, store: StateStore): LaneHealth {
   return {
     lane_id: lane.lane_id,
     provider: lane.provider,
-    headroom: lane.headroom,
-    cost_tier: lane.cost_tier,
+    headroom: store.getManualHeadroom(lane.lane_id) ?? lane.headroom,
+    cost_tier: store.getManualCostTier(lane.lane_id) ?? lane.cost_tier,
   };
 }
 
@@ -84,7 +92,7 @@ export class ScoredStrategy implements RoutingStrategy {
     return this.getLedger().reportOutcome(input);
   }
 
-  selectRoute({ taskType, candidates, taskId }: RouteSelectionContext): RouteSelectionResult {
+  selectRoute({ taskType, candidates, taskId, store }: RouteSelectionContext): RouteSelectionResult {
     const policy = this.getPolicy();
     const now = this.options.now ?? (() => new Date());
     const generateDecisionId = this.options.generateDecisionId ?? randomUUID;
@@ -101,11 +109,17 @@ export class ScoredStrategy implements RoutingStrategy {
     };
 
     const lanesById = new Map(candidates.map((lane) => [lane.lane_id, lane]));
-    const laneHealth = candidates.map(toLaneHealth);
+    const laneHealth = candidates.map((lane) => toLaneHealth(lane, store));
+    // hdl-bp-01: the headroom_floor gate below reads laneHealthById (the
+    // resolved manual-or-default value), not the raw candidate Lane's
+    // env-var-only headroom — otherwise a live manual_headroom edit would
+    // score correctly but still be gated on the stale default.
+    const laneHealthById = new Map(laneHealth.map((lane) => [lane.lane_id, lane]));
     const ranked = rankCandidates(laneHealth.map((lane) => scoreCandidate(lane, { task_type: taskType }, scoringPolicy)));
     const chosenScore =
-      ranked.find((candidate) => (lanesById.get(candidate.lane_id)?.headroom ?? -Infinity) >= policy.headroom_floor) ??
-      null;
+      ranked.find(
+        (candidate) => (laneHealthById.get(candidate.lane_id)?.headroom ?? -Infinity) >= policy.headroom_floor,
+      ) ?? null;
     const chosenLane = chosenScore ? (lanesById.get(chosenScore.lane_id) ?? null) : null;
 
     const rationale = chosenScore

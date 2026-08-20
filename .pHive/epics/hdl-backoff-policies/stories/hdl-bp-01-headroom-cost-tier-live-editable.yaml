@@ -1,0 +1,82 @@
+id: hdl-bp-01-headroom-cost-tier-live-editable
+epic: hdl-backoff-policies
+title: Headroom and cost-tier become live-editable per-lane settings, independently of backoff policy
+status: pending
+complexity: low
+methodology: classic
+depends_on: []
+parallel_allowed: true
+parallel_rationale: bounded-slice
+files_to_modify:
+  - file: src/core/state-store.ts
+    change: add manual_headroom/manual_cost_tier columns + get/set pairs
+  - file: src/core/lane-registry.ts
+    change: no change to parsing, referenced as the fallback-default source
+  - file: src/core/routing-strategies/scored-strategy.ts
+    change: resolve manual-or-default headroom/cost_tier at headroom_floor gating time
+  - file: src/api/http-server.ts
+    change: new headroom/cost-tier live-edit routes on the lanes surface
+
+description: >
+  Brings headroom/cost-tier out of env-var-only invisibility into
+  live-editable per-lane settings, mirroring manual_override/
+  manual_reset_at's existing precedence pattern exactly (operator-set
+  value wins over the env-var default, no restart required). New
+  manual_headroom/manual_cost_tier columns on `lanes` via the same
+  defensive ALTER TABLE ADD COLUMN pattern already used for
+  manual_override. Live-edit routes reject invalid input with a
+  structured 400 (mirroring setRoutingStrategy), never silently drop the
+  lane the way a malformed startup-time env var does.
+
+acceptance_criteria:
+  - manual_headroom (REAL) and manual_cost_tier (TEXT CHECK IN low|medium
+    |high OR NULL) columns exist on lanes, added via the same idempotent
+    ALTER TABLE ADD COLUMN pattern as manual_override.
+  - setManualHeadroom/getManualHeadroom and setManualCostTier/
+    getManualCostTier exist, mirroring setManualOverride/getManualOverride's
+    shape.
+  - scored-strategy.ts's headroom_floor gating resolves manual value over
+    the env-var-parsed default when a manual value is set.
+  - New HTTP route(s) accept a headroom/cost-tier update, reject an
+    invalid value (non-finite/negative headroom, cost-tier not in
+    low|medium|high) with a structured 400, and never remove the lane
+    from GET /lanes on a rejected update.
+
+steps:
+  - id: s1
+    description: Add the two new StateStore columns + get/set pairs,
+      mirroring manual_override/manual_reset_at exactly.
+    agent: developer
+  - id: s2
+    description: Wire manual-or-default resolution into scored-strategy.ts's
+      headroom_floor gating.
+    agent: developer
+  - id: s3
+    description: Add the live-edit HTTP route(s) with real input
+      validation (structured 400, never a silent lane drop).
+    agent: developer
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - src/core/state-store.ts
+    - src/core/lane-registry.ts
+    - src/core/routing-strategies/scored-strategy.ts
+    - src/api/http-server.ts
+  tech_stack: [typescript, node, sqlite]
+
+design_decisions:
+  - decision: Live-edit validation rejects with a structured 400 rather
+      than mirroring the startup-time env-var "warn and skip the lane"
+      behavior.
+    rationale: A bad .env value at boot has no operator watching a
+      response, so warn-and-skip is the safe choice there; a bad live
+      HTTP edit has an operator right there who should get an immediate,
+      actionable rejection instead — found by the epic's own grill review
+      (finding U1).
+
+metric:
+  applies: false
+  justification: Backend/data-layer correctness fix with no standalone
+    user-facing surface until hdl-bp-06 (dashboard) makes it visible;
+    covered directly by this story's own acceptance criteria and tests.

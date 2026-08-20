@@ -5,6 +5,13 @@ import { StateStore } from "../state-store.js";
 import type { Lane } from "../lane-registry.js";
 import type { ArgusEmitter } from "../telemetry/argus-client.js";
 import type { LanePipeline } from "../lane-pipeline.js";
+import {
+  BACKOFF_POLICY_SETTING_KEY,
+  BACKOFF_PROGRESSIVE_LEVEL_CAP_SETTING_KEY,
+  BACKOFF_EXPONENTIAL_MULTIPLIER_SETTING_KEY,
+  BACKOFF_EXPONENTIAL_CEILING_MS_SETTING_KEY,
+  backoffPolicyOverrideSettingKey,
+} from "./backoff-policies/registry.js";
 
 const LANE: Lane = {
   lane_id: "claude@mathew.dostal",
@@ -498,5 +505,178 @@ test("hdl-lm-03: clearing manual_reset_at (set back to null) reverts to the sens
 
   assert.equal(delays.length, 2);
   assert.equal(delays[1], 10 * 60 * 1000, "expected the sensed reset_at (10 minutes) to decide once the manual override was cleared");
+  store.close();
+});
+
+test("hdl-bp-03: consecutiveSuspectTicks increments while suspect, resets to exactly 0 the instant the lane recovers, and restarts at 1 on the next suspect tick", async () => {
+  // This is the epic's single highest-risk property (docs/scheduler-
+  // constraints.md's "backs off immediately on recovery" guarantee):
+  // simulates suspect -> suspect -> healthy -> suspect again, asserting the
+  // counter at every step, not just inferring it indirectly through delays.
+  const store = seedStore("degraded"); // no reset_at, no error_code
+  const pipeline = fakePipeline(async () => {}); // no-op: does not itself change status
+  const scheduler = new InProcessScheduler({ lane: LANE, pipeline, store, argus: fakeArgus() });
+
+  await scheduler.poll(); // 1st consecutive suspect tick
+  assert.equal(scheduler.consecutiveSuspectTicks, 1, "first suspect tick must be 1 (1-indexed), not 0");
+
+  await scheduler.poll(); // 2nd consecutive suspect tick
+  assert.equal(scheduler.consecutiveSuspectTicks, 2, "second consecutive suspect tick must be 2");
+
+  // Simulate recovery (as a real refresh() would do by writing a new status).
+  store.recordStatus({
+    lane_id: LANE.lane_id,
+    status: "up",
+    reset_at: null,
+    reason: null,
+    error_code: null,
+    signal_source: "active_probe",
+    observed_at: "2026-07-25T12:00:10.000Z",
+  });
+  await scheduler.poll();
+  assert.equal(
+    scheduler.consecutiveSuspectTicks,
+    0,
+    "consecutiveSuspectTicks must reset to exactly 0 the instant the lane is no longer suspect, not decrement or hold",
+  );
+
+  // Simulate a fresh degradation after the healthy interlude.
+  store.recordStatus({
+    lane_id: LANE.lane_id,
+    status: "degraded",
+    reset_at: null,
+    reason: null,
+    error_code: null,
+    signal_source: "active_probe",
+    observed_at: "2026-07-25T12:00:15.000Z",
+  });
+  await scheduler.poll();
+  assert.equal(scheduler.consecutiveSuspectTicks, 1, "the next suspect tick after recovery must restart at 1, not continue from the pre-recovery count");
+
+  store.close();
+});
+
+// hdl-bp-04: this is the core proof the story exists to deliver — the
+// scheduler reads the resolved policy + parameters from the settings table
+// on every tick, instead of hdl-bp-03's hardcoded ACTIVE_BACKOFF_POLICY
+// constant, and reflects a live settings change without a process restart
+// (no scheduler recreation between writes below).
+
+test("hdl-bp-04: a non-default policy + parameters written directly to the settings table are used on the scheduler's next tick", async () => {
+  const store = seedStore("degraded"); // LANE.provider === 'claude', no reset_at, no error_code
+  store.setSetting(BACKOFF_POLICY_SETTING_KEY, "progressive");
+  store.setSetting(BACKOFF_PROGRESSIVE_LEVEL_CAP_SETTING_KEY, "3");
+  const delays: number[] = [];
+  const scheduler = new InProcessScheduler({
+    lane: LANE,
+    pipeline: fakePipeline(async () => {}),
+    store,
+    argus: fakeArgus(),
+    setTimeoutImpl: ((fn: () => void, ms: number) => {
+      delays.push(ms);
+      return {} as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+  });
+
+  scheduler.start(); // delays[0]: default interval, unrelated to this test
+  await scheduler.poll(); // 1st suspect tick: progressive(1, cap 3) = 5000 * min(1,3)
+  await scheduler.poll(); // 2nd suspect tick: 5000 * min(2,3)
+  await scheduler.poll(); // 3rd suspect tick: 5000 * min(3,3)
+  await scheduler.poll(); // 4th suspect tick: 5000 * min(4,3) — cap reached, holds
+
+  assert.deepEqual(
+    delays.slice(1),
+    [5_000, 10_000, 15_000, 15_000],
+    "expected progressive's baseIntervalMs * min(consecutiveSuspectTicks, levelCap) using the settings-stored levelCap=3, not static's flat 5000 every tick",
+  );
+  store.close();
+});
+
+test("hdl-bp-04: a live settings change takes effect on the very next tick — no scheduler restart required", async () => {
+  const store = seedStore("degraded"); // settings unset -> defaults to 'static'
+  const delays: number[] = [];
+  const scheduler = new InProcessScheduler({
+    lane: LANE,
+    pipeline: fakePipeline(async () => {}),
+    store,
+    argus: fakeArgus(),
+    setTimeoutImpl: ((fn: () => void, ms: number) => {
+      delays.push(ms);
+      return {} as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+  });
+
+  scheduler.start(); // delays[0]: default interval, unrelated to this test
+  await scheduler.poll(); // 1st suspect tick, static default: flat 5000
+  assert.equal(delays.at(-1), 5_000, "unset settings must still behave byte-identically to the hdl-bp-03 'static' default");
+
+  // Operator writes directly to the settings table mid-run — the same
+  // scheduler instance, no restart, no recreation.
+  store.setSetting(BACKOFF_POLICY_SETTING_KEY, "exponential");
+  store.setSetting(BACKOFF_EXPONENTIAL_MULTIPLIER_SETTING_KEY, "2");
+  store.setSetting(BACKOFF_EXPONENTIAL_CEILING_MS_SETTING_KEY, "300000");
+
+  await scheduler.poll(); // 2nd suspect tick: exponential(2) = 5000 * 2**(2-1) = 10000
+  assert.equal(delays.at(-1), 10_000, "the live settings change must be picked up on the very next tick, without restarting the process/scheduler");
+
+  store.close();
+});
+
+test("hdl-bp-04: per-provider override resolution end-to-end — present and valid wins over the global choice", async () => {
+  const store = seedStore("degraded"); // LANE.provider === 'claude'
+  store.setSetting(BACKOFF_POLICY_SETTING_KEY, "static"); // global stays static
+  store.setSetting(backoffPolicyOverrideSettingKey("claude"), "progressive");
+  store.setSetting(BACKOFF_PROGRESSIVE_LEVEL_CAP_SETTING_KEY, "5");
+  const delays: number[] = [];
+  const scheduler = new InProcessScheduler({
+    lane: LANE,
+    pipeline: fakePipeline(async () => {}),
+    store,
+    argus: fakeArgus(),
+    setTimeoutImpl: ((fn: () => void, ms: number) => {
+      delays.push(ms);
+      return {} as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+  });
+
+  scheduler.start(); // delays[0]: default interval, unrelated to this test
+  await scheduler.poll(); // 1st suspect tick
+  await scheduler.poll(); // 2nd suspect tick
+
+  assert.deepEqual(
+    delays.slice(-2),
+    [5_000, 10_000],
+    "claude's provider-specific override (progressive) must be used, not the global 'static' choice",
+  );
+  store.close();
+});
+
+test("hdl-bp-04: per-provider override resolution end-to-end — absent for this lane's provider falls through to the global choice", async () => {
+  const store = seedStore("degraded"); // LANE.provider === 'claude'
+  store.setSetting(BACKOFF_POLICY_SETTING_KEY, "progressive");
+  store.setSetting(BACKOFF_PROGRESSIVE_LEVEL_CAP_SETTING_KEY, "5");
+  // An override exists, but for a DIFFERENT provider — must not affect claude's lane.
+  store.setSetting(backoffPolicyOverrideSettingKey("ollama"), "static");
+  const delays: number[] = [];
+  const scheduler = new InProcessScheduler({
+    lane: LANE,
+    pipeline: fakePipeline(async () => {}),
+    store,
+    argus: fakeArgus(),
+    setTimeoutImpl: ((fn: () => void, ms: number) => {
+      delays.push(ms);
+      return {} as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+  });
+
+  scheduler.start(); // delays[0]: default interval, unrelated to this test
+  await scheduler.poll(); // 1st suspect tick
+  await scheduler.poll(); // 2nd suspect tick
+
+  assert.deepEqual(
+    delays.slice(-2),
+    [5_000, 10_000],
+    "claude's lane has no override of its own, so it must fall through to the global 'progressive' choice, unaffected by ollama's override",
+  );
   store.close();
 });

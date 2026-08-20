@@ -95,5 +95,7 @@ app/src-tauri/gen/
 !.pHive/epics/hdl-desktop-icon-settings/**
 !.pHive/epics/hdl-icon-reconciliation/
 !.pHive/epics/hdl-icon-reconciliation/**
+!.pHive/epics/hdl-backoff-policies/
+!.pHive/epics/hdl-backoff-policies/**
 !.pHive/epics/hdl-agent-onboarding/
 !.pHive/epics/hdl-agent-onboarding/**
