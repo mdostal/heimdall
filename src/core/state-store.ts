@@ -11,6 +11,7 @@ import { mkdirSync } from "node:fs";
 import { homedir as osHomedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { LaneCostTier } from "./lane-registry.js";
 import type { ErrorCode, LaneStatus, LaneStatusValue, SignalSource } from "./status-model.js";
 
 // hdl-ao-01 — same shape as resolveDefaultPolicyPath (routing/policy-loader.ts):
@@ -44,7 +45,9 @@ CREATE TABLE IF NOT EXISTS lanes (
   credential_ref TEXT NOT NULL,
   manual_override TEXT CHECK (manual_override IN ('enabled','disabled') OR manual_override IS NULL),
   manual_reset_at TEXT,
-  override_reason TEXT
+  override_reason TEXT,
+  manual_headroom REAL,
+  manual_cost_tier TEXT CHECK (manual_cost_tier IN ('low','medium','high') OR manual_cost_tier IS NULL)
 );
 CREATE TABLE IF NOT EXISTS lane_status_history (
   lane_id TEXT NOT NULL REFERENCES lanes(lane_id),
@@ -169,6 +172,20 @@ export class StateStore {
     // hdl-override-reason: same defensive migration pattern, third lanes column.
     try {
       this.db.exec(`ALTER TABLE lanes ADD COLUMN override_reason TEXT`);
+    } catch {
+      // Column already exists — same reasoning as manual_override above.
+    }
+    // hdl-bp-01: same defensive migration pattern, fourth/fifth lanes columns
+    // (mirrors manual_override/manual_reset_at exactly).
+    try {
+      this.db.exec(`ALTER TABLE lanes ADD COLUMN manual_headroom REAL`);
+    } catch {
+      // Column already exists — same reasoning as manual_override above.
+    }
+    try {
+      this.db.exec(
+        `ALTER TABLE lanes ADD COLUMN manual_cost_tier TEXT CHECK (manual_cost_tier IN ('low','medium','high') OR manual_cost_tier IS NULL)`,
+      );
     } catch {
       // Column already exists — same reasoning as manual_override above.
     }
@@ -364,6 +381,54 @@ export class StateStore {
       .prepare(`SELECT manual_reset_at FROM lanes WHERE lane_id = ?`)
       .get(laneId) as unknown as { manual_reset_at: string | null } | undefined;
     return row?.manual_reset_at ?? null;
+  }
+
+  /**
+   * Manual headroom (hdl-bp-01) — an operator-supplied override that, when
+   * set, wins over LaneRegistry's env-var-parsed default headroom in
+   * ScoredStrategy's headroom_floor gating (routing-strategies/
+   * scored-strategy.ts). null (the default) means the env-var default alone
+   * decides, unchanged from pre-hdl-bp-01 behavior. Mirrors
+   * setManualResetAt/getManualResetAt exactly — same guard, same shape,
+   * same precedence pattern manual_override already established.
+   */
+  setManualHeadroom(laneId: string, value: number | null): void {
+    this.db
+      .prepare(
+        `INSERT INTO lanes (lane_id, provider, credential_ref) VALUES (?, '', '')
+         ON CONFLICT(lane_id) DO NOTHING`,
+      )
+      .run(laneId);
+    this.db.prepare(`UPDATE lanes SET manual_headroom = ? WHERE lane_id = ?`).run(value, laneId);
+  }
+
+  getManualHeadroom(laneId: string): number | null {
+    const row = this.db
+      .prepare(`SELECT manual_headroom FROM lanes WHERE lane_id = ?`)
+      .get(laneId) as unknown as { manual_headroom: number | null } | undefined;
+    return row?.manual_headroom ?? null;
+  }
+
+  /**
+   * Manual cost tier (hdl-bp-01) — same precedence shape as
+   * setManualHeadroom/getManualHeadroom above, wins over LaneRegistry's
+   * env-var-parsed default cost_tier.
+   */
+  setManualCostTier(laneId: string, value: LaneCostTier | null): void {
+    this.db
+      .prepare(
+        `INSERT INTO lanes (lane_id, provider, credential_ref) VALUES (?, '', '')
+         ON CONFLICT(lane_id) DO NOTHING`,
+      )
+      .run(laneId);
+    this.db.prepare(`UPDATE lanes SET manual_cost_tier = ? WHERE lane_id = ?`).run(value, laneId);
+  }
+
+  getManualCostTier(laneId: string): LaneCostTier | null {
+    const row = this.db
+      .prepare(`SELECT manual_cost_tier FROM lanes WHERE lane_id = ?`)
+      .get(laneId) as unknown as { manual_cost_tier: LaneCostTier | null } | undefined;
+    return row?.manual_cost_tier ?? null;
   }
 
   /**

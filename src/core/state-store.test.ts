@@ -393,6 +393,148 @@ test("a StateStore opened against a DB file created before manual_reset_at exist
   }
 });
 
+test("getManualHeadroom defaults to null for a lane with no manual headroom set (hdl-bp-01)", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+
+  assert.equal(store.getManualHeadroom("claude@mathew.dostal"), null);
+  store.close();
+});
+
+test("setManualHeadroom persists and getManualHeadroom reads it back, including clearing (hdl-bp-01)", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+
+  store.setManualHeadroom("claude@mathew.dostal", 500);
+  assert.equal(store.getManualHeadroom("claude@mathew.dostal"), 500);
+
+  store.setManualHeadroom("claude@mathew.dostal", null);
+  assert.equal(store.getManualHeadroom("claude@mathew.dostal"), null);
+  store.close();
+});
+
+test("setManualHeadroom works even when the lane was never upserted first (hdl-bp-01)", () => {
+  const store = new StateStore(":memory:");
+
+  assert.doesNotThrow(() => store.setManualHeadroom("never-upserted", 500));
+  assert.equal(store.getManualHeadroom("never-upserted"), 500);
+  store.close();
+});
+
+test("setManualHeadroom does not clobber manual_override or provider/credential_ref already on file (hdl-bp-01)", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+  store.setManualOverride("claude@mathew.dostal", "disabled");
+
+  store.setManualHeadroom("claude@mathew.dostal", 500);
+
+  assert.equal(store.getManualOverride("claude@mathew.dostal"), "disabled");
+  const lanes = store.listLanes().map((lane) => ({ ...lane }));
+  assert.deepEqual(lanes, [
+    { lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" },
+  ]);
+  store.close();
+});
+
+test("a StateStore opened against a DB file created before manual_headroom existed does not crash (defensive migration, hdl-bp-01)", () => {
+  // Simulate a pre-hdl-bp-01 database — has manual_override (hdl-lo-01) but
+  // not yet manual_headroom/manual_cost_tier.
+  const dbPath = path.join(os.tmpdir(), `heimdall-migration-test-bp01-headroom-${Date.now()}.sqlite`);
+  const legacyDb = new DatabaseSync(dbPath);
+  legacyDb.exec(`
+    CREATE TABLE lanes (
+      lane_id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      credential_ref TEXT NOT NULL,
+      manual_override TEXT
+    );
+  `);
+  legacyDb.close();
+
+  try {
+    assert.doesNotThrow(() => {
+      const store = new StateStore(dbPath);
+      store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+      store.setManualHeadroom("claude@mathew.dostal", 500);
+      assert.equal(store.getManualHeadroom("claude@mathew.dostal"), 500);
+      store.close();
+    });
+  } finally {
+    fs.rmSync(dbPath, { force: true });
+  }
+});
+
+test("getManualCostTier defaults to null for a lane with no manual cost tier set (hdl-bp-01)", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+
+  assert.equal(store.getManualCostTier("claude@mathew.dostal"), null);
+  store.close();
+});
+
+test("setManualCostTier persists and getManualCostTier reads it back, including clearing (hdl-bp-01)", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+
+  store.setManualCostTier("claude@mathew.dostal", "high");
+  assert.equal(store.getManualCostTier("claude@mathew.dostal"), "high");
+
+  store.setManualCostTier("claude@mathew.dostal", null);
+  assert.equal(store.getManualCostTier("claude@mathew.dostal"), null);
+  store.close();
+});
+
+test("setManualCostTier works even when the lane was never upserted first (hdl-bp-01)", () => {
+  const store = new StateStore(":memory:");
+
+  assert.doesNotThrow(() => store.setManualCostTier("never-upserted", "low"));
+  assert.equal(store.getManualCostTier("never-upserted"), "low");
+  store.close();
+});
+
+test("setManualCostTier does not clobber manual_override or provider/credential_ref already on file (hdl-bp-01)", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+  store.setManualOverride("claude@mathew.dostal", "disabled");
+
+  store.setManualCostTier("claude@mathew.dostal", "high");
+
+  assert.equal(store.getManualOverride("claude@mathew.dostal"), "disabled");
+  const lanes = store.listLanes().map((lane) => ({ ...lane }));
+  assert.deepEqual(lanes, [
+    { lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" },
+  ]);
+  store.close();
+});
+
+test("a StateStore opened against a DB file created before manual_cost_tier existed does not crash (defensive migration, hdl-bp-01)", () => {
+  // Simulate a pre-hdl-bp-01 database — has manual_override (hdl-lo-01) but
+  // not yet manual_headroom/manual_cost_tier.
+  const dbPath = path.join(os.tmpdir(), `heimdall-migration-test-bp01-cost-tier-${Date.now()}.sqlite`);
+  const legacyDb = new DatabaseSync(dbPath);
+  legacyDb.exec(`
+    CREATE TABLE lanes (
+      lane_id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      credential_ref TEXT NOT NULL,
+      manual_override TEXT
+    );
+  `);
+  legacyDb.close();
+
+  try {
+    assert.doesNotThrow(() => {
+      const store = new StateStore(dbPath);
+      store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+      store.setManualCostTier("claude@mathew.dostal", "low");
+      assert.equal(store.getManualCostTier("claude@mathew.dostal"), "low");
+      store.close();
+    });
+  } finally {
+    fs.rmSync(dbPath, { force: true });
+  }
+});
+
 test("hdl-error-taxonomy: a StateStore opened against a DB file created before error_code existed does not crash (defensive migration)", () => {
   // Simulate a pre-hdl-error-taxonomy database — lane_status_history exists
   // but has no error_code column yet.

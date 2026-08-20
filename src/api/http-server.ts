@@ -6,7 +6,7 @@
 
 import { createServer, type Server } from "node:http";
 import { EnvCredentialSource } from "../core/credential-source.js";
-import { loadLaneDeclarations, LaneRegistry } from "../core/lane-registry.js";
+import { loadLaneDeclarations, LaneRegistry, type LaneCostTier } from "../core/lane-registry.js";
 import {
   getAvailableRoute,
   getScoredRoute,
@@ -92,6 +92,10 @@ export interface LaneStatusWithOverride extends LaneStatus {
   model: string;
   credential_ref: string;
   priority: number | null;
+  /** hdl-bp-01 — live-editable per-lane scoring inputs, same "null means
+   * unset, env-var default decides" shape as manual_reset_at above. */
+  manual_headroom: number | null;
+  manual_cost_tier: LaneCostTier | null;
 }
 
 const VALID_OVERRIDE_STATES = new Set(["enabled", "disabled", "auto"]);
@@ -162,6 +166,67 @@ export function setLaneResetAt(
   }
   store.setManualResetAt(laneId, rawResetAt);
   return { ok: true, lane_id: laneId, manual_reset_at: rawResetAt };
+}
+
+export type SetHeadroomResult =
+  | { ok: true; lane_id: string; manual_headroom: number | null }
+  | { ok: false; error: "unknown_lane"; lane_id: string }
+  | { ok: false; error: "invalid_headroom"; message: string };
+
+// hdl-bp-01: live-edit validation rejects with a structured 400 rather than
+// mirroring lane-registry.ts's startup-time "warn and skip the lane"
+// behavior for a malformed env var — a bad live HTTP edit has an operator
+// right there who should get an immediate, actionable rejection instead
+// (grill finding U1, design-discussion.md §3 item 7). Never drops the lane.
+export function setLaneHeadroom(
+  registry: LaneRegistry,
+  store: StateStore,
+  laneId: string,
+  rawHeadroom: unknown,
+): SetHeadroomResult {
+  if (!registry.get(laneId)) {
+    return { ok: false, error: "unknown_lane", lane_id: laneId };
+  }
+  if (rawHeadroom === null) {
+    store.setManualHeadroom(laneId, null);
+    return { ok: true, lane_id: laneId, manual_headroom: null };
+  }
+  if (typeof rawHeadroom !== "number" || !Number.isFinite(rawHeadroom) || rawHeadroom < 0) {
+    return {
+      ok: false,
+      error: "invalid_headroom",
+      message: "headroom must be a finite, non-negative number, or null to clear the override",
+    };
+  }
+  store.setManualHeadroom(laneId, rawHeadroom);
+  return { ok: true, lane_id: laneId, manual_headroom: rawHeadroom };
+}
+
+const VALID_COST_TIERS = new Set<string>(["low", "medium", "high"]);
+
+export type SetCostTierResult =
+  | { ok: true; lane_id: string; manual_cost_tier: LaneCostTier | null }
+  | { ok: false; error: "unknown_lane"; lane_id: string }
+  | { ok: false; error: "invalid_cost_tier"; allowed_cost_tiers: string[] };
+
+export function setLaneCostTier(
+  registry: LaneRegistry,
+  store: StateStore,
+  laneId: string,
+  rawCostTier: unknown,
+): SetCostTierResult {
+  if (!registry.get(laneId)) {
+    return { ok: false, error: "unknown_lane", lane_id: laneId };
+  }
+  if (rawCostTier === null) {
+    store.setManualCostTier(laneId, null);
+    return { ok: true, lane_id: laneId, manual_cost_tier: null };
+  }
+  if (typeof rawCostTier !== "string" || !VALID_COST_TIERS.has(rawCostTier)) {
+    return { ok: false, error: "invalid_cost_tier", allowed_cost_tiers: [...VALID_COST_TIERS] };
+  }
+  store.setManualCostTier(laneId, rawCostTier as LaneCostTier);
+  return { ok: true, lane_id: laneId, manual_cost_tier: rawCostTier as LaneCostTier };
 }
 
 export interface AddLaneInput {
@@ -364,6 +429,8 @@ export function getLaneStatuses(registry: LaneRegistry, store: StateStore): Lane
       model: declared?.model ?? status.provider,
       credential_ref: declared?.credential_ref ?? "",
       priority: declared?.priority ?? null,
+      manual_headroom: store.getManualHeadroom(status.lane_id),
+      manual_cost_tier: store.getManualCostTier(status.lane_id),
     };
   });
 }
@@ -884,6 +951,65 @@ export function createHttpServer(
         }
         const resetAt = (body.data as { reset_at?: unknown }).reset_at;
         const result = setLaneResetAt(registry, store, laneId, resetAt);
+        if (!result.ok) {
+          const status = result.error === "unknown_lane" ? 404 : 400;
+          const { ok: _ok, ...wire } = result;
+          res.writeHead(status, { "content-type": "application/json" });
+          res.end(JSON.stringify(wire));
+          return;
+        }
+        const { ok: _ok, ...wire } = result;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(wire));
+      });
+      return;
+    }
+
+    // hdl-bp-01: manual headroom — live-editable per-lane scoring input,
+    // same route shape as /reset-at above. Wins over LaneRegistry's
+    // env-var-parsed default in ScoredStrategy's headroom_floor gating
+    // (src/core/routing-strategies/scored-strategy.ts). Rejects a
+    // non-finite/negative headroom with a structured 400 — never silently
+    // drops the lane the way a malformed startup-time env var does (grill
+    // finding U1).
+    const headroomMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/headroom$/);
+    if (headroomMatch) {
+      const laneId = decodeURIComponent(headroomMatch[1]);
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+        const headroom = (body.data as { headroom?: unknown }).headroom;
+        const result = setLaneHeadroom(registry, store, laneId, headroom);
+        if (!result.ok) {
+          const status = result.error === "unknown_lane" ? 404 : 400;
+          const { ok: _ok, ...wire } = result;
+          res.writeHead(status, { "content-type": "application/json" });
+          res.end(JSON.stringify(wire));
+          return;
+        }
+        const { ok: _ok, ...wire } = result;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(wire));
+      });
+      return;
+    }
+
+    // hdl-bp-01: manual cost tier — same route shape and validation
+    // discipline as /headroom above.
+    const costTierMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/cost-tier$/);
+    if (costTierMatch) {
+      const laneId = decodeURIComponent(costTierMatch[1]);
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+        const costTier = (body.data as { cost_tier?: unknown }).cost_tier;
+        const result = setLaneCostTier(registry, store, laneId, costTier);
         if (!result.ok) {
           const status = result.error === "unknown_lane" ? 404 : 400;
           const { ok: _ok, ...wire } = result;

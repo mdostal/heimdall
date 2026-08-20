@@ -4,7 +4,15 @@ import type { AddressInfo } from "node:net";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createHttpServer, getLaneStatuses, setLaneOverride, setLaneResetAt, addLane } from "./http-server.js";
+import {
+  createHttpServer,
+  getLaneStatuses,
+  setLaneOverride,
+  setLaneResetAt,
+  setLaneHeadroom,
+  setLaneCostTier,
+  addLane,
+} from "./http-server.js";
 import { LaneRegistry } from "../core/lane-registry.js";
 import { StateStore } from "../core/state-store.js";
 import { EnvCredentialSource } from "../core/credential-source.js";
@@ -1564,6 +1572,270 @@ test("hdl-lm-03: POST /lanes/:laneId/reset-at rejects a past timestamp with 400"
     server.close();
     store.close();
   }
+});
+
+test("hdl-bp-01: POST /lanes/:laneId/headroom sets it and GET /lanes reflects it", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const setRes = await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/headroom`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ headroom: 500 }),
+    });
+    assert.equal(setRes.status, 200);
+    const setBody = await setRes.json();
+    assert.equal(setBody.manual_headroom, 500);
+
+    const lanesRes = await fetch(`http://localhost:${port}/lanes`);
+    const lanes = await lanesRes.json();
+    assert.equal(lanes[0].manual_headroom, 500);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-bp-01: POST /lanes/:laneId/headroom with headroom: null clears a previously-set value", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/headroom`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ headroom: 500 }),
+    });
+    const clearRes = await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/headroom`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ headroom: null }),
+    });
+    assert.equal(clearRes.status, 200);
+    const clearBody = await clearRes.json();
+    assert.equal(clearBody.manual_headroom, null);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-bp-01: POST /lanes/:laneId/headroom for an unknown lane returns 404", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes/never-declared/headroom`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ headroom: 500 }),
+    });
+    assert.equal(res.status, 404);
+    const body = await res.json();
+    assert.equal(body.error, "unknown_lane");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-bp-01: POST /lanes/:laneId/headroom rejects a negative number with a structured 400, and GET /lanes still shows the lane", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/headroom`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ headroom: -5 }),
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.error, "invalid_headroom");
+
+    const lanesRes = await fetch(`http://localhost:${port}/lanes`);
+    const lanes = await lanesRes.json();
+    assert.equal(lanes.length, 1);
+    assert.equal(lanes[0].lane_id, "claude@mathew.dostal");
+    assert.equal(lanes[0].manual_headroom, null);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-bp-01: POST /lanes/:laneId/headroom rejects a non-finite value (NaN/Infinity via a non-number) with a structured 400", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/headroom`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ headroom: "not-a-number" }),
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.error, "invalid_headroom");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-bp-01: POST /lanes/:laneId/cost-tier sets it and GET /lanes reflects it", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const setRes = await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/cost-tier`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cost_tier: "high" }),
+    });
+    assert.equal(setRes.status, 200);
+    const setBody = await setRes.json();
+    assert.equal(setBody.manual_cost_tier, "high");
+
+    const lanesRes = await fetch(`http://localhost:${port}/lanes`);
+    const lanes = await lanesRes.json();
+    assert.equal(lanes[0].manual_cost_tier, "high");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-bp-01: POST /lanes/:laneId/cost-tier with cost_tier: null clears a previously-set value", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/cost-tier`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cost_tier: "high" }),
+    });
+    const clearRes = await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/cost-tier`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cost_tier: null }),
+    });
+    assert.equal(clearRes.status, 200);
+    const clearBody = await clearRes.json();
+    assert.equal(clearBody.manual_cost_tier, null);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-bp-01: POST /lanes/:laneId/cost-tier for an unknown lane returns 404", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes/never-declared/cost-tier`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cost_tier: "high" }),
+    });
+    assert.equal(res.status, 404);
+    const body = await res.json();
+    assert.equal(body.error, "unknown_lane");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-bp-01: POST /lanes/:laneId/cost-tier rejects a value outside low|medium|high with a structured 400, and GET /lanes still shows the lane", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/cost-tier`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cost_tier: "ultra" }),
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.error, "invalid_cost_tier");
+    assert.deepEqual(body.allowed_cost_tiers.sort(), ["high", "low", "medium"]);
+
+    const lanesRes = await fetch(`http://localhost:${port}/lanes`);
+    const lanes = await lanesRes.json();
+    assert.equal(lanes.length, 1);
+    assert.equal(lanes[0].lane_id, "claude@mathew.dostal");
+    assert.equal(lanes[0].manual_cost_tier, null);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-bp-01: POST /lanes/:laneId/headroom with malformed JSON returns 400, not a crash", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes/claude@mathew.dostal/headroom`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "not json",
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.error, "invalid_json");
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("hdl-mcp-01: setLaneHeadroom/setLaneCostTier are independently callable without an HTTP server", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+
+  const headroomResult = setLaneHeadroom(registry, store, "claude@mathew.dostal", 500);
+  assert.deepEqual(headroomResult, { ok: true, lane_id: "claude@mathew.dostal", manual_headroom: 500 });
+
+  const costTierResult = setLaneCostTier(registry, store, "claude@mathew.dostal", "low");
+  assert.deepEqual(costTierResult, { ok: true, lane_id: "claude@mathew.dostal", manual_cost_tier: "low" });
+
+  store.close();
 });
 
 test("hdl-lo-01: GET /lanes includes each lane's manual_override state (null when unset)", async () => {
