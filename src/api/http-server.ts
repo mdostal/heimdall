@@ -16,6 +16,7 @@ import {
   getRoutingStrategyNames,
   ROUTING_STRATEGY_SETTING_KEY,
 } from "../core/route-selector.js";
+import { BACKOFF_POLICY_SETTING_KEY, getBackoffPolicyNames } from "../core/scheduler/backoff-policies/registry.js";
 import { StateStore, resolveDefaultDbPath, type ManualOverride } from "../core/state-store.js";
 import type { LaneStatus } from "../core/status-model.js";
 import { renderDashboardHtml } from "./ui/dashboard.js";
@@ -286,6 +287,27 @@ export function setRoutingStrategy(store: StateStore, rawName: unknown): SetRout
     return { ok: false, error: "invalid_strategy", allowed_strategies: allowedStrategies };
   }
   store.setSetting(ROUTING_STRATEGY_SETTING_KEY, rawName);
+  return { ok: true, active: rawName };
+}
+
+export type SetBackoffPolicyResult =
+  | { ok: true; active: string }
+  | { ok: false; error: "invalid_policy"; allowed_policies: string[] };
+
+// hdl-bp-04: mirrors setRoutingStrategy's exact validation/return shape —
+// the write side + wire format for BACKOFF_POLICY_SETTING_KEY
+// (src/core/scheduler/backoff-policies/registry.ts owns the setting key and
+// the read side, getActiveBackoffPolicyName, the same split ownership
+// routing_strategy already establishes). No HTTP route wired to this yet
+// (hdl-bp-05) — a shared function importable by both a future route and
+// tests, not inline route logic, same layering setRoutingStrategy already
+// establishes.
+export function setBackoffPolicy(store: StateStore, rawName: unknown): SetBackoffPolicyResult {
+  const allowedPolicies = getBackoffPolicyNames();
+  if (typeof rawName !== "string" || !allowedPolicies.includes(rawName)) {
+    return { ok: false, error: "invalid_policy", allowed_policies: allowedPolicies };
+  }
+  store.setSetting(BACKOFF_POLICY_SETTING_KEY, rawName);
   return { ok: true, active: rawName };
 }
 

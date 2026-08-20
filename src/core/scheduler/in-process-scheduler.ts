@@ -14,8 +14,12 @@ import type { StateStore } from "../state-store.js";
 import type { Lane } from "../lane-registry.js";
 import type { ArgusEmitter } from "../telemetry/argus-client.js";
 import type { ErrorCode, LaneStatusValue } from "../status-model.js";
-import { createBackoffPolicyRegistry } from "./backoff-policies/registry.js";
-import type { BackoffPolicy } from "./backoff-policies/types.js";
+import {
+  createBackoffPolicyRegistry,
+  getBackoffPolicyNameForProvider,
+  getBackoffPolicyConfig,
+  DEFAULT_BACKOFF_POLICY_NAME,
+} from "./backoff-policies/registry.js";
 
 const SUSPECT_STATUSES: readonly LaneStatusValue[] = ["degraded", "down", "out_of_credit"];
 
@@ -32,12 +36,15 @@ const SUSPECT_STATUSES: readonly LaneStatusValue[] = ["degraded", "down", "out_o
 // against "notice reasonably soon once an operator does fix it".
 const AUTH_FAILED_BACKOFF_MS = 5 * 60_000;
 
-// hdl-bp-03: the active BackoffPolicy is hardcoded to "static" for this
-// story — settings-driven selection is hdl-bp-04, a later story. "static"
-// unconditionally returns baseIntervalMs (see static-backoff.ts), so
-// delegating to it here is byte-identical to the flat-interval fallback
-// this replaced.
-const ACTIVE_BACKOFF_POLICY: BackoffPolicy = createBackoffPolicyRegistry()["static"];
+// hdl-bp-04: the active BackoffPolicy is resolved fresh from the settings
+// table on every tick (see computeDelayMs below) — per-lane-provider
+// override falling through to the global choice, both settings-driven, so a
+// live operator edit (write directly to the settings table today; a future
+// HTTP route in hdl-bp-05) takes effect on this lane's very next tick,
+// without a process restart. Unset settings resolve to "static" (the
+// hdl-bp-03 default), which unconditionally returns baseIntervalMs (see
+// static-backoff.ts) — byte-identical to the flat-interval behavior that
+// predates this whole epic when nothing has been configured.
 
 export interface InProcessSchedulerOptions {
   lane: Lane;
@@ -121,8 +128,11 @@ export class InProcessScheduler implements Scheduler {
    *      pluggable policy must never get the chance to silently ignore a
    *      known resetAt or override the auth_failed safety backoff) — a
    *      policy only ever sees the "ordinary self-healing error, no known
-   *      reset time" case. The active policy is hardcoded to "static" for
-   *      this story (settings-driven selection is hdl-bp-04), which makes
+   *      reset time" case. The active policy (hdl-bp-04) is resolved fresh
+   *      from settings on every call — this lane's provider-specific
+   *      override if present and valid, else the global choice — with its
+   *      matching config (levelCap / multiplier+ceilingMs / {} for static).
+   *      Unset settings resolve to "static" with config {}, which makes
    *      this branch byte-identical to the flat this.intervalMs it
    *      replaces.
    */
@@ -135,10 +145,14 @@ export class InProcessScheduler implements Scheduler {
         return Math.max(this.intervalMs, resetAtMs - nowMs);
       }
     }
-    return ACTIVE_BACKOFF_POLICY.nextDelayMs({
+    const policies = createBackoffPolicyRegistry();
+    const policyName = getBackoffPolicyNameForProvider(this.opts.store, this.opts.lane.provider);
+    const policy = policies[policyName] ?? policies[DEFAULT_BACKOFF_POLICY_NAME];
+    const config = getBackoffPolicyConfig(this.opts.store, policyName);
+    return policy.nextDelayMs({
       consecutiveSuspectTicks: this._consecutiveSuspectTicks,
       baseIntervalMs: this.intervalMs,
-      config: {},
+      config,
     });
   }
 

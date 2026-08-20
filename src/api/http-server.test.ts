@@ -12,6 +12,7 @@ import {
   setLaneHeadroom,
   setLaneCostTier,
   addLane,
+  setBackoffPolicy,
 } from "./http-server.js";
 import { LaneRegistry } from "../core/lane-registry.js";
 import { StateStore } from "../core/state-store.js";
@@ -2704,6 +2705,48 @@ test("hdl-docs-viewer: GET / (dashboard) links to /docs, and existing routes are
     assert.equal(lanesRes.status, 200);
   } finally {
     server.close();
+    store.close();
+  }
+});
+
+// hdl-bp-04: setBackoffPolicy — mirrors setRoutingStrategy's exact
+// validation/return shape (structured {error, allowed_policies} on an
+// invalid name, never throws). No HTTP route exists for this yet
+// (hdl-bp-05), so — like setLaneOverride above — it's tested by calling the
+// shared function directly, independent of any HTTP server.
+
+test("hdl-bp-04: setBackoffPolicy is independently callable without an HTTP server and persists the setting", () => {
+  const store = new StateStore(":memory:");
+  try {
+    const result = setBackoffPolicy(store, "progressive");
+    assert.deepEqual(result, { ok: true, active: "progressive" });
+    assert.equal(store.getSetting("backoff_policy"), "progressive");
+  } finally {
+    store.close();
+  }
+});
+
+test("hdl-bp-04: setBackoffPolicy returns {ok: false, error: 'invalid_policy', allowed_policies} for an unknown name, and does not throw", () => {
+  const store = new StateStore(":memory:");
+  try {
+    const result = setBackoffPolicy(store, "not-a-real-policy");
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.error, "invalid_policy");
+      assert.deepEqual(result.allowed_policies.sort(), ["exponential", "progressive", "static"]);
+    }
+    assert.equal(store.getSetting("backoff_policy"), null, "an invalid name must not be persisted");
+  } finally {
+    store.close();
+  }
+});
+
+test("hdl-bp-04: setBackoffPolicy rejects a non-string name the same way (returns invalid_policy, does not throw)", () => {
+  const store = new StateStore(":memory:");
+  try {
+    const result = setBackoffPolicy(store, 42);
+    assert.equal(result.ok, false);
+  } finally {
     store.close();
   }
 });
