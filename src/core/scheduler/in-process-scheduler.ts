@@ -14,6 +14,8 @@ import type { StateStore } from "../state-store.js";
 import type { Lane } from "../lane-registry.js";
 import type { ArgusEmitter } from "../telemetry/argus-client.js";
 import type { ErrorCode, LaneStatusValue } from "../status-model.js";
+import { createBackoffPolicyRegistry } from "./backoff-policies/registry.js";
+import type { BackoffPolicy } from "./backoff-policies/types.js";
 
 const SUSPECT_STATUSES: readonly LaneStatusValue[] = ["degraded", "down", "out_of_credit"];
 
@@ -29,6 +31,13 @@ const SUSPECT_STATUSES: readonly LaneStatusValue[] = ["degraded", "down", "out_o
 // balances "stop wasting probes on a lane that won't recover on its own"
 // against "notice reasonably soon once an operator does fix it".
 const AUTH_FAILED_BACKOFF_MS = 5 * 60_000;
+
+// hdl-bp-03: the active BackoffPolicy is hardcoded to "static" for this
+// story — settings-driven selection is hdl-bp-04, a later story. "static"
+// unconditionally returns baseIntervalMs (see static-backoff.ts), so
+// delegating to it here is byte-identical to the flat-interval fallback
+// this replaced.
+const ACTIVE_BACKOFF_POLICY: BackoffPolicy = createBackoffPolicyRegistry()["static"];
 
 export interface InProcessSchedulerOptions {
   lane: Lane;
@@ -56,6 +65,23 @@ export class InProcessScheduler implements Scheduler {
   private stopped = true;
   private refreshInFlight = false;
   private lastKnownStatus: LaneStatusValue | null = null;
+  // hdl-bp-03: 1-indexed count of consecutive suspect ticks (see
+  // backoff-policies/types.ts's BackoffContext doc for the convention).
+  // Incremented BEFORE the delay computation in poll() whenever
+  // stillSuspect is true, and reset to exactly 0 the instant it's false —
+  // this reset is the epic's single most safety-critical property (the
+  // "backs off immediately on recovery" guarantee documented in this
+  // file's header comment and docs/scheduler-constraints.md). Exposed via
+  // the read-only `consecutiveSuspectTicks` getter below (mirrors
+  // state-store.ts's `get database()` pattern) so tests can verify the
+  // reset-on-recovery guarantee directly instead of only inferring it
+  // indirectly through delay values.
+  private _consecutiveSuspectTicks = 0;
+
+  /** Read-only: current consecutive-suspect-tick count (see field doc above). */
+  get consecutiveSuspectTicks(): number {
+    return this._consecutiveSuspectTicks;
+  }
 
   constructor(private readonly opts: InProcessSchedulerOptions) {
     this.intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
@@ -79,25 +105,41 @@ export class InProcessScheduler implements Scheduler {
   }
 
   /**
-   * reset_at-aware delay: when a known future reset_at exists, wait until
-   * (or shortly after) it instead of the flat interval — no point probing a
-   * lane we already know won't recover until a specific time. Floored at
-   * this.intervalMs so a past/near/malformed reset_at (clock skew, stale
-   * data) can never produce a zero/negative/busy-loop delay. No ceiling —
-   * a reset_at far in the future is honored in full, that's the point.
+   * Delay computation, checked in this exact order (hdl-bp-03):
    *
-   * errorCode is consulted FIRST: auth_failed always backs off to a fixed
-   * long interval regardless of reset_at (which is always null for this
-   * class anyway — see file header for why this is the one safe exception
-   * to the SLA-driven fine cadence).
+   *   1. errorCode === "auth_failed" → fixed AUTH_FAILED_BACKOFF_MS
+   *      (UNCHANGED from pre-hdl-bp-03 behavior).
+   *   2. a known resetAt → wait until (or shortly after) it instead of the
+   *      flat interval — no point probing a lane we already know won't
+   *      recover until a specific time. Floored at this.intervalMs so a
+   *      past/near/malformed resetAt (clock skew, stale data) can never
+   *      produce a zero/negative/busy-loop delay. No ceiling — a resetAt
+   *      far in the future is honored in full, that's the point.
+   *      (UNCHANGED from pre-hdl-bp-03 behavior.)
+   *   3. Otherwise → delegate to the active BackoffPolicy. Both checks
+   *      above are hard, pre-policy invariants (grill finding H1: a
+   *      pluggable policy must never get the chance to silently ignore a
+   *      known resetAt or override the auth_failed safety backoff) — a
+   *      policy only ever sees the "ordinary self-healing error, no known
+   *      reset time" case. The active policy is hardcoded to "static" for
+   *      this story (settings-driven selection is hdl-bp-04), which makes
+   *      this branch byte-identical to the flat this.intervalMs it
+   *      replaces.
    */
   private computeDelayMs(resetAt: string | null, errorCode: ErrorCode | null): number {
     if (errorCode === "auth_failed") return AUTH_FAILED_BACKOFF_MS;
-    if (!resetAt) return this.intervalMs;
-    const resetAtMs = Date.parse(resetAt);
-    if (Number.isNaN(resetAtMs)) return this.intervalMs;
-    const nowMs = Date.parse(this.nowImpl());
-    return Math.max(this.intervalMs, resetAtMs - nowMs);
+    if (resetAt) {
+      const resetAtMs = Date.parse(resetAt);
+      if (!Number.isNaN(resetAtMs)) {
+        const nowMs = Date.parse(this.nowImpl());
+        return Math.max(this.intervalMs, resetAtMs - nowMs);
+      }
+    }
+    return ACTIVE_BACKOFF_POLICY.nextDelayMs({
+      consecutiveSuspectTicks: this._consecutiveSuspectTicks,
+      baseIntervalMs: this.intervalMs,
+      config: {},
+    });
   }
 
   private scheduleNext(delayMs: number): void {
@@ -163,6 +205,18 @@ export class InProcessScheduler implements Scheduler {
     // — reset_at only matters while still suspect.
     const latest = this.opts.store.getCurrentStatus(this.opts.lane.lane_id);
     const stillSuspect = latest !== null && SUSPECT_STATUSES.includes(latest.status);
+    // hdl-bp-03: increment BEFORE the delay computation below so the first
+    // suspect tick passes consecutiveSuspectTicks = 1 (1-indexed, matching
+    // hdl-bp-02's BackoffContext convention) into computeDelayMs's policy
+    // delegation. Reset to exactly 0 the instant the lane is no longer
+    // suspect — this is the "backs off immediately on recovery" guarantee;
+    // it must happen unconditionally on every non-suspect poll, not just
+    // decrement or hold.
+    if (stillSuspect) {
+      this._consecutiveSuspectTicks += 1;
+    } else {
+      this._consecutiveSuspectTicks = 0;
+    }
     // hdl-lm-03: an operator-supplied manual_reset_at ("change the times")
     // wins over the sensed reset_at, same precedence as manual_override
     // wins over sensed status in MulticaControlAdapter — scheduling-only,

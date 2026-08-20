@@ -500,3 +500,51 @@ test("hdl-lm-03: clearing manual_reset_at (set back to null) reverts to the sens
   assert.equal(delays[1], 10 * 60 * 1000, "expected the sensed reset_at (10 minutes) to decide once the manual override was cleared");
   store.close();
 });
+
+test("hdl-bp-03: consecutiveSuspectTicks increments while suspect, resets to exactly 0 the instant the lane recovers, and restarts at 1 on the next suspect tick", async () => {
+  // This is the epic's single highest-risk property (docs/scheduler-
+  // constraints.md's "backs off immediately on recovery" guarantee):
+  // simulates suspect -> suspect -> healthy -> suspect again, asserting the
+  // counter at every step, not just inferring it indirectly through delays.
+  const store = seedStore("degraded"); // no reset_at, no error_code
+  const pipeline = fakePipeline(async () => {}); // no-op: does not itself change status
+  const scheduler = new InProcessScheduler({ lane: LANE, pipeline, store, argus: fakeArgus() });
+
+  await scheduler.poll(); // 1st consecutive suspect tick
+  assert.equal(scheduler.consecutiveSuspectTicks, 1, "first suspect tick must be 1 (1-indexed), not 0");
+
+  await scheduler.poll(); // 2nd consecutive suspect tick
+  assert.equal(scheduler.consecutiveSuspectTicks, 2, "second consecutive suspect tick must be 2");
+
+  // Simulate recovery (as a real refresh() would do by writing a new status).
+  store.recordStatus({
+    lane_id: LANE.lane_id,
+    status: "up",
+    reset_at: null,
+    reason: null,
+    error_code: null,
+    signal_source: "active_probe",
+    observed_at: "2026-07-25T12:00:10.000Z",
+  });
+  await scheduler.poll();
+  assert.equal(
+    scheduler.consecutiveSuspectTicks,
+    0,
+    "consecutiveSuspectTicks must reset to exactly 0 the instant the lane is no longer suspect, not decrement or hold",
+  );
+
+  // Simulate a fresh degradation after the healthy interlude.
+  store.recordStatus({
+    lane_id: LANE.lane_id,
+    status: "degraded",
+    reset_at: null,
+    reason: null,
+    error_code: null,
+    signal_source: "active_probe",
+    observed_at: "2026-07-25T12:00:15.000Z",
+  });
+  await scheduler.poll();
+  assert.equal(scheduler.consecutiveSuspectTicks, 1, "the next suspect tick after recovery must restart at 1, not continue from the pre-recovery count");
+
+  store.close();
+});
