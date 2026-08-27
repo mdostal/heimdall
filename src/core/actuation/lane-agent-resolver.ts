@@ -1,7 +1,11 @@
 // LaneAgentResolver — maps a lane_id to its Multica agent ID(s) (hda-02).
 // Interface-first so a v2 DiscoveryLaneAgentResolver (matching provider+model
 // against GET /api/agents?workspace_id=...) can drop in later without
-// touching MulticaControlAdapter. Static now, discovery-ready.
+// touching its consumer. Static now, discovery-ready.
+//
+// hdl-msh-02: the sole consumer is now GET /lanes's multica_agent_ids field
+// (src/api/http-server.ts) — Heimdall reports the mapping, it no longer
+// acts on it. See docs/decisions/DEC-hdl-multica-disable-contract.md.
 
 export interface LaneAgentResolver {
   resolve(laneId: string): string[];

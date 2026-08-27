@@ -61,11 +61,15 @@ harness's own finding is that a scheduler ticking slower than ~5s risks missing
 the 2-tick corroboration window. Backing this off further trades away a shipped,
 tested guarantee and isn't a routine tuning pass (see "Goals" below).
 
-**Actuation.** `MulticaControlAdapter` calls Multica's real REST API to
-disable/re-enable a lane's mapped agents (`max_concurrent_tasks` 0/N) through a
-circuit-breaker-hardened `MulticaRestClient`. Every lane always gets a
-`ControlAdapter` — mapped lanes get the real one, everything else falls back to
-a loud `StubControlAdapter`, never a silent no-op.
+**Actuation — status-only, by design.** Heimdall senses and reports; it no
+longer actuates Multica directly. Multica's real API has no lever that can
+stop new dispatch to an agent without cancelling its in-flight work (see
+`docs/decisions/DEC-hdl-multica-disable-contract.md`), so `heimdall#83`'s
+disable lever was retired rather than patched. Every lane's `ControlAdapter`
+is `StubControlAdapter` (loud logging via `ActuationStub`, never a silent
+no-op); `GET /lanes` reports `multica_agent_ids` per lane so a downstream
+actuator — Pantheon's own facade — can build the real lever against
+Multica's real constraints.
 
 **Routing — pluggable, scored, and closed-loop.** Route selection sits behind a
 `RoutingStrategy` interface: `priority` (default), `round-robin`, `scored`
@@ -131,10 +135,12 @@ same two steps (global install + `agent init`) with Node-version and PATH
 error handling for the curl-to-bash path.
 
 **Honest gaps.**
-- Actuation is tested **entirely against local mocks** in this repo's own test
-  suite. Live end-to-end verification against the real hive Multica instance is
-  no longer a dedicated to-do here — Pantheon's own deployment pipeline now
-  exercises this live as it ships things out.
+- Heimdall no longer has real Multica actuation to verify end-to-end — it's
+  status-only by design now (`DEC-hdl-multica-disable-contract.md`). The open
+  item is on the Pantheon side: building the real disable lever against
+  Multica's actual constraints, informed by the mapping this repo now
+  exposes on `GET /lanes`. Not tracked here — different repo, different
+  planning.
 - Credentials come from **local env vars** (`.env`), a deliberate stopgap ahead
   of Portunus.
 - Pantheon **plugin mode** (config through Vesta/Multica instead of local
@@ -204,8 +210,6 @@ health and cost, then route" a first-class, measurable operation.
   existing `getLaneStatuses()` core.
 - **Extend the SLA harness** (`test/sla-harness/`) with new state-transition
   scenarios.
-- **Document a real Multica actuation runbook** from `.env.example` — the safe
-  operator path to a live end-to-end toggle.
 - **Make the routing-policy panel editable**, not just read-only — the current
   panel (`GET /routing-policy`) is a deliberate read-only-first scope; a
   `POST` that writes back to `config/routing-policy.yaml` (with the same
