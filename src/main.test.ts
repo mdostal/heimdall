@@ -373,7 +373,7 @@ test("Multica actuation not configured — every lane falls back to StubControlA
   service.stopAll();
 });
 
-test("a lane with a HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS mapping gets MulticaControlAdapter when Multica IS configured", () => {
+test("a lane with a HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS mapping still gets StubControlAdapter even when MULTICA_* env is configured (hdl-msh-01: real actuation retired)", () => {
   const env = testEnv();
   env.MULTICA_BASE_URL = "http://localhost:8090";
   env.MULTICA_WORKSPACE_ID = "workspace-test";
@@ -388,7 +388,7 @@ test("a lane with a HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS mapping gets MulticaCont
     port: 0,
   });
 
-  assert.equal(service.controlAdapters.get("claude@mathew.dostal")?.constructor.name, "MulticaControlAdapter");
+  assert.equal(service.controlAdapters.get("claude@mathew.dostal")?.constructor.name, "StubControlAdapter");
   assert.equal(service.controlAdapters.get("codex")?.constructor.name, "StubControlAdapter");
 
   service.stopAll();

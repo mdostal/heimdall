@@ -3,17 +3,18 @@
 // running Heimdall: lane registry + state store + Argus telemetry + per-lane
 // MulticaAutopilotScheduler (coarse, default) + InProcessScheduler (fine,
 // suspect-lane-only) + a shared status-watcher loop that calls
-// ControlAdapter.reconcile() every tick for every lane (hda-04) — real
-// MulticaControlAdapter for lanes with a configured agent mapping,
-// StubControlAdapter for everything else, including the whole service when
-// Multica isn't configured at all — plus the HTTP server (with the real
-// POST /lanes/:laneId/refresh trigger MulticaAutopilotScheduler's dispatched
-// agent calls).
+// ControlAdapter.reconcile() every tick for every lane — StubControlAdapter
+// for every lane, unconditionally.
+//
+// hdl-msh-01: Heimdall no longer actuates Multica directly (heimdall#83 —
+// Multica's real API has no working disable lever; see docs/decisions/
+// DEC-hdl-multica-disable-contract.md). Heimdall's role is now status-only:
+// report lane health (GET /lanes) so a downstream actuator (Pantheon's own
+// facade) can build the real lever against Multica's real constraints.
 //
 // Composition is factored into composeService() specifically so tests can
 // inject a mock CommandRunner/fetchImpl and inspect every piece without
-// touching a real Multica daemon, a real Argus connection, or binding a
-// real port.
+// touching a real Argus connection or binding a real port.
 
 import { buildLaneRegistry, createHttpServer, type RefreshLaneFn } from "./api/http-server.js";
 import type { Server } from "node:http";
@@ -35,11 +36,8 @@ import { CompositeTelemetryEmitter } from "./core/telemetry/composite-emitter.js
 import { MulticaAutopilotScheduler } from "./core/scheduler/multica-autopilot-scheduler.js";
 import { InProcessScheduler } from "./core/scheduler/in-process-scheduler.js";
 import type { CommandRunner } from "./core/scheduler/command-runner.js";
-import { MulticaRestClient } from "./core/actuation/multica-rest-client.js";
-import { CircuitBreaker } from "./core/actuation/circuit-breaker.js";
 import { StaticLaneAgentResolver, type LaneAgentResolver } from "./core/actuation/lane-agent-resolver.js";
 import { StubControlAdapter, type ControlAdapter } from "./core/actuation/control-adapter.js";
-import { MulticaControlAdapter } from "./core/actuation/multica-control-adapter.js";
 import { RotationController, ProviderScopedLaneRegistry } from "./core/rotation-controller.js";
 import { startCapResetRecoveryJob, type RunningBackgroundJob } from "./core/background-jobs.js";
 
@@ -99,29 +97,6 @@ function buildRotationControllers(registry: LaneRegistry, store: StateStore): Ma
   return controllers;
 }
 
-/**
- * Builds the shared Multica actuation stack once per service. Construction
- * throws (by design — see multica-rest-client.ts) when MULTICA_BASE_URL,
- * MULTICA_WORKSPACE_ID, or the PAT credential aren't configured; that's
- * caught here so an unconfigured deployment degrades to stub-only actuation
- * for every lane instead of crashing the whole service.
- */
-function buildMulticaActuationStack(
-  env: NodeJS.ProcessEnv,
-  fetchImpl: typeof fetch | undefined,
-): { restClient: MulticaRestClient; circuitBreaker: CircuitBreaker } | null {
-  try {
-    const restClient = new MulticaRestClient({ env, fetchImpl });
-    return { restClient, circuitBreaker: new CircuitBreaker() };
-  } catch (err) {
-    console.warn(
-      `[main] Multica actuation not configured (${(err as Error).message}) — ` +
-        `all lanes will use StubControlAdapter.`,
-    );
-    return null;
-  }
-}
-
 export function composeService(options: ComposeServiceOptions = {}): ComposedService {
   const port = options.port ?? Number(process.env.PORT ?? 4870);
   const env = options.env ?? process.env;
@@ -138,16 +113,10 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     options.argus ?? new ArgusClient(),
   ]);
 
+  // hdl-msh-02 threads this resolver into createHttpServer() to expose the
+  // lane->Multica-agent mapping over GET /lanes; it no longer feeds any
+  // actuation decision here (hdl-msh-01 — see main.ts's header comment).
   const resolver: LaneAgentResolver = new StaticLaneAgentResolver(env);
-  const multicaStack = buildMulticaActuationStack(env, options.fetchImpl);
-  const sharedMulticaControlAdapter = multicaStack
-    ? new MulticaControlAdapter({
-        restClient: multicaStack.restClient,
-        circuitBreaker: multicaStack.circuitBreaker,
-        resolver,
-        argus,
-      })
-    : null;
   const sharedStubControlAdapter = new StubControlAdapter();
   const controlAdapters = new Map<string, ControlAdapter>();
 
@@ -200,16 +169,14 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     inProcessScheduler.start();
     inProcessSchedulers.push(inProcessScheduler);
 
-    const agentIds = resolver.resolve(lane.lane_id);
-    const controlAdapter =
-      multicaStack && agentIds.length > 0 ? sharedMulticaControlAdapter! : sharedStubControlAdapter;
-    controlAdapters.set(lane.lane_id, controlAdapter);
+    controlAdapters.set(lane.lane_id, sharedStubControlAdapter);
   }
 
-  // Lightweight shared observer driving actuation reconciliation — one timer
-  // for the whole service (not per-lane), cheap local StateStore reads only.
-  // reconcile() is called every tick for every lane regardless of whether
-  // status changed (retry-for-free semantics — see MulticaControlAdapter).
+  // Lightweight shared observer — one timer for the whole service (not
+  // per-lane), cheap local StateStore reads only. reconcile() is called
+  // every tick for every lane regardless of whether status changed; every
+  // lane's adapter is StubControlAdapter (hdl-msh-01), so this now only
+  // records/logs the intended action via ActuationStub, never a real call.
   const statusWatcher = setInterval(() => {
     for (const lane of registry.list()) {
       const current = store.getCurrentStatus(lane.lane_id);
