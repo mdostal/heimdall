@@ -33,6 +33,7 @@ import {
 import { DEFAULT_INTERVAL_MS as BACKOFF_BASE_INTERVAL_MS } from "../core/scheduler/in-process-scheduler.js";
 import { StateStore, resolveDefaultDbPath, type ManualOverride } from "../core/state-store.js";
 import type { LaneStatus } from "../core/status-model.js";
+import type { LaneAgentResolver } from "../core/actuation/lane-agent-resolver.js";
 import { renderDashboardHtml } from "./ui/dashboard.js";
 import { DOC_ENTRIES, getDocBySlug, renderDocMarkdown, renderDocsIndexHtml, renderDocPageHtml } from "./ui/docs-viewer.js";
 import { createRequire } from "node:module";
@@ -111,6 +112,12 @@ export interface LaneStatusWithOverride extends LaneStatus {
    * unset, env-var default decides" shape as manual_reset_at above. */
   manual_headroom: number | null;
   manual_cost_tier: LaneCostTier | null;
+  /** hdl-msh-02 — which Multica agent(s) this lane's status corresponds to
+   * (HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS), so a downstream actuator (e.g.
+   * Pantheon's own facade) can act on it. Always an array, [] when no
+   * mapping is configured — never omitted. Heimdall itself no longer acts
+   * on this mapping (see docs/decisions/DEC-hdl-multica-disable-contract.md). */
+  multica_agent_ids: string[];
 }
 
 const VALID_OVERRIDE_STATES = new Set(["enabled", "disabled", "auto"]);
@@ -533,7 +540,11 @@ export function rotateProvider(rotationControllers: Map<string, RotationControll
   }
 }
 
-export function getLaneStatuses(registry: LaneRegistry, store: StateStore): LaneStatusWithOverride[] {
+export function getLaneStatuses(
+  registry: LaneRegistry,
+  store: StateStore,
+  resolver?: LaneAgentResolver,
+): LaneStatusWithOverride[] {
   // Ensure every declared lane is present in the store (REQ-07: a lane with a
   // missing/invalid credential is still known — it just resolves to
   // down/unconfigured via StateStore's "no status row yet" fallback).
@@ -557,6 +568,7 @@ export function getLaneStatuses(registry: LaneRegistry, store: StateStore): Lane
       priority: declared?.priority ?? null,
       manual_headroom: store.getManualHeadroom(status.lane_id),
       manual_cost_tier: store.getManualCostTier(status.lane_id),
+      multica_agent_ids: resolver?.resolve(status.lane_id) ?? [],
     };
   });
 }
@@ -578,6 +590,9 @@ export function createHttpServer(
   envFilePath: string = DEFAULT_ENV_FILE_PATH,
   fetchImpl?: typeof fetch,
   rotationControllers?: Map<string, RotationController>,
+  // hdl-msh-02: which Multica agent(s) a lane maps to, surfaced on GET
+  // /lanes so a downstream actuator (Pantheon's facade) can act on it.
+  laneAgentResolver?: LaneAgentResolver,
 ): Server {
   return createServer((req, res) => {
     // Liveness alias — distinct from /lanes on purpose: a monitor (e.g.
@@ -710,7 +725,7 @@ export function createHttpServer(
 
     if (req.method === "GET" && req.url === "/lanes") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(getLaneStatuses(registry, store)));
+      res.end(JSON.stringify(getLaneStatuses(registry, store, laneAgentResolver)));
       return;
     }
 

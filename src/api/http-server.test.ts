@@ -24,6 +24,7 @@ import { RotationController, ProviderScopedLaneRegistry } from "../core/rotation
 import { InProcessScheduler } from "../core/scheduler/in-process-scheduler.js";
 import type { Lane } from "../core/lane-registry.js";
 import type { ArgusEmitter } from "../core/telemetry/argus-client.js";
+import type { LaneAgentResolver } from "../core/actuation/lane-agent-resolver.js";
 
 /** Never the real repo .env — every POST /lanes test uses one of these, cleaned up after. */
 function tmpEnvPath(): string {
@@ -88,6 +89,46 @@ test("getLaneStatuses returns entries matching the LaneRouterContract shape", ()
     );
   }
   store.close();
+});
+
+test("hdl-msh-02: getLaneStatuses always includes multica_agent_ids, [] when unmapped, populated when a resolver has a mapping", () => {
+  const registry = registryWithRouteLanes();
+  const store = new StateStore(":memory:");
+  const resolver: LaneAgentResolver = {
+    resolve: (laneId) => (laneId === "claude@mathew.dostal" ? ["agent-a", "agent-b"] : []),
+  };
+
+  const lanes = getLaneStatuses(registry, store, resolver);
+  const claudeLane = lanes.find((l) => l.lane_id === "claude@mathew.dostal");
+  const codexLane = lanes.find((l) => l.lane_id === "codex");
+
+  assert.deepEqual(claudeLane?.multica_agent_ids, ["agent-a", "agent-b"]);
+  assert.deepEqual(codexLane?.multica_agent_ids, []);
+
+  // No resolver at all — every lane still gets the field, always [].
+  const lanesNoResolver = getLaneStatuses(registry, store);
+  for (const lane of lanesNoResolver) {
+    assert.deepEqual(lane.multica_agent_ids, []);
+  }
+  store.close();
+});
+
+test("hdl-msh-02: GET /lanes exposes multica_agent_ids end-to-end through createHttpServer's resolver param", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const resolver: LaneAgentResolver = { resolve: () => ["real-multica-agent-id"] };
+  const server = createHttpServer(registry, store, undefined, undefined, undefined, undefined, resolver);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes`);
+    const body = await res.json();
+    assert.deepEqual(body[0].multica_agent_ids, ["real-multica-agent-id"]);
+  } finally {
+    server.close();
+    store.close();
+  }
 });
 
 test("GET /lanes returns 200 with JSON matching getLaneStatuses", async () => {

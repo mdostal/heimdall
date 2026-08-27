@@ -215,7 +215,7 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     rotationJobs.push(startCapResetRecoveryJob(controller));
   }
 
-  const httpServer = createHttpServer(registry, store, refreshLane, undefined, options.fetchImpl, rotationControllers);
+  const httpServer = createHttpServer(registry, store, refreshLane, undefined, options.fetchImpl, rotationControllers, resolver);
   if (!options.skipHttpListen) {
     httpServer.listen(port, () => {
       console.log(`heimdall service listening on http://localhost:${port}`);
