@@ -5,7 +5,8 @@
 // See .pHive/epics/lane-health-status/stories/lhs-02-credential-loading-state-storage.yaml
 
 import { createServer, type Server } from "node:http";
-import { EnvCredentialSource } from "../core/credential-source.js";
+import { EnvCredentialSource, type CredentialSource } from "../core/credential-source.js";
+import { PantheonSecretCredentialSource } from "../core/pantheon-secret-credential-source.js";
 import { loadLaneDeclarations, LaneRegistry, type LaneCostTier } from "../core/lane-registry.js";
 import {
   getAvailableRoute,
@@ -498,8 +499,26 @@ export function setAgentOnboardingDismissed(store: StateStore, rawValue: unknown
   return { ok: true, dismissed: rawValue };
 }
 
+// Plugin-mode credential resolution (heimdall/docs/decisions/
+// DEC-hdl-portunus-deferral.md): explicit opt-in only, via
+// HEIMDALL_CREDENTIAL_SOURCE=pantheon -- standalone-mode's default
+// (EnvCredentialSource, local .env) is completely unchanged when this is
+// unset, matching that decision's own "What this does NOT change"
+// constraint verbatim. When set, resolves through Pantheon Core's real
+// secrets facade exclusively (PantheonSecretCredentialSource) -- never
+// Portunus directly.
+function buildCredentialSource(env: NodeJS.ProcessEnv): CredentialSource {
+  if (env.HEIMDALL_CREDENTIAL_SOURCE === "pantheon") {
+    return new PantheonSecretCredentialSource({
+      pantheonApiUrl: env.PANTHEON_API_URL,
+      sharedSecretsDir: env.PANTHEON_SECRETS_SHARED_DIR,
+    });
+  }
+  return new EnvCredentialSource(env);
+}
+
 export function buildLaneRegistry(env: NodeJS.ProcessEnv = process.env): LaneRegistry {
-  return new LaneRegistry(loadLaneDeclarations(env), new EnvCredentialSource(env));
+  return new LaneRegistry(loadLaneDeclarations(env), buildCredentialSource(env));
 }
 
 // hdl-rr-04: rotation status/action for one provider — never returns the
