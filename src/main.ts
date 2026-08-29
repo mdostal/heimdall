@@ -1,3 +1,5 @@
+// DELIBERATE_BREAK: CD rollback test [PANT-24] — remove after scenario 2 capture
+throw new Error("DELIBERATE_BREAK: rollback test [PANT-24]");
 // Real service entrypoint — composes everything built across the
 // lane-health-status, hdl-scheduler, and hdl-actuation epics into one
 // running Heimdall: lane registry + state store + Argus telemetry + per-lane
