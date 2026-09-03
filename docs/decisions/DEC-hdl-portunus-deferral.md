@@ -1,6 +1,6 @@
 # DEC-hdl-portunus-deferral
 
-**Status:** Accepted (2026-08-13)
+**Status:** Superseded — deferral lifted (2026-09-03, epic `pantheon-secret-resolution-facade`, PANT-48)
 
 ## Decision
 
@@ -93,3 +93,40 @@ of scope ("just heimdall," per the operator's own scoping answer when asked).
   dependency on Portunus's implementation details.
 - No timeline is set. This is a "wait for the real thing" deferral, not a scheduled
   follow-up epic.
+
+## Deferral lifted — 2026-09-03
+
+**Epic:** `pantheon-secret-resolution-facade` (PANT-13 through PANT-48)
+
+The prerequisite this decision named — *"Pantheon Core shipping a synchronous or
+reliably-correlatable cross-god request/response mechanism"* — now exists:
+
+- **PANT-13** (`pantheon-core-secrets-facade`): `core/api/secrets.ts` added
+  `POST /api/secrets/ask` and `POST /api/secrets/inject` to core-api, wrapping
+  Portunus's own file-inject mechanism so gods call only through Pantheon Core,
+  never Portunus directly.
+
+- **PANT-47** (`provision-real-multica-runtime-credential`): The Multica daemon's
+  own Claude Code operating credential is now provisioned through this same facade via
+  `POST /api/provision/multica-runtime-credential` (pantheon-v2 PR #146). The route
+  resolves `provider=anthropic,kind=claude-code-oauth` from Portunus via Pantheon Core's
+  internal Portunus client, stages the credential to a 0600 file in the `./data`
+  bind-mount, and the install script appends `CLAUDE_CODE_OAUTH_TOKEN` to `stack.env`
+  for the daemon to inherit. The raw credential never appears in any HTTP response.
+
+**Current state of Heimdall's own credential resolution:** Heimdall's plugin-mode
+`PantheonSecretCredentialSource` (named in this decision's Consequences section as the
+intended follow-on) remains unimplemented — `credential-source.ts` still uses only
+`EnvCredentialSource`. Lane credentials continue to be supplied via env vars
+(`HEIMDALL_LANE_*_CREDENTIAL_REF`). The deferral is lifted in the sense that the
+Pantheon Core mechanism it was waiting for now genuinely exists and is in production use;
+the actual Heimdall-side wiring is a known remaining gap, not a blocker to recording
+this prerequisite as met.
+
+**Live verification:** Confirmed 2026-09-03 (PANT-48):
+- `POST /api/provision/multica-runtime-credential` returns `ok:true` with the real
+  credential in Portunus (tags: `provider=anthropic,kind=claude-code-oauth`).
+- `CLAUDE_CODE_OAUTH_TOKEN` appended to `stack.env` and confirmed present in the
+  dostal daemon's process environment (PID 28349, started after provisioning).
+- Heimdall confirmed not calling Portunus directly (network inspection: uses only
+  env-var-based `EnvCredentialSource`; no direct Portunus route in any code path).
