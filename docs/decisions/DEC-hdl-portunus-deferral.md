@@ -1,6 +1,10 @@
 # DEC-hdl-portunus-deferral
 
-**Status:** Accepted (2026-08-13)
+**Status:** Superseded — deferral fully lifted (2026-09-07). Both halves of
+the prerequisite this decision named now exist and are shipped: Pantheon
+Core's cross-god secrets facade (PANT-13/PANT-47) and Heimdall's own
+`PantheonSecretCredentialSource` (PR #84, merged 2026-08-29, ahead of this
+update — see "Deferral lifted" below for the corrected, current record).
 
 ## Decision
 
@@ -93,3 +97,39 @@ of scope ("just heimdall," per the operator's own scoping answer when asked).
   dependency on Portunus's implementation details.
 - No timeline is set. This is a "wait for the real thing" deferral, not a scheduled
   follow-up epic.
+
+## Deferral lifted — 2026-09-07 (corrected)
+
+**Epic:** `pantheon-secret-resolution-facade` (PANT-13 through PANT-48)
+
+The prerequisite this decision named — *"Pantheon Core shipping a synchronous
+or reliably-correlatable cross-god request/response mechanism"* — now exists,
+**and** the Heimdall-side consumer this decision's own Consequences section
+anticipated has already been built against it:
+
+- **PANT-13** (`pantheon-core-secrets-facade`): `core/api/secrets.ts` added
+  `POST /api/secrets/ask` and `POST /api/secrets/inject` to core-api,
+  wrapping Portunus's own file-inject mechanism so gods call only through
+  Pantheon Core, never Portunus directly.
+- **PANT-47** (`provision-real-multica-runtime-credential`): the Multica
+  daemon's own Claude Code operating credential is now provisioned through
+  this same facade (pantheon-v2 PR #146). Live-verified 2026-09-03:
+  `POST /api/provision/multica-runtime-credential` returns `ok:true` with
+  the real credential staged from Portunus; `CLAUDE_CODE_OAUTH_TOKEN`
+  confirmed present in the dostal daemon's process environment.
+- **Heimdall's own `PantheonSecretCredentialSource`** (this repo, PR #84,
+  merged 2026-08-29 — chronologically *before* the PANT-48 live-verification
+  above, but not yet reflected in this decision record until now):
+  `src/core/pantheon-secret-credential-source.ts` implements the existing
+  `CredentialSource` interface, calling only `core/api/secrets.ts` — never
+  Portunus directly, exactly the shape this decision's Consequences section
+  named. Opt-in only via `HEIMDALL_CREDENTIAL_SOURCE=pantheon`;
+  standalone mode's `EnvCredentialSource` default is unchanged. The real
+  shared-volume wiring between Portunus's container and wherever this
+  credential source runs is tracked separately (pantheon-v2's
+  `pantheon-secret-resolution-facade` epic, story C) as a known follow-up,
+  not assumed complete by this record.
+
+Both halves of the original deferral — the Pantheon Core mechanism, and
+Heimdall's own consumer of it — are real and shipped. Nothing further is
+blocked on this decision.

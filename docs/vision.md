@@ -11,7 +11,7 @@ are healthy and to act on that knowledge.
 
 ---
 
-## ① Current — where it is (v0.33.0)
+## ① Current — where it is (v0.36.0)
 
 Heimdall runs as a headless Node/TypeScript service on **`http://localhost:4870`**
 (override with `PORT`). Everything below actually runs today.
@@ -61,11 +61,15 @@ harness's own finding is that a scheduler ticking slower than ~5s risks missing
 the 2-tick corroboration window. Backing this off further trades away a shipped,
 tested guarantee and isn't a routine tuning pass (see "Goals" below).
 
-**Actuation.** `MulticaControlAdapter` calls Multica's real REST API to
-disable/re-enable a lane's mapped agents (`max_concurrent_tasks` 0/N) through a
-circuit-breaker-hardened `MulticaRestClient`. Every lane always gets a
-`ControlAdapter` — mapped lanes get the real one, everything else falls back to
-a loud `StubControlAdapter`, never a silent no-op.
+**Actuation — status-only, by design.** Heimdall senses and reports; it no
+longer actuates Multica directly. Multica's real API has no lever that can
+stop new dispatch to an agent without cancelling its in-flight work (see
+`docs/decisions/DEC-hdl-multica-disable-contract.md`), so `heimdall#83`'s
+disable lever was retired rather than patched. Every lane's `ControlAdapter`
+is `StubControlAdapter` (loud logging via `ActuationStub`, never a silent
+no-op); `GET /lanes` reports `multica_agent_ids` per lane so a downstream
+actuator — Pantheon's own facade — can build the real lever against
+Multica's real constraints.
 
 **Routing — pluggable, scored, and closed-loop.** Route selection sits behind a
 `RoutingStrategy` interface: `priority` (default), `round-robin`, `scored`
@@ -131,32 +135,40 @@ same two steps (global install + `agent init`) with Node-version and PATH
 error handling for the curl-to-bash path.
 
 **Honest gaps.**
-- Actuation is tested **entirely against local mocks** in this repo's own test
-  suite. Live end-to-end verification against the real hive Multica instance is
-  no longer a dedicated to-do here — Pantheon's own deployment pipeline now
-  exercises this live as it ships things out.
-- Credentials come from **local env vars** (`.env`), a deliberate stopgap ahead
-  of Portunus.
-- Pantheon **plugin mode** (config through Vesta/Multica instead of local
-  `.env`) is blocked on Pantheon Core shipping a real cross-god request/
-  response mechanism — today only fire-and-forget notification events exist.
-  See `docs/decisions/DEC-hdl-portunus-deferral.md`.
+- Heimdall no longer has real Multica actuation to verify end-to-end — it's
+  status-only by design now (`DEC-hdl-multica-disable-contract.md`). The open
+  item is on the Pantheon side: building the real disable lever against
+  Multica's actual constraints, informed by the mapping this repo now
+  exposes on `GET /lanes`. Not tracked here — different repo, different
+  planning.
+- Credentials come from **local env vars** (`.env`) by default — standalone
+  mode's behavior, unchanged. Plugin-mode credential resolution through
+  Portunus now has a real path: `PantheonSecretCredentialSource` (opt-in via
+  `HEIMDALL_CREDENTIAL_SOURCE=pantheon`) calls Pantheon Core's own secrets
+  facade, never Portunus directly. `DEC-hdl-portunus-deferral.md`'s
+  prerequisite is fully met; the real shared-volume wiring between
+  Portunus's container and wherever this credential source runs is the
+  remaining, separately-tracked follow-up (`pantheon-v2`'s
+  `pantheon-secret-resolution-facade` epic, story C) — not assumed complete
+  by this class existing alone.
 
 ---
 
 ## ② Goals — near-term next steps
 
-- **Probe-cadence tuning, done carefully.** The naive version of "probe suspect
-  lanes harder, healthy lanes rarely" already happened (healthy lanes never pay
-  the fine-grained refresh cost at all; known reset_at is honored directly).
-  What's left — backing off further on lanes stuck `down`/`degraded` with no
-  known reset_at — trades against the documented 10-second SLA and needs an
-  explicit operator call on which guarantee to weaken, not a routine pass.
-- **Headroom/cost-tier defaults.** `HEIMDALL_LANE_N_HEADROOM`/`_COST_TIER` exist
-  and feed the scored strategy, but most operators will never set them —
-  consider whether a cheap, automatic headroom signal (e.g. inferred from
-  recent `out_of_credit` frequency) beats the current static default. Needs an
-  operator call on the actual inference approach, not a routine pass.
+Both items previously listed here (probe-cadence tuning; headroom/cost-tier
+defaults) are done — closed by the `hdl-backoff-policies` epic: a pluggable
+`BackoffPolicy` (static/progressive/exponential-progressive, operator-chosen,
+per-provider overridable) replaces the flat cadence, and headroom/cost-tier
+are now live-editable per-lane settings instead of env-var-only.
+
+- **Automatic headroom inference**, explicitly deferred by that same epic as
+  its natural follow-on: whether a cheap, automatic headroom signal (e.g.
+  inferred from recent `out_of_credit` frequency) should feed the
+  now-existing live-editable headroom setting, rather than requiring an
+  operator to set it by hand. Needs an operator call on the actual inference
+  approach, not a routine pass — manual tunability (already shipped) is the
+  real prerequisite for this, not a blocker to it.
 
 ---
 
@@ -186,10 +198,12 @@ outcome feedback.
   open-source and ships **standalone** — now a real installable desktop app
   (`app/`), carrying its own dashboard/docs UI, usable from any harness that
   can spin up multiple agents — *and* as a **Pantheon plugin** (config through
-  Vesta/Multica). Same core, two front doors — the descriptor is registered
-  and the standalone side is real and dogfoodable; secret resolution through
-  Portunus (needed for the plugin side's credential story) is what's still
-  blocked.
+  Vesta/Multica). Same core, two front doors — the descriptor is registered,
+  the standalone side is real and dogfoodable, and plugin-side credential
+  resolution has a real path now (`PantheonSecretCredentialSource`,
+  `DEC-hdl-portunus-deferral.md`); the remaining blocker is the real
+  shared-volume wiring between Portunus's container and wherever this
+  credential source runs, tracked in `pantheon-v2`.
 
 Platform-wide, this rides Pantheon's core principle: **everything is swappable.**
 Any language, model, plugin, or god can be toggled on/off and compared on metrics
@@ -204,8 +218,6 @@ health and cost, then route" a first-class, measurable operation.
   existing `getLaneStatuses()` core.
 - **Extend the SLA harness** (`test/sla-harness/`) with new state-transition
   scenarios.
-- **Document a real Multica actuation runbook** from `.env.example` — the safe
-  operator path to a live end-to-end toggle.
 - **Make the routing-policy panel editable**, not just read-only — the current
   panel (`GET /routing-policy`) is a deliberate read-only-first scope; a
   `POST` that writes back to `config/routing-policy.yaml` (with the same

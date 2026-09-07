@@ -1,0 +1,154 @@
+id: hdl-msh-01-retire-actuation
+epic: hdl-multica-status-handoff
+title: Retire Heimdall's direct Multica actuation (closes heimdall#83's broken code path)
+status: pending
+complexity: medium
+methodology: classic
+depends_on: []
+parallel_allowed: false
+files_to_modify:
+  - file: src/core/actuation/multica-rest-client.ts
+    change: delete
+  - file: src/core/actuation/multica-rest-client.test.ts
+    change: delete
+  - file: src/core/actuation/multica-control-adapter.ts
+    change: delete
+  - file: src/core/actuation/multica-control-adapter.test.ts
+    change: delete
+  - file: src/core/actuation/circuit-breaker.ts
+    change: delete
+  - file: src/core/actuation/circuit-breaker.test.ts
+    change: delete
+  - file: src/main.ts
+    change: delete buildMulticaActuationStack()/sharedMulticaControlAdapter; every lane's controlAdapter is unconditionally StubControlAdapter
+  - file: src/main.test.ts
+    change: rewrite the line-~376 test to assert StubControlAdapter unconditionally regardless of MULTICA_* env config; remove/rewrite the ~line-416 test that exercises a real MulticaControlAdapter
+
+description: >
+  heimdall#83: MulticaControlAdapter.disableAgent() calls
+  updateAgent(id, { max_concurrent_tasks: 0 }), and Multica's real API
+  rejects 0 unconditionally (confirmed live against dostal@hive — 400,
+  "max_concurrent_tasks must be between 1 and 50", server/internal/
+  agentconfig/concurrency.go). Verified further that Multica's real
+  ClaimTask gate (server/internal/service/task.go) treats concurrency as a
+  throttle, not a switch, at any value >= 1, and the only real stop
+  (ArchiveAgent) unconditionally cancels every in-flight task. There is no
+  fix to the number that makes this lever work correctly.
+
+  Per operator direction, this story does not patch the lever — it retires
+  Heimdall's direct Multica actuation entirely, permanently, not behind a
+  flag. The actuation stack (multica-rest-client.ts, multica-control-
+  adapter.ts, circuit-breaker.ts) is confirmed fully isolated (used only by
+  each other and by their construction in main.ts) — delete it outright.
+  main.ts's per-lane control-adapter selection already has a fully-proven
+  "no real actuation" path (any deployment missing MULTICA_BASE_URL/
+  WORKSPACE_ID/PAT already falls back to StubControlAdapter today) — this
+  story makes that the only path, unconditionally, rather than inventing a
+  new off state.
+
+  Do not touch MulticaAutopilotScheduler or MULTICA_AUTOPILOT_AGENT —
+  confirmed via source read to be a separate feature (registers autopilot
+  cron triggers via the `multica` CLI) sharing no code with the actuation
+  stack. Do not touch ControlAdapter, StubControlAdapter, ActuationStub, or
+  the statusWatcher interval in main.ts — they already correctly model "no
+  real action taken" and the epic's own adversarial review confirmed
+  ActuationStub's "would disable/re-enable" phrasing is already accurate
+  for a world where nothing acts on it (see grill-record.md Notes).
+
+acceptance_criteria:
+  - "Given any combination of MULTICA_BASE_URL/MULTICA_WORKSPACE_ID/MULTICA_PAT_TOKEN set or unset in env, when composeService() runs, then every lane's entry in controlAdapters is a StubControlAdapter instance."
+  - "Given the deletion above, when npm run build && npm test runs, then it passes with zero references to MulticaRestClient/MulticaControlAdapter/the actuation CircuitBreaker remaining anywhere in src/."
+  - "Given a lane with a HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS mapping configured, when a status transition occurs, then ActuationStub still records/logs the intended action exactly as before (unchanged behavior for this component)."
+
+steps:
+  - id: research
+    description: Re-confirm via grep that the actuation stack has no other
+      consumers before deleting (repo state may have shifted since planning).
+    agent: researcher
+  - id: implement
+    description: Delete the three actuation files + their tests; simplify
+      main.ts's control-adapter wiring to unconditional Stub; rewrite the
+      two main.test.ts assertions that reference the deleted behavior.
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: npm run build && npm test green; confirm no remaining
+      import of the deleted classes anywhere in src/.
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review the diff confirms MulticaAutopilotScheduler,
+      ControlAdapter, StubControlAdapter, and ActuationStub are byte-for-byte
+      unchanged — only the actuation-stack deletion and its direct wiring
+      moved.
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feat/hdl-multica-status-handoff.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - path: src/main.ts
+      purpose: owns buildMulticaActuationStack() and the per-lane controlAdapter selection being simplified
+    - path: src/main.test.ts
+      purpose: contains the two existing tests that assert the old (real-adapter) behavior and must be rewritten
+    - path: src/core/actuation/control-adapter.ts
+      purpose: StubControlAdapter/ControlAdapter interface — read-only reference, not modified
+  tech_stack: [typescript, node]
+
+code_examples:
+  - title: Current per-lane adapter selection to simplify (src/main.ts:203-206)
+    file: src/main.ts
+    snippet: |
+      const agentIds = resolver.resolve(lane.lane_id);
+      const controlAdapter =
+        multicaStack && agentIds.length > 0 ? sharedMulticaControlAdapter! : sharedStubControlAdapter;
+      controlAdapters.set(lane.lane_id, controlAdapter);
+
+design_decisions:
+  - decision: Delete the actuation stack outright rather than gate it behind
+      a feature flag defaulting off.
+    rationale: A flag implies the code might be re-enabled later, which is
+      false — Multica's own API constraints (verified live) mean this
+      specific lever can never work correctly no matter how it's
+      configured. Keeping dead, permanently-broken code around is worse
+      than deleting it; the operator's own instruction was "turn off,"
+      confirmed to mean retire, not toggle.
+
+risks:
+  - severity: medium
+    description: A currently-configured deployment (the operator's own
+      dostal@hive .env) has MULTICA_BASE_URL/WORKSPACE_ID/PAT_TOKEN set and
+      may appear to lose functionality.
+    mitigation: It wasn't real working functionality — every disable attempt
+      has 400'd since hda-03 shipped (heimdall#83 is the proof). Nothing
+      observable regresses; the decision record (hdl-msh-03) states this
+      plainly.
+  - severity: low
+    description: circuit-breaker.ts turns out to have a consumer the
+      repo-wide grep missed (e.g. a script outside src/).
+    mitigation: npm run build && npm test is the real gate, not the grep —
+      run it and fix forward if it surfaces anything.
+
+references:
+  - path: .pHive/epics/hdl-multica-status-handoff/docs/research-brief.md
+    relevant_excerpt: |
+      §3 confirms via direct source read of Multica's real server package
+      that MinMaxConcurrentTasks=1 (hard floor), ClaimTask's only gate is a
+      running-count comparison (no idle/disabled distinction), and
+      ArchiveAgent unconditionally cancels in-flight tasks. §4 confirms the
+      actuation stack's isolation via repo-wide grep.
+  - path: .pHive/epics/hdl-multica-status-handoff/docs/grill-record.md
+    relevant_excerpt: |
+      H1: src/main.test.ts already contains tests asserting the opposite of
+      this story's new invariant and must be rewritten, not just
+      supplemented — named explicitly here to close that gap.
+
+metric:
+  applies: false
+  justification: Bug-fix/deletion story with no standalone observable
+    surface of its own — closing heimdall#83 is the falsifiable outcome,
+    tracked via the issue's state (CLOSED) in hdl-msh-03, not a metric here.

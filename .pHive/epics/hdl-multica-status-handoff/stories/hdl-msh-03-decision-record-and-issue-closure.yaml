@@ -1,0 +1,95 @@
+id: hdl-msh-03-decision-record-and-issue-closure
+epic: hdl-multica-status-handoff
+title: Decision record, stale-doc cleanup, and heimdall#83 closure
+status: pending
+complexity: low
+methodology: classic
+depends_on: [hdl-msh-01-retire-actuation, hdl-msh-02-expose-agent-mapping]
+parallel_allowed: false
+files_to_modify:
+  - file: docs/decisions/DEC-hdl-multica-disable-contract.md
+    change: create — records the verified Multica constraints, the retirement decision, links the Artifact, points at pantheon-v2
+  - file: src/core/actuation/lane-agent-resolver.ts
+    change: update header comment (no longer describes feeding MulticaControlAdapter)
+  - file: src/core/actuation/control-adapter.ts
+    change: update header comment (StubControlAdapter is now the only adapter, not "for any lane with no Multica agent mapping")
+  - file: .env.example
+    change: remove MULTICA_BASE_URL/MULTICA_WORKSPACE_ID/MULTICA_PAT_TOKEN; update the HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS comment to describe its new consumer (the status API)
+  - file: docs/vision.md
+    change: rewrite the live-actuation-verification backlog item to describe the new status-only relationship with Pantheon
+
+description: >
+  Closes the loop this epic opened. The decision record captures why the
+  lever was retired rather than patched — the real Multica API constraints
+  verified in research-brief.md §3 (no zero-capacity lever, no
+  non-destructive stop) — as fact, and links the Artifact
+  (https://claude.ai/code/artifact/dbe7d4f4-3f08-4021-b2e2-00c0d1a26778)
+  that already worked through the four options considered and rejected
+  this session, without prescribing which option Pantheon's own future
+  planning should build (grill U1 — stays neutral, doesn't pre-decide a
+  different repo's architecture).
+
+  heimdall#83 is the epic's own stated trigger and is currently OPEN with
+  no comments — leave it open after this epic ships and the issue tracker
+  says something the codebase no longer believes (grill U2). Comment with
+  a summary + link to the decision record + the merge commit/PR, then
+  close.
+
+  Also fixes now-stale header comments (lane-agent-resolver.ts and
+  control-adapter.ts both currently describe themselves purely in terms of
+  the deleted MulticaControlAdapter) and removes dead credential
+  documentation from .env.example — an operator following the template
+  today would configure credentials Heimdall no longer reads for anything.
+
+acceptance_criteria:
+  - "Given hdl-msh-01 and hdl-msh-02 are merged, when this story lands, then docs/decisions/DEC-hdl-multica-disable-contract.md exists, states the verified constraints as fact (cites concurrency.go/task.go/agent.go findings), and links the Artifact URL."
+  - "Given the decision record, when read, then it does not prescribe which disable option (throttle/archive/hybrid/pluggable) Pantheon should build — states constraints + points at pantheon-v2, stays neutral per grill U1."
+  - "Given the merge commit/PR exists, when this story's final step runs, then heimdall#83 has a comment referencing the decision record and merge, and its state is CLOSED (verify via gh issue view 83 --json state)."
+  - "Given .env.example, when read after this story, then MULTICA_BASE_URL/WORKSPACE_ID/PAT_TOKEN are absent and the HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS comment describes the status-API consumer, not the deleted adapter."
+
+steps:
+  - id: implement
+    description: Write the decision record; fix the two stale header
+      comments; clean .env.example; rewrite the vision.md backlog item.
+    agent: developer
+  - id: review
+    description: Confirm the decision record states constraints as verified
+      fact (with real file/line citations) rather than restating opinion,
+      and stays neutral on Pantheon's own future architecture choice.
+    agent: reviewer
+    depends_on: [implement]
+  - id: integrate
+    description: Commit and push to feat/hdl-multica-status-handoff;
+      after this epic's PR merges to dev, comment on and close heimdall#83
+      referencing the decision record and the merge commit.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - path: docs/decisions
+      purpose: existing DEC-*.md pattern this new record follows (see DEC-hdl-429-corroboration.md etc. for real precedent shape)
+    - path: .env.example
+      purpose: currently documents the now-dead MULTICA_BASE_URL/WORKSPACE_ID/PAT_TOKEN credentials
+    - path: docs/vision.md
+      purpose: backlog item 4 ("live end-to-end actuation verification against the real hive Multica") describes a responsibility Heimdall no longer has
+  tech_stack: [markdown, github-cli]
+
+references:
+  - path: .pHive/epics/hdl-multica-status-handoff/docs/research-brief.md
+    relevant_excerpt: |
+      §3's four verified findings (concurrency floor, ClaimTask's sole
+      gate, ArchiveAgent's cancellation behavior, no third lever) are the
+      decision record's factual core — cite them directly, don't
+      re-summarize from memory.
+  - path: .pHive/epics/hdl-multica-status-handoff/docs/grill-record.md
+    relevant_excerpt: |
+      U1: link the Artifact, don't prescribe. U2: heimdall#83 must be
+      explicitly closed, referencing the decision record and merge.
+
+metric:
+  applies: false
+  justification: Documentation and issue-tracker hygiene story; falsifiable
+    via the acceptance criteria above (issue state, file contents), not a
+    trend metric.

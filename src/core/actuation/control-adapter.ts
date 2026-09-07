@@ -1,10 +1,11 @@
-// ControlAdapter — the reconcile-every-tick interface both actuation
-// backends implement (hda-02). Called every sense-loop tick for every lane,
-// NOT gated by transition-detection alone — this is what lets
-// MulticaControlAdapter (hda-03) retry a failed attempt "for free" on the
-// next tick. StubControlAdapter here just wraps the existing hdl-04
-// ActuationStub (transition-detection, loud logging) for any lane with no
-// Multica agent mapping.
+// ControlAdapter — the reconcile-every-tick interface (hda-02). Called
+// every sense-loop tick for every lane, not gated by transition-detection
+// alone — a retry-for-free design also inherited by whatever registers as
+// a lane's adapter. hdl-msh-01: StubControlAdapter is now the only
+// implementation — Heimdall no longer actuates Multica directly (see
+// docs/decisions/DEC-hdl-multica-disable-contract.md). It wraps the
+// existing hdl-04 ActuationStub (transition-detection, loud logging) for
+// every lane, not just unmapped ones.
 
 import type { Lane } from "../lane-registry.js";
 import type { LaneStatusValue } from "../status-model.js";

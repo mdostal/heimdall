@@ -1,0 +1,105 @@
+id: hdl-msh-02-expose-agent-mapping
+epic: hdl-multica-status-handoff
+title: Expose lane-to-Multica-agent mapping on GET /lanes
+status: pending
+complexity: low
+methodology: classic
+depends_on: [hdl-msh-01-retire-actuation]
+parallel_allowed: false
+files_to_modify:
+  - file: src/api/http-server.ts
+    change: getLaneStatuses() gains multica_agent_ids per lane; createHttpServer() threads a LaneAgentResolver through
+  - file: src/main.ts
+    change: pass the already-constructed resolver into createHttpServer(), same pattern as rotationControllers
+
+description: >
+  Completes the "give back the status" half of the operator's direction.
+  GET /lanes already returns status/reason/reset_at/manual_override/
+  manual_headroom/manual_cost_tier/credential_configured/model/priority —
+  the one real gap is which Multica agent(s) a lane's status corresponds
+  to, which Heimdall already knows (HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS via
+  LaneAgentResolver/StaticLaneAgentResolver) but never exposes over HTTP —
+  it's read only by the actuation stack retired in hdl-msh-01. Repurpose
+  the resolver as this new consumer instead of deleting it.
+
+  This is what lets Pantheon's own facade (pantheon-v2's core/api/
+  runners.ts, already shipped) correlate a lane's status to a real Multica
+  agent ID and build the actual disable/enable lever on its own side,
+  informed by the real API constraints this epic's research verified but
+  does not act on here.
+
+acceptance_criteria:
+  - "Given a lane with HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS configured, when GET /lanes is called, then that lane's object includes multica_agent_ids as a non-empty string array matching the configured IDs."
+  - "Given a lane with no such mapping configured, when GET /lanes is called, then that lane's object includes multica_agent_ids as an empty array — the field is always present, never omitted or undefined."
+  - "Given the field addition, when the existing GET /lanes test suite runs, then every pre-existing field/assertion is unaffected — this is purely additive."
+
+steps:
+  - id: implement
+    description: Extend getLaneStatuses()'s signature to accept a
+      LaneAgentResolver and add multica_agent_ids to its returned object;
+      thread the resolver from main.ts through createHttpServer() the same
+      way rotationControllers is already threaded.
+    agent: developer
+  - id: test
+    description: Unit test getLaneStatuses() with a resolver returning a
+      real mapping for one lane and [] for another; confirm the field is
+      always present.
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Confirm no other GET /lanes field/shape changed —
+      genuinely additive, not a reshape.
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feat/hdl-multica-status-handoff.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+  key_files:
+    - path: src/api/http-server.ts
+      purpose: owns getLaneStatuses() (line ~536) and the GET /lanes handler (line ~711) being extended
+    - path: src/core/actuation/lane-agent-resolver.ts
+      purpose: LaneAgentResolver/StaticLaneAgentResolver — read-only, unmodified, repurposed as this story's data source
+    - path: src/main.ts
+      purpose: already constructs `resolver` (line ~141) — this story threads it one hop further, into createHttpServer()
+  tech_stack: [typescript, node]
+
+code_examples:
+  - title: getLaneStatuses() to extend (src/api/http-server.ts:536-552)
+    file: src/api/http-server.ts
+    snippet: |
+      export function getLaneStatuses(registry: LaneRegistry, store: StateStore): LaneStatusWithOverride[] {
+        ...
+        return store.getAllCurrentStatuses().map((status) => {
+          const declared = registry.get(status.lane_id);
+          return {
+            ...status,
+            manual_override: store.getManualOverride(status.lane_id),
+            ...
+            manual_cost_tier: store.getManualCostTier(status.lane_id),
+          };
+        });
+      }
+  - title: LaneAgentResolver's unmapped-lane behavior — already verified safe
+    file: src/core/actuation/lane-agent-resolver.ts
+    snippet: |
+      resolve(laneId: string): string[] {
+        return this.mappings.get(laneId) ?? [];
+      }
+
+design_decisions:
+  - decision: multica_agent_ids is always present as an array (never
+      omitted for an unmapped lane).
+    rationale: Matches this codebase's existing convention on every other
+      optional-per-lane field in getLaneStatuses() (manual_override etc.
+      are always present, null/false when unset) — a consumer should never
+      have to special-case `undefined` vs. an empty value.
+
+metric:
+  applies: false
+  justification: Additive read-only API field with no standalone success
+    metric of its own; its value is realized by Pantheon's future
+    consumption, which is out of this epic's scope to measure.
