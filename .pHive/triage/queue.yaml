@@ -1,0 +1,94 @@
+schema_version: 1
+entries:
+  - id: t-001
+    state: prioritized
+    kind: bug
+    title: "main branch tip has an unreverted DELIBERATE_BREAK crash commit (6d00d71)"
+    description: >
+      origin/main's tip is commit 6d00d71 "DELIBERATE_BREAK: CD rollback test
+      [PANT-24]" (2026-08-29, author "Mathew Dostal (hive)") — an
+      unconditional `throw new Error(...)` inserted at the very top of
+      src/main.ts, so any process that imports main.ts (the real service,
+      the CLI, the desktop app) crashes immediately on load. The commit's own
+      comment says "remove after scenario 2 capture" — it was meant to be
+      temporary, reverted once its CD-rollback test scenario ran. Confirmed
+      still live at the tip of origin/main as of 2026-09-06/07, 8 days later.
+      No release tag was cut on top of it (git describe: v0.33.1-17-g6d00d71
+      — 17 commits past the last tag, no new tag), and no open PR references
+      PANT-24 or builds on top of it — no evidence the CD test is still
+      in-progress. GitHub issue heimdall#86 (filed independently by a
+      separate Claude Code session, same finding) already exists for this.
+      Reproduction: `git show origin/main:src/main.ts | head -3` shows the
+      throw; any `node --import tsx src/main.ts` run against that commit
+      crashes instantly.
+    reporter: mdostal (github issue #86, itself filed by a separate session)
+    reported_at: "2026-09-07T01:08:51Z"
+    priority: p0
+    severity: critical
+    linked_epic: null
+    linked_story: null
+    closed_reason: null
+    closed_at: null
+    state_history:
+      - state: inbox
+        at: "2026-09-06T00:00:00Z"
+      - state: clarified
+        at: "2026-09-06T00:00:00Z"
+      - state: prioritized
+        at: "2026-09-06T00:00:00Z"
+    notes: >
+      Not routed to plan-ready — this is a 2-line revert (delete the throw +
+      its stale comment from src/main.ts), not decomposition-worthy work.
+      Recommend a direct hotfix PR to main rather than a full /plan cycle,
+      given severity (main is live-broken right now) outweighs process
+      overhead. Held at `prioritized` pending explicit operator go-ahead to
+      push a fix directly to main (a shared, less-reversible target) rather
+      than proceeding unilaterally.
+
+  - id: t-002
+    state: plan-ready
+    kind: bug
+    title: "MulticaControlAdapter's disable lever (max_concurrent_tasks: 0) rejected by real Multica API validation"
+    description: >
+      GitHub issue heimdall#83 (2026-08-27). Multica's real REST API rejects
+      max_concurrent_tasks: 0 (min is 1, confirmed against Multica's own
+      server source — concurrency is a throttle, not a switch, at any legal
+      value, and the only true stop (ArchiveAgent) unconditionally cancels
+      in-flight tasks). Per explicit operator direction in a prior session
+      ("turn off the lever, don't fix it -- give back the status and we
+      build the lever change on the pantheon"), this was already planned as
+      a full Hive epic (hdl-multica-status-handoff) and substantively
+      implemented: 3 stories committed on `feat/hdl-multica-status-handoff`
+      (pushed to origin, not yet PR'd) — retires Heimdall's direct Multica
+      actuation, exposes multica_agent_ids on GET /lanes, adds
+      docs/decisions/DEC-hdl-multica-disable-contract.md. Local build+test
+      green (701/701 at last check). Stalled because the repo's real merge
+      gate (ssh dostal@100.75.161.82 /Users/dostal/hive-ci/verify-heimdall.sh
+      <sha>) is missing from the build box entirely — only a week-old backup
+      exists. Not blocked on planning or coding — blocked on infra.
+    reporter: mdostal (github issue #83)
+    reported_at: "2026-08-27T03:43:50Z"
+    priority: p1
+    severity: high
+    linked_epic: hdl-multica-status-handoff
+    linked_story: null
+    closed_reason: null
+    closed_at: null
+    state_history:
+      - state: inbox
+        at: "2026-08-27T00:00:00Z"
+      - state: clarified
+        at: "2026-08-27T00:00:00Z"
+      - state: prioritized
+        at: "2026-08-27T00:00:00Z"
+      - state: plan-ready
+        at: "2026-08-27T00:00:00Z"
+    notes: >
+      Real planning artifacts already exist at
+      .pHive/epics/hdl-multica-status-handoff/ (research-brief,
+      design-discussion, grill-record, horizontal-plan, vertical-plan,
+      epic.yaml, 3 story YAMLs) — not re-planned here, just backfilled into
+      the queue for visibility. Ready to open a PR the moment the merge-gate
+      question is resolved (either the real verify-heimdall.sh location is
+      found, or the operator authorizes using the BACKUP-2026-08-19 copy as
+      a stopgap).
