@@ -1,0 +1,68 @@
+name: hdl-multica-status-handoff
+title: Retire broken Multica actuation, complete status handoff for Pantheon to build the real lever
+target_codebase: /Users/mdostal/Documents/work/pantheon/heimdall
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: dev
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [bug-fix, cross-repo-boundary, medium-scope]
+  roster: [researcher]
+  per_tag_reasoning:
+    bug-fix: triggered by heimdall#83 (MulticaControlAdapter's disable lever rejected by live Multica), verified against Multica's own real server source rather than guessed.
+    cross-repo-boundary: the operator explicitly redirected scope away from patching the lever in Heimdall toward retiring it here and building the real fix in pantheon-v2 — this epic stays inside its own task_tracking.repo per the plan skill's own repo-match gate, and treats the Pantheon-side work as an out-of-scope follow-up, not something to plan here.
+    medium-scope: cross-layer (core actuation module, service wiring, HTTP API, docs, issue tracker) but low architectural risk — mostly deletion of an already-isolated module plus one additive field, not a new abstraction.
+  confidence: high
+  gate_decisions:
+    design_discussion_review: ran (plugin-hive:grill adversarial pass — found and the draft resolved 3 findings: a hidden assumption that src/main.test.ts already asserts the pre-retirement behavior and needs an explicit rewrite (not just the 3 actuation-module test files), an unresolved tension over whether the decision record links the Artifact's four-option analysis, and an unresolved tension that heimdall#83 itself was never assigned a closure step. A fourth angle — whether routing every lane through StubControlAdapter would make ActuationStub's warnings misleading — was checked directly against actuation-stub.ts and confirmed clean, no finding. Full record at docs/grill-record.md)
+    hv_planning: ran (lightweight, per design-discussion.md §8 — 3 layers / 3 vertical slices, 1:1 mapping since the layers don't share files beyond an intentional main.ts sequencing choice)
+    structured_outline: not_applicable (Medium, not Large — single repo, no migration, no new external dependency, bounded and fully understood after direct source verification against both Heimdall and Multica's own code)
+
+description: >
+  heimdall#83: MulticaControlAdapter's disable lever (max_concurrent_tasks:
+  0) is rejected by Multica's real API — confirmed live against
+  dostal@hive. An Artifact presented four ways to patch the lever itself
+  (throttle-to-floor, archive-based, severity-tiered hybrid, pluggable
+  policy). The operator rejected patching it: "your job is to turn off the
+  lever not to fix it -- so it seems you need to give back the status and
+  such and we build the lever change on the pantheon so IT integrates into
+  multica correctly."
+
+  This epic retires Heimdall's direct Multica actuation entirely — deletes
+  the fully-isolated multica-rest-client.ts/multica-control-adapter.ts/
+  circuit-breaker.ts stack, simplifies main.ts so every lane unconditionally
+  uses the already-proven StubControlAdapter fallback — and completes the
+  "give back the status" half by exposing the one real gap in Heimdall's
+  already-rich GET /lanes response: which Multica agent(s) a lane's status
+  maps to. This is what lets Pantheon's own facade (pantheon-v2's core/
+  api/runners.ts, already shipped in PR #87) build the real disable lever
+  on its own side, informed by Multica's real constraints — verified
+  directly against Multica's own server source (no zero-capacity lever
+  exists; concurrency is a throttle not a switch even at its floor of 1;
+  the only true stop, archive, unconditionally cancels in-flight work) —
+  which this epic documents in a decision record but does not act on.
+
+  Adversarial review (grill) caught that src/main.test.ts already has two
+  tests asserting the pre-retirement behavior that would fail to compile
+  once the deletion landed — named explicitly as an in-scope file rather
+  than discovered mid-implementation — plus two completeness gaps (link
+  the Artifact from the decision record; explicitly close heimdall#83
+  after merge), both folded into the plan before any code was written.
+
+stories:
+  - id: hdl-msh-01-retire-actuation
+    title: Retire Heimdall's direct Multica actuation (closes heimdall#83's broken code path)
+    complexity: medium
+    depends_on: []
+  - id: hdl-msh-02-expose-agent-mapping
+    title: Expose lane-to-Multica-agent mapping on GET /lanes
+    complexity: low
+    depends_on: [hdl-msh-01-retire-actuation]
+  - id: hdl-msh-03-decision-record-and-issue-closure
+    title: Decision record, stale-doc cleanup, and heimdall#83 closure
+    complexity: low
+    depends_on: [hdl-msh-01-retire-actuation, hdl-msh-02-expose-agent-mapping]

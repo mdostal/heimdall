@@ -99,3 +99,5 @@ app/src-tauri/gen/
 !.pHive/epics/hdl-backoff-policies/**
 !.pHive/epics/hdl-agent-onboarding/
 !.pHive/epics/hdl-agent-onboarding/**
+!.pHive/epics/hdl-multica-status-handoff/
+!.pHive/epics/hdl-multica-status-handoff/**
