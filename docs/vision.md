@@ -117,10 +117,17 @@ dev-mode wrapper.
 **Pantheon integration.** Heimdall's real L2 descriptor (capabilities,
 `healthz`, port, transport) is registered in `pantheon-v2`.
 
-**Installable CLI and agent onboarding.** Heimdall ships as a real global npm
-package (`npm install -g pantheon-heimdall`, or the one-liner `curl -fsSL
-https://mdostal.github.io/heimdall/install.sh | bash`), not just a repo
-checkout. The `heimdall` bin (`bin/heimdall.js`) is a cross-platform shim that
+**Installable CLI and agent onboarding.** Heimdall installs as a real global
+CLI, not just a repo checkout — one-liner: `curl -fsSL
+https://mdostal.github.io/heimdall/install.sh | bash`. Not yet on the npm
+registry (`pantheon-heimdall` isn't published there yet — tracked as t-003
+in `.pHive/triage/queue.yaml`); the install script installs straight from
+this repo's `main` branch (`npm install -g git+https://github.com/mdostal/
+heimdall.git#main`), which npm builds locally via this package's own
+`prepare` script. Same end result for the operator either way — switching
+`scripts/install.sh`'s `INSTALL_SOURCE` back to the plain package name is
+the only change needed once publishing catches up. The `heimdall` bin
+(`bin/heimdall.js`) is a cross-platform shim that
 dispatches to the compiled CLI — `heimdall lanes`/`route`/`route-outcome` for
 one-shot calls, and `heimdall mcp` to speak the MCP protocol over stdio.
 `heimdall agent init` is the onboarding command: it detects which coding

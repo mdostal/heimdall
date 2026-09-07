@@ -100,7 +100,7 @@ entries:
       a stopgap).
 
   - id: t-003
-    state: inbox
+    state: closed
     kind: bug
     title: "README's documented install path (curl install.sh) fails — pantheon-heimdall was never actually published to npm"
     description: >
@@ -122,19 +122,32 @@ entries:
       explicit operator go-ahead.
     reporter: claude (v0.36.0 release sweep)
     reported_at: "2026-09-07T01:41:00Z"
-    priority: null
-    severity: null
+    priority: p2
+    severity: moderate
     linked_epic: null
     linked_story: null
-    closed_reason: null
-    closed_at: null
+    closed_reason: >
+      Operator: "we can do the github release for now, we'll get the npm
+      one as we go." Fixed scripts/install.sh to install straight from
+      this repo's `main` branch via `npm install -g git+https://github.com/
+      mdostal/heimdall.git#main` instead of the unpublished npm package
+      name; added a `prepare: npm run build` script so npm builds `dist/`
+      locally for a git-sourced install (verified end-to-end in a scratch
+      clone — prepare fires, dist/ builds, `heimdall` bin runs correctly).
+      docs/vision.md's "ships as a real npm package" claim corrected to be
+      honest about current state. Re-publish gh-pages after merge so the
+      live curl URL serves the fix. Revisit when npm publishing happens —
+      switching INSTALL_SOURCE back is the only change needed.
+    closed_at: "2026-09-07T02:35:00Z"
     state_history:
       - state: inbox
         at: "2026-09-07T01:41:00Z"
+      - state: clarified
+        at: "2026-09-07T02:30:00Z"
+      - state: prioritized
+        at: "2026-09-07T02:30:00Z"
+      - state: closed
+        at: "2026-09-07T02:35:00Z"
     notes: >
-      Needs an operator decision: actually publish pantheon-heimdall to npm
-      now (real, less-reversible action), or fix install.sh/README to not
-      depend on npm at all (e.g. install straight from the GitHub release
-      tarball/git, matching how Portunus's own install.sh works as a
-      documented stopgap per DEC-hdl-*/research precedent this session has
-      already cited). Held at inbox pending that call.
+      Not routed through plan-ready — small enough (2 files, no new
+      abstraction) to fix directly rather than decompose into stories.
