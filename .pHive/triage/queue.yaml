@@ -1,7 +1,7 @@
 schema_version: 1
 entries:
   - id: t-001
-    state: prioritized
+    state: closed
     kind: bug
     title: "main branch tip has an unreverted DELIBERATE_BREAK crash commit (6d00d71)"
     description: >
@@ -27,8 +27,8 @@ entries:
     severity: critical
     linked_epic: null
     linked_story: null
-    closed_reason: null
-    closed_at: null
+    closed_reason: "fixed in PR #88 (revert commit a3fbb1b, merged 2400f6e); re-verified origin/main PASS via restored hive-verify.sh; heimdall#86 auto-closed"
+    closed_at: "2026-09-07T01:26:52Z"
     state_history:
       - state: inbox
         at: "2026-09-06T00:00:00Z"
@@ -36,9 +36,13 @@ entries:
         at: "2026-09-06T00:00:00Z"
       - state: prioritized
         at: "2026-09-06T00:00:00Z"
+      - state: closed
+        at: "2026-09-07T01:26:52Z"
     notes: >
-      Not routed to plan-ready — this is a 2-line revert (delete the throw +
+      Not routed to plan-ready — this was a 2-line revert (delete the throw +
       its stale comment from src/main.ts), not decomposition-worthy work.
+      Also re-provisioned /Users/dostal/hive-ci/ on the build box (missing
+      entirely) so the real merge gate exists again going forward.
       Recommend a direct hotfix PR to main rather than a full /plan cycle,
       given severity (main is live-broken right now) outweighs process
       overhead. Held at `prioritized` pending explicit operator go-ahead to
