@@ -98,3 +98,43 @@ entries:
       question is resolved (either the real verify-heimdall.sh location is
       found, or the operator authorizes using the BACKUP-2026-08-19 copy as
       a stopgap).
+
+  - id: t-003
+    state: inbox
+    kind: bug
+    title: "README's documented install path (curl install.sh) fails — pantheon-heimdall was never actually published to npm"
+    description: >
+      Found during the v0.36.0 release sweep. README.md's primary documented
+      install command (`curl -fsSL https://mdostal.github.io/heimdall/
+      install.sh | bash`) runs `scripts/install.sh`, which shells out to
+      `npm install -g pantheon-heimdall`. Confirmed live: `npm view
+      pantheon-heimdall version` returns a 404 — the package does not exist
+      on the real npm registry. Despite CHANGELOG.md's v0.33.0 entry
+      claiming "v0.33.0 went public as pantheon-heimdall on npm," it
+      apparently never actually was (or was unpublished) — this predates
+      this session's own work and wasn't introduced by it. `.pHive/
+      project-profile.yaml`'s `ship_target.kind` is `github-release`, not
+      `npm`, so this may be a case of docs/scripts written ahead of an npm
+      publish that never happened, rather than a regression.
+      Not fixed in this session — publishing a package to a public registry
+      under the operator's account is a real, one-way action (npm's
+      72-hour unpublish window aside) that shouldn't happen without
+      explicit operator go-ahead.
+    reporter: claude (v0.36.0 release sweep)
+    reported_at: "2026-09-07T01:41:00Z"
+    priority: null
+    severity: null
+    linked_epic: null
+    linked_story: null
+    closed_reason: null
+    closed_at: null
+    state_history:
+      - state: inbox
+        at: "2026-09-07T01:41:00Z"
+    notes: >
+      Needs an operator decision: actually publish pantheon-heimdall to npm
+      now (real, less-reversible action), or fix install.sh/README to not
+      depend on npm at all (e.g. install straight from the GitHub release
+      tarball/git, matching how Portunus's own install.sh works as a
+      documented stopgap per DEC-hdl-*/research precedent this session has
+      already cited). Held at inbox pending that call.
