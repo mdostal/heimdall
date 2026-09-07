@@ -6,14 +6,25 @@
 #
 
 # Core logic (intentionally just these two steps):
-#   1. npm install -g pantheon-heimdall
+#   1. npm install -g <source>
 #   2. heimdall agent init
 #
 # Everything else below is error handling around that core, not extra scope.
+#
+# t-003 (.pHive/triage/queue.yaml): `pantheon-heimdall` is not yet published
+# to the real npm registry — installs straight from the GitHub repo, pinned
+# to `main` (which only moves on a deliberate, verified release cut — see
+# docs/decisions/DEC-hdl-local-build-verification.md), via `npm install -g
+# git+https://...`. npm runs this package's own "prepare" script (`npm run
+# build`) automatically for a git-sourced install, so `dist/` — normally
+# gitignored and npm-registry-only — gets built locally as part of the
+# install. Switch INSTALL_SOURCE back to the plain npm package name once
+# publishing catches up; nothing else in this script needs to change.
 
 set -euo pipefail
 
 PACKAGE_NAME="pantheon-heimdall"
+INSTALL_SOURCE="git+https://github.com/mdostal/heimdall.git#main"
 MIN_NODE_MAJOR=22
 MIN_NODE_MINOR=13
 
@@ -45,9 +56,9 @@ if [ "$node_major" -lt "$MIN_NODE_MAJOR" ] || { [ "$node_major" -eq "$MIN_NODE_M
   exit 1
 fi
 
-echo "Installing ${PACKAGE_NAME} globally via npm..."
-if ! npm install -g "${PACKAGE_NAME}"; then
-  err "npm install -g ${PACKAGE_NAME} failed."
+echo "Installing ${PACKAGE_NAME} globally (from ${INSTALL_SOURCE})..."
+if ! npm install -g "${INSTALL_SOURCE}"; then
+  err "npm install -g ${INSTALL_SOURCE} failed."
   err "If this is a permissions error, see: https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally"
   exit 1
 fi

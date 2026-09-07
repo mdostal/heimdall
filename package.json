@@ -1,6 +1,6 @@
 {
   "name": "pantheon-heimdall",
-  "version": "0.36.0",
+  "version": "0.36.1",
   "description": "Pantheon's health-aware LLM/lane router \u2014 v1 sense (lane health/status) + v2 actuate (Multica control).",
   "license": "MIT",
   "repository": {
@@ -30,7 +30,8 @@
     "mcp": "node --env-file-if-exists=.env --import tsx src/api/mcp-server.ts",
     "test": "node --import tsx --test \"src/**/*.test.ts\" \"test/**/*.test.ts\" \"hive/**/*.test.ts\"",
     "sla-report": "node --import tsx test/sla-harness/index.ts",
-    "build": "rm -rf dist && tsc -p tsconfig.json"
+    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "prepare": "npm run build"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

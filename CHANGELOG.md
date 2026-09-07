@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.36.1] - 2026-09-07
+
+### Fixed
+
+- **`scripts/install.sh`'s documented install path was broken — `pantheon-heimdall` was never actually published to npm.** Found during the v0.36.0 release sweep: `npm view pantheon-heimdall version` 404s, so the README's primary install command (`curl -fsSL https://mdostal.github.io/heimdall/install.sh | bash`) failed at the `npm install -g pantheon-heimdall` step for anyone who ran it. Fixed to install straight from this repo's `main` branch instead (`npm install -g git+https://github.com/mdostal/heimdall.git#main`) — added a `prepare` script (`npm run build`) so npm builds `dist/` locally as part of a git-sourced install, verified end-to-end in a scratch clone. `docs/vision.md`'s claim that Heimdall "ships as a real npm package" corrected to describe the actual current state. Revisit once `pantheon-heimdall` is actually published — switching `install.sh`'s `INSTALL_SOURCE` back to the plain package name is the only change needed. See `.pHive/triage/queue.yaml` (t-003).
+
 ## [0.36.0] - 2026-09-07
 
 ### Added
