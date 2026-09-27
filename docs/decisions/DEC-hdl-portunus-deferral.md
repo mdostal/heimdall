@@ -1,3 +1,9 @@
+---
+title: DEC-hdl-portunus-deferral
+parent: Decision Records
+nav_order: 1
+---
+
 # DEC-hdl-portunus-deferral
 
 **Status:** Superseded — deferral fully lifted (2026-09-07). Both halves of

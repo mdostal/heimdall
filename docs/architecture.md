@@ -1,3 +1,8 @@
+---
+title: Architecture
+nav_order: 9
+---
+
 # Heimdall Architecture
 
 Heimdall is the **health-aware lane gateway and router** for Pantheon. It senses lane health from layered signals, routes tasks to the best healthy lane, and actuates by toggling Multica agent concurrency.

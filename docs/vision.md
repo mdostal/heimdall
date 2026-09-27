@@ -1,3 +1,8 @@
+---
+title: Vision
+nav_order: 11
+---
+
 # Heimdall — Vision
 
 Heimdall is the **health-aware lane gateway and router** for [Pantheon](https://github.com/mdostal/pantheon-v2).
