@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Sensing KPIs in `GET /metrics` and a real readiness check, `GET /readyz` (PANT-824).** Every past incident was a sensing failure: probes never started (PANT-753), a quota error was misclassified (PANT-729), lanes were never probed (PANT-181). None of them showed up in a metric, and `/healthz` stayed green throughout. New metrics: `heimdall_probes_total{lane,provider,result,error_code}`, `heimdall_probe_duration_seconds{lane,provider}` (histogram), `heimdall_lane_last_probe_age_seconds{lane}`, `heimdall_lane_status_transitions_total{lane,from,to}` and `heimdall_scheduler_start_failures_total{lane,scheduler}`. They are recorded by `LanePipeline` and `composeService()` through a new in-memory `SensingMetrics`, with no new dependency and the same hand-rolled exposition format. `GET /readyz` returns 503 `degraded` with reasons when a lane's scheduler failed to start, the state DB is unwritable, or no lane has been observed within `HEIMDALL_READINESS_STALENESS_MS` (default 15 min). `/healthz` is still a static liveness check. The dashboard Telemetry panel gains a per-lane Sensing summary. See `docs/operations.md`.
+
+### Removed
+
+- **`heimdall_actuation_results_total`** could never be non-zero. Every lane has used `StubControlAdapter` since hdl-msh-01, and nothing calls `emitActuationResult()`.
+
 ### Fixed
 
 - **Lanes no longer all read `down` when Multica-autopilot scheduling isn't configured (PANT-753, heimdall#103).** With `MULTICA_AUTOPILOT_AGENT` unset, every lane logged a `MulticaAutopilotScheduler` start failure and sat on the StateStore's "no status recorded yet" `down` fallback. That all-down report can drive Pantheon's lane failover into archiving every agent. Multica-autopilot scheduling is now **opt-in**: it is only wired when `MULTICA_AUTOPILOT_AGENT` is set, because each trigger dispatches a full agent (LLM) session and spends quota on health checks. Probing stays in-process. `InProcessScheduler` probes never-probed lanes immediately at startup (new `initialDelayMs` option, `StateStore.hasRecordedStatus()`). `NodeCommandRunner` now has a default 120s timeout so a hung CLI probe can't wedge a lane. See the amendment in `docs/decisions/DEC-hdl-scheduler-backend.md`.

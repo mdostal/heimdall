@@ -40,6 +40,7 @@ import {
 import { resolveStatus, type ErrorCode, type LaneStatusValue, type SignalSource } from "./status-model.js";
 import type { StateStore } from "./state-store.js";
 import type { Lane } from "./lane-registry.js";
+import type { SensingMetrics } from "./telemetry/sensing-metrics.js";
 
 export interface RefreshDeps {
   /** Injected clock — an ISO-8601 timestamp for "now". Never Date.now() internally. */
@@ -51,6 +52,15 @@ export interface RefreshDeps {
    * correctly falls through to public-status/active-probe. */
   lastPassiveResponse: (laneId: string) => ResponseLike | null;
   fetchImpl?: typeof fetch;
+  /** PANT-824: monotonic milliseconds, for heimdall_probe_duration_seconds only. Defaults to performance.now(). */
+  monotonicNowMs?: () => number;
+}
+
+/** What one sensing cycle concluded, before corroboration — the
+ * heimdall_probes_total `result`/`error_code` labels. */
+interface SenseOutcome {
+  result: string;
+  errorCode: string;
 }
 
 /** The two provider-specific functions every ProviderSignalAdapter pair must
@@ -141,9 +151,30 @@ export class LanePipeline {
     private readonly store: StateStore,
     private readonly deps: RefreshDeps,
     private readonly adapters: ProviderAdapters,
+    /** PANT-824: optional so existing callers/tests keep working; main.ts always passes the service-wide instance. */
+    private readonly sensing?: SensingMetrics,
   ) {}
 
   async refresh(lane: Lane): Promise<void> {
+    const monotonicNowMs = this.deps.monotonicNowMs ?? (() => performance.now());
+    const startedMs = monotonicNowMs();
+    let outcome: SenseOutcome = { result: "error", errorCode: "exception" };
+    try {
+      outcome = await this.sense(lane);
+    } finally {
+      // Recorded on the throw path too — an adapter that throws is exactly
+      // the "sensing silently broken" case these counters exist to expose.
+      this.sensing?.recordProbe({
+        lane: lane.lane_id,
+        provider: lane.provider,
+        result: outcome.result,
+        errorCode: outcome.errorCode,
+        durationSeconds: Math.max(0, (monotonicNowMs() - startedMs) / 1000),
+      });
+    }
+  }
+
+  private async sense(lane: Lane): Promise<SenseOutcome> {
     const now = this.deps.now();
     const decision = decideSignalSource({
       now,
@@ -158,26 +189,23 @@ export class LanePipeline {
       if (!signal) {
         // Thought passive was fresh but there's nothing to observe —
         // defensive fallback rather than trusting a null read.
-        await this.refreshViaProbe(lane, now);
-        return;
+        return this.refreshViaProbe(lane, now);
       }
-      this.persistResolved(lane.lane_id, resolveStatus(signal), "passive", now);
-      return;
+      return this.persistResolved(lane.lane_id, resolveStatus(signal), "passive", now);
     }
 
     if (decision.action === "use-public-status") {
       const signal = await this.adapters.checkPublicStatus(this.deps.fetchImpl);
-      this.persistResolved(lane.lane_id, resolveStatus(signal), "public_status", now);
-      return;
+      return this.persistResolved(lane.lane_id, resolveStatus(signal), "public_status", now);
     }
 
-    await this.refreshViaProbe(lane, now);
+    return this.refreshViaProbe(lane, now);
   }
 
-  private async refreshViaProbe(lane: Lane, now: string): Promise<void> {
+  private async refreshViaProbe(lane: Lane, now: string): Promise<SenseOutcome> {
     if (!lane.credential) {
       // REQ-07: missing/invalid credential — report down/unconfigured, never crash.
-      this.store.recordStatus({
+      this.recordStatus({
         lane_id: lane.lane_id,
         status: "down",
         reset_at: null,
@@ -185,11 +213,25 @@ export class LanePipeline {
         signal_source: "active_probe",
         observed_at: now,
       });
-      return;
+      return { result: "down", errorCode: "unconfigured" };
     }
 
     const probe = await this.adapters.probe(lane.credential, this.deps.fetchImpl);
-    this.persistResolved(lane.lane_id, resolveStatus(probe), "active_probe", now);
+    return this.persistResolved(lane.lane_id, resolveStatus(probe), "active_probe", now);
+  }
+
+  /** store.recordStatus plus heimdall_lane_status_transitions_total — the
+   * one place this pipeline writes status, so every change it makes is
+   * counted, whichever scheduler (or manual refresh) triggered it. A lane's
+   * first-ever status counts as a transition from "none". */
+  private recordStatus(entry: Parameters<StateStore["recordStatus"]>[0]): void {
+    const from = this.store.hasRecordedStatus(entry.lane_id)
+      ? (this.store.getCurrentStatus(entry.lane_id)?.status ?? "none")
+      : "none";
+    this.store.recordStatus(entry);
+    if (from !== entry.status) {
+      this.sensing?.recordStatusTransition(entry.lane_id, from, entry.status);
+    }
   }
 
   private persistResolved(
@@ -202,7 +244,7 @@ export class LanePipeline {
     },
     source: SignalSource,
     now: string,
-  ): void {
+  ): SenseOutcome {
     const priorRawVerdict = this.lastRawVerdictByLane.get(laneId) ?? null;
     const corroboration = resolveWithCorroboration({
       latestVerdict: resolved.status,
@@ -217,7 +259,7 @@ export class LanePipeline {
     // the STATUS stays conservative (downgraded to `degraded` until
     // corroborated) — "OUR state could be one of the 3 [suspect states] ...
     // but then with full details underneath" (operator, 2026-08-16).
-    this.store.recordStatus({
+    this.recordStatus({
       lane_id: laneId,
       status: corroboration.verdict,
       reset_at: resolved.reset_at,
@@ -228,5 +270,6 @@ export class LanePipeline {
       signal_source: source,
       observed_at: now,
     });
+    return { result: resolved.status, errorCode: resolved.error_code ?? "none" };
   }
 }

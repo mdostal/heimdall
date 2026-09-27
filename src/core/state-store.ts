@@ -556,6 +556,26 @@ export class StateStore {
     }));
   }
 
+  /** PANT-824 readiness: attempts a real write inside a savepoint and rolls
+   * it back, so nothing persists. Returns the error message if the DB can't
+   * be written (read-only file, closed handle, locked, disk I/O), else null. */
+  checkWritable(): string | null {
+    try {
+      this.db.exec("SAVEPOINT heimdall_readiness");
+      try {
+        this.db
+          .prepare(`INSERT INTO settings (key, value) VALUES ('__readiness_probe__', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+          .run();
+      } finally {
+        this.db.exec("ROLLBACK TO heimdall_readiness");
+        this.db.exec("RELEASE heimdall_readiness");
+      }
+      return null;
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+  }
+
   close(): void {
     this.db.close();
   }
