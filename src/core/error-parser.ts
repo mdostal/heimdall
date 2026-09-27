@@ -88,8 +88,8 @@ function extractHeaders(input: unknown): HeaderLike | null {
 export function parseRetryAfter(value: string | null, now: Date): string | null {
   if (!value) return null;
   const seconds = Number(value);
-  if (Number.isFinite(seconds) && seconds >= 0) {
-    return new Date(now.getTime() + seconds * 1000).toISOString();
+  if (Number.isFinite(seconds)) {
+    return seconds >= 0 ? new Date(now.getTime() + seconds * 1000).toISOString() : null;
   }
 
   const timestamp = Date.parse(value);
@@ -99,13 +99,62 @@ export function parseRetryAfter(value: string | null, now: Date): string | null 
 function parseResetTimestamp(value: string | null): string | null {
   if (!value) return null;
   const numeric = Number(value);
-  if (Number.isFinite(numeric) && numeric > 0) {
+  if (Number.isFinite(numeric)) {
+    if (numeric <= 0) return null;
     const millis = numeric < 10_000_000_000 ? numeric * 1000 : numeric;
     return new Date(millis).toISOString();
   }
 
+  // Numeric strings never reach Date.parse: V8 reads "-5" or "0" as a year
+  // (2001, 2000) and would turn garbage into a real-looking past reset.
   const timestamp = Date.parse(value);
   return Number.isNaN(timestamp) ? null : new Date(timestamp).toISOString();
+}
+
+// x-ratelimit-reset is ambiguous across providers: some send an absolute
+// epoch (seconds or ms), others a relative number of seconds until reset
+// (e.g. "60"). Reading "60" as epoch seconds puts reset_at in 1970, so the
+// lane looks recovered immediately. Rule: a numeric value below 1e9 (2001-09-09
+// as epoch seconds; no real reset is that old) is relative seconds from `now`;
+// anything at or above it goes through the absolute epoch rule above.
+const RELATIVE_RESET_THRESHOLD = 1_000_000_000;
+
+function parseRateLimitReset(value: string | null, now: Date): string | null {
+  if (!value) return null;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0 && numeric < RELATIVE_RESET_THRESHOLD) {
+    return new Date(now.getTime() + numeric * 1000).toISOString();
+  }
+  return parseResetTimestamp(value);
+}
+
+// Anthropic sends one RFC 3339 reset per limit bucket; the lane is only usable
+// again once every exhausted bucket has reset, so the latest one wins.
+const ANTHROPIC_RESET_HEADERS = [
+  "anthropic-ratelimit-requests-reset",
+  "anthropic-ratelimit-tokens-reset",
+  "anthropic-ratelimit-input-tokens-reset",
+  "anthropic-ratelimit-output-tokens-reset",
+] as const;
+
+function parseAbsoluteDate(value: string | null): string | null {
+  if (!value || Number.isFinite(Number(value))) return null;
+  const timestamp = Date.parse(value);
+  return Number.isNaN(timestamp) ? null : new Date(timestamp).toISOString();
+}
+
+// Collects every reset hint the headers carry (x-ratelimit-reset, retry-after,
+// anthropic-ratelimit-*-reset) and returns the latest. Unparseable values are
+// skipped, so garbage falls through to the caller's next fallback.
+function extractHeaderResetAt(headers: HeaderLike | null, now: Date): string | null {
+  if (!headers) return null;
+  const candidates = [
+    parseRateLimitReset(headers.get("x-ratelimit-reset"), now),
+    parseRetryAfter(headers.get("retry-after"), now),
+    ...ANTHROPIC_RESET_HEADERS.map((name) => parseAbsoluteDate(headers.get(name))),
+  ].filter((candidate): candidate is string => candidate !== null);
+  if (candidates.length === 0) return null;
+  return candidates.reduce((latest, candidate) => (Date.parse(candidate) > Date.parse(latest) ? candidate : latest));
 }
 
 function extractResetAt(input: unknown, headers: HeaderLike | null, now: Date): string {
@@ -119,11 +168,8 @@ function extractResetAt(input: unknown, headers: HeaderLike | null, now: Date): 
   const parsedExplicit = parseResetTimestamp(explicit);
   if (parsedExplicit) return parsedExplicit;
 
-  const headerReset = parseResetTimestamp(headers?.get("x-ratelimit-reset") ?? null);
+  const headerReset = extractHeaderResetAt(headers, now);
   if (headerReset) return headerReset;
-
-  const retryAfter = parseRetryAfter(headers?.get("retry-after") ?? null, now);
-  if (retryAfter) return retryAfter;
 
   // CLI error messages (e.g. "resets 7pm (America/Chicago)") carry the reset
   // time as human-readable text rather than a header or structured field —
