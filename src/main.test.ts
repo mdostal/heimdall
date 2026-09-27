@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { composeService } from "./main.js";
 import type { CommandRunner } from "./core/scheduler/command-runner.js";
 
@@ -435,43 +437,61 @@ test("a lane with a HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS mapping still gets StubC
   service.stopAll();
 });
 
-test("the shared status watcher calls reconcile() for every lane on each tick, not just on transitions", async () => {
+test("reconcile() is event-driven: never called across unchanged ticks, exactly once per transition (PANT-827)", async () => {
   const service = composeService({
     env: testEnv(),
     commandRunner: mockCommandRunner(),
     fetchImpl: mockFetch(),
     skipHttpListen: true,
     port: 0,
-    statusWatcherIntervalMs: 10,
   });
-  // Isolate the status watcher: stop the InProcessSchedulers before their
-  // startup probe (PANT-753) can overwrite the seeded status below.
+  // Isolate from the InProcessSchedulers' startup probe (PANT-753), which
+  // would otherwise record its own statuses underneath the injected ticks.
   for (const s of service.inProcessSchedulers) s.stop();
 
-  service.store.recordStatus({
-    lane_id: "claude@mathew.dostal",
-    status: "down",
-    reset_at: null,
-    reason: "seeded for test",
-    signal_source: "active_probe",
-    observed_at: "2026-07-25T12:00:00.000Z",
-  });
+  const laneId = "claude@mathew.dostal";
+  const tick = (status: "up" | "down", observedAt: string) =>
+    service.store.recordStatus({
+      lane_id: laneId,
+      status,
+      reset_at: null,
+      reason: "injected tick",
+      signal_source: "active_probe",
+      observed_at: observedAt,
+    });
 
-  const adapter = service.controlAdapters.get("claude@mathew.dostal")!;
+  tick("down", "2026-07-25T12:00:00.000Z");
+
+  const adapter = service.controlAdapters.get(laneId)!;
   const reconcileCalls: string[] = [];
-  const originalReconcile = adapter.reconcile.bind(adapter);
-  adapter.reconcile = async (lane, status) => {
+  adapter.reconcile = async (_lane, status) => {
     reconcileCalls.push(status);
-    return originalReconcile(lane, status);
   };
 
-  // Same "down" status held steady across multiple ticks — no transition —
-  // yet reconcile() must still fire every tick (retry-for-free semantics).
-  await new Promise<void>((resolve) => setTimeout(resolve, 55));
+  // Several ticks, same resolved status — no transition, so no reconcile().
+  tick("down", "2026-07-25T12:00:05.000Z");
+  tick("down", "2026-07-25T12:00:10.000Z");
+  tick("down", "2026-07-25T12:00:15.000Z");
+  // Wall-clock time passing must not trigger it either (no timer left).
+  await new Promise<void>((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(reconcileCalls, []);
+
+  // One transition -> exactly one call.
+  tick("up", "2026-07-25T12:00:20.000Z");
+  tick("up", "2026-07-25T12:00:25.000Z");
+  assert.deepEqual(reconcileCalls, ["up"]);
+
+  // A manual override change reconciles too; re-setting the same value doesn't.
+  service.store.setManualOverride(laneId, "disabled");
+  service.store.setManualOverride(laneId, "disabled");
+  assert.deepEqual(reconcileCalls, ["up", "up"]);
 
   service.stopAll();
-  assert.ok(reconcileCalls.length >= 3, `expected several reconcile() calls, got ${reconcileCalls.length}`);
-  assert.ok(reconcileCalls.every((s) => s === "down"));
+});
+
+test("src/main.ts has no setInterval — nothing polls (PANT-827)", () => {
+  const source = readFileSync(fileURLToPath(new URL("./main.ts", import.meta.url)), "utf8");
+  assert.ok(!/setInterval\s*\(/.test(source), "main.ts must not start any setInterval loop");
 });
 
 test("POST /lanes/:laneId/refresh works end-to-end against the composed service", async () => {

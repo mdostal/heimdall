@@ -3,7 +3,9 @@
 // no build step, no framework, no new npm dependency, no external network
 // calls — a consumer of Heimdall's own HTTP surface only.
 //
-// hdl-lane-status-ui: read-only live status (GET /lanes, polled every 5s).
+// hdl-lane-status-ui: read-only live status (GET /lanes, re-fetched on each
+// lane.status_changed event from GET /events — PANT-827; 5s poll only as an
+// SSE fallback).
 // hdl-lane-override: per-lane enable/disable/auto controls, routed through
 //   the same ControlAdapter.reconcile() decision automatic sensing uses
 //   (POST /lanes/:laneId/override) — never a separate mechanism.
@@ -448,7 +450,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
 </head>
 <body>
   <h1>Heimdall — Lane Status <a href="/docs" style="font-size:0.6em;font-weight:400;">Docs &rarr;</a></h1>
-  <div class="subtitle">Polls <code>GET /lanes</code> every 5s · manual overrides route through the same ControlAdapter Heimdall already uses for automatic sensing</div>
+  <div class="subtitle">Live via <code>GET /events</code> (refetches <code>GET /lanes</code> on each status change) · manual overrides route through the same ControlAdapter Heimdall already uses for automatic sensing</div>
 
   <div class="panel" id="agent-onboarding-panel">
     <div class="agent-onboarding-collapsed" id="agent-onboarding-collapsed" style="display:${onboardingCollapsedDisplay};">
@@ -861,6 +863,37 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       "</table>";
   }
 
+  // PANT-827: event-driven refresh. GET /events (SSE) pushes
+  // lane.status_changed only when a lane actually changes; each event (and
+  // each (re)connect, to catch anything missed while disconnected)
+  // re-fetches GET /lanes. The old 5s poll survives only as a fallback when
+  // SSE is unavailable or the stream is given up on.
+  var fallbackPollTimer = null;
+  function startFallbackPoll() {
+    if (fallbackPollTimer === null) fallbackPollTimer = setInterval(poll, 5000);
+  }
+
+  function subscribeLaneEvents() {
+    if (typeof EventSource === "undefined") {
+      startFallbackPoll();
+      return;
+    }
+    var source = new EventSource("/events");
+    var connected = false;
+    source.addEventListener("open", function () {
+      connected = true;
+      poll();
+    });
+    source.addEventListener("lane.status_changed", function () { poll(); });
+    source.addEventListener("error", function () {
+      // Never connected, or the browser stopped auto-reconnecting: poll instead.
+      if (!connected || source.readyState === EventSource.CLOSED) {
+        source.close();
+        startFallbackPoll();
+      }
+    });
+  }
+
   function poll() {
     fetch("/lanes")
       .then(function (res) { return res.json(); })
@@ -924,7 +957,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
     }
 
     // hdl-bp-06: per-lane headroom Save/Clear -- same delegation pattern as
-    // the reset-at controls just above (event delegation survives the 5s
+    // the reset-at controls just above (event delegation survives the
     // re-render; direct listeners on the buttons wouldn't).
     var headroomSaveBtn = event.target.closest("button[data-headroom-save]");
     if (headroomSaveBtn) {
@@ -1581,7 +1614,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
   loadBackoffAdvancedValues();
   loadBackoffProviderOverrides();
   poll();
-  setInterval(poll, 5000);
+  subscribeLaneEvents();
 })();
 </script>
 </body>

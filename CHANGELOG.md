@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Lane status is event-driven; the status-watcher poll loop is gone (PANT-827).** `main.ts` used to run a service-wide `setInterval` that called `ControlAdapter.reconcile()` for every lane every 5s whether or not anything had changed. Now `StateStore` emits an in-process `lane.status_changed` event (`{lane_id, from, to, error_code, reset_at, observed_at, cause}`) only when a lane's resolved status actually changes, or when its manual override or manual reset_at changes. `reconcile()` subscribes to that event, so it runs once per transition. The dashboard subscribes to a new `GET /events` Server-Sent Events stream fed by the same emitter and re-fetches `GET /lanes` on each event. It falls back to the old 5s poll only when SSE is unavailable. Known limit: the emitter is in-process, so a status or override written by a separate process against the same DB file (the `heimdall` CLI, `heimdall mcp`) does not emit. Active-probe scheduling (`InProcessScheduler`) is unchanged.
+
 ### Fixed
 
 - **Lanes no longer all read `down` when Multica-autopilot scheduling isn't configured (PANT-753, heimdall#103).** With `MULTICA_AUTOPILOT_AGENT` unset, every lane logged a `MulticaAutopilotScheduler` start failure and sat on the StateStore's "no status recorded yet" `down` fallback. That all-down report can drive Pantheon's lane failover into archiving every agent. Multica-autopilot scheduling is now **opt-in**: it is only wired when `MULTICA_AUTOPILOT_AGENT` is set, because each trigger dispatches a full agent (LLM) session and spends quota on health checks. Probing stays in-process. `InProcessScheduler` probes never-probed lanes immediately at startup (new `initialDelayMs` option, `StateStore.hasRecordedStatus()`). `NodeCommandRunner` now has a default 120s timeout so a hung CLI probe can't wedge a lane. See the amendment in `docs/decisions/DEC-hdl-scheduler-backend.md`.
