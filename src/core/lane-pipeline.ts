@@ -29,6 +29,7 @@ import { probeGeminiLane } from "./signal-sources/active-probe/gemini.js";
 import { checkKimiPublicStatus } from "./signal-sources/public-status/kimi.js";
 import { probeKimiLane } from "./signal-sources/active-probe/kimi.js";
 import { probeOpenRouterLane } from "./signal-sources/active-probe/openrouter.js";
+import { probeGrokLane } from "./signal-sources/active-probe/grok.js";
 import { probeOllamaLane } from "./signal-sources/active-probe/ollama.js";
 import {
   decideSignalSource,
@@ -94,6 +95,17 @@ async function alwaysUpOpenRouterPublicStatus(): Promise<{ status: "up"; reason:
 
 export function openrouterAdapters(): ProviderAdapters {
   return { checkPublicStatus: alwaysUpOpenRouterPublicStatus, probe: probeOpenRouterLane };
+}
+
+// No public-status/grok.ts — no confirmed machine-readable status feed found
+// for xAI/Grok Code (see hdl-grok-signals's research-brief.md). Same honest
+// always-up stub pattern as openrouterAdapters() and ollamaAdapters().
+async function alwaysUpGrokPublicStatus(): Promise<{ status: "up"; reason: null }> {
+  return { status: "up", reason: null };
+}
+
+export function grokAdapters(): ProviderAdapters {
+  return { checkPublicStatus: alwaysUpGrokPublicStatus, probe: probeGrokLane };
 }
 
 // No public-status/ollama.ts — it's local infra, not a hosted service, so no
