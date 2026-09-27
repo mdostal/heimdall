@@ -263,7 +263,8 @@ unrecognized tool *name* throws a real MCP protocol error.
 
 Other scripts: `npm test` (Node built-in test runner via `tsx`),
 `npm run build` (type-check + compile to `dist/`), `npm run sla-report`
-(status-correctness SLA harness).
+(status-correctness SLA harness; the only thing that rewrites the tracked
+`test/sla-harness/report.md`).
 
 **Actuation** (v2) is enabled per-lane by mapping it to Multica agents via
 `HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS` plus `MULTICA_BASE_URL` /
