@@ -63,6 +63,14 @@ State persists to SQLite at `HEIMDALL_DB_PATH` (default: `~/.local/share/heimdal
 
 To reset all state: stop the service, delete the `.db` file, and restart.
 
+Lane status history and telemetry events older than `HEIMDALL_RETENTION_DAYS` (default 30) are pruned at startup and once a day. Each lane's latest status row is kept however old it is. Connections wait up to 5s on another process's write lock (`PRAGMA busy_timeout`), so the server, MCP and CLI can share one DB file.
+
+### Shutdown and limits
+
+`SIGTERM` and `SIGINT` trigger a graceful shutdown: timers and background jobs stop, the server stops accepting connections and waits up to 10s for in-flight requests, the DB is closed, and the process exits 0. A second signal during shutdown exits 1 immediately. If the port can't be bound (e.g. `EADDRINUSE`), Heimdall logs the cause and exits 1.
+
+Request bodies are capped at 1 MiB. Larger bodies get `413 {"error":"payload_too_large"}`.
+
 ## Logging
 
 Heimdall writes structured log lines to stdout. In production, pipe to your log aggregator:

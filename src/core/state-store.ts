@@ -128,14 +128,28 @@ export interface TelemetryEvent {
   occurred_at: string;
 }
 
+/** PANT-829: how long a connection waits on another writer's lock before SQLITE_BUSY. */
+export const SQLITE_BUSY_TIMEOUT_MS = 5000;
+
+export interface PruneHistoryResult {
+  lane_status_history: number;
+  telemetry_events: number;
+}
+
 export class StateStore {
   private readonly db: DatabaseSync;
+  private closed = false;
 
   constructor(path: string = ":memory:") {
     // node:sqlite's default for foreign-key enforcement varies by Node
     // version (observed OFF on Node 22.9, ON on the hive's Node build) —
     // pinned explicitly so behavior is deterministic across environments.
     this.db = new DatabaseSync(path, { enableForeignKeyConstraints: true });
+    // PANT-829: the HTTP server, MCP and CLI processes share this one WAL
+    // file. Without a busy timeout a write that collides with another
+    // process's write throws SQLITE_BUSY immediately instead of waiting its
+    // turn. Set before journal_mode, which itself needs the write lock.
+    this.db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
     // hdl-ao-01: WAL mode is required for safe concurrent multi-process
     // access — the whole point of resolveDefaultDbPath's shared per-machine
     // default is that the dashboard server (http-server.ts), an MCP process
@@ -556,7 +570,35 @@ export class StateStore {
     }));
   }
 
+  /**
+   * PANT-829 retention: deletes lane_status_history and telemetry_events
+   * rows observed/occurred strictly before `cutoffIso`. A lane's latest
+   * status row is always kept, however old: current status is "latest row
+   * per lane" (getCurrentStatus), so pruning it would flip a long-stable
+   * lane back to the "no status recorded yet" fallback.
+   */
+  pruneHistoryOlderThan(cutoffIso: string): PruneHistoryResult {
+    const history = this.db
+      .prepare(
+        `DELETE FROM lane_status_history
+         WHERE observed_at < ?
+           AND observed_at < (
+             SELECT MAX(h.observed_at) FROM lane_status_history h
+             WHERE h.lane_id = lane_status_history.lane_id
+           )`,
+      )
+      .run(cutoffIso);
+    const telemetry = this.db.prepare(`DELETE FROM telemetry_events WHERE occurred_at < ?`).run(cutoffIso);
+    return {
+      lane_status_history: Number(history.changes),
+      telemetry_events: Number(telemetry.changes),
+    };
+  }
+
   close(): void {
+    // Idempotent: graceful shutdown and stopAll() may both reach here.
+    if (this.closed) return;
+    this.closed = true;
     this.db.close();
   }
 }

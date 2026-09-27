@@ -72,21 +72,73 @@ const mermaidBundlePath = createRequire(import.meta.url).resolve("mermaid/dist/m
 const iconSetsRoot =
   process.env.HEIMDALL_ICON_SETS_ROOT ?? join(process.cwd(), "app", "src-tauri", "resources", "icon-sets");
 
-/** Collects and JSON-parses a request body. Shared by every mutation route (override, reset-at, add-lane). */
-function readJsonBody(req: import("node:http").IncomingMessage): Promise<{ ok: true; data: unknown } | { ok: false }> {
+/** PANT-829: request bodies above this are rejected with 413 instead of buffered. */
+export const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
+
+type ReadJsonBodyResult = { ok: true; data: unknown } | { ok: false; error: "invalid_json" | "payload_too_large" };
+
+/**
+ * Collects and JSON-parses a request body. Shared by every mutation route (override, reset-at, add-lane).
+ * Stops buffering once the body passes maxBytes (declared Content-Length or
+ * actual bytes, whichever trips first) so one oversized request can't grow
+ * memory without bound; the rest of the upload is drained and discarded.
+ */
+function readJsonBody(
+  req: import("node:http").IncomingMessage,
+  maxBytes: number = MAX_REQUEST_BODY_BYTES,
+): Promise<ReadJsonBodyResult> {
   return new Promise((resolve) => {
-    let rawBody = "";
-    req.on("data", (chunk) => {
-      rawBody += chunk;
+    let settled = false;
+    const settle = (result: ReadJsonBodyResult): void => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
+    const declaredLength = Number(req.headers["content-length"]);
+    if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+      req.resume();
+      settle({ ok: false, error: "payload_too_large" });
+      return;
+    }
+
+    const chunks: Buffer[] = [];
+    let receivedBytes = 0;
+    req.on("data", (chunk: Buffer) => {
+      if (settled) return;
+      receivedBytes += chunk.length;
+      if (receivedBytes > maxBytes) {
+        chunks.length = 0;
+        settle({ ok: false, error: "payload_too_large" });
+        return;
+      }
+      chunks.push(chunk);
     });
     req.on("end", () => {
       try {
-        resolve({ ok: true, data: JSON.parse(rawBody || "{}") });
+        const rawBody = Buffer.concat(chunks).toString("utf8");
+        settle({ ok: true, data: JSON.parse(rawBody || "{}") });
       } catch {
-        resolve({ ok: false });
+        settle({ ok: false, error: "invalid_json" });
       }
     });
+    req.on("error", () => settle({ ok: false, error: "invalid_json" }));
   });
+}
+
+/** The response for a body readJsonBody rejected: 413 when too large, 400 when not valid JSON. */
+function writeBodyError(
+  res: import("node:http").ServerResponse,
+  body: Extract<ReadJsonBodyResult, { ok: false }>,
+): void {
+  if (body.error === "payload_too_large") {
+    // The client may still be uploading; close rather than keep the socket.
+    res.writeHead(413, { "content-type": "application/json", connection: "close" });
+    res.end(JSON.stringify({ error: "payload_too_large", max_bytes: MAX_REQUEST_BODY_BYTES }));
+    return;
+  }
+  res.writeHead(400, { "content-type": "application/json" });
+  res.end(JSON.stringify({ error: "invalid_json" }));
 }
 
 /**
@@ -688,8 +740,7 @@ export function createHttpServer(
     if (req.method === "POST" && req.url === "/theme") {
       readJsonBody(req).then((body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const result = setTheme(store, (body.data as { theme?: unknown }).theme);
@@ -717,8 +768,7 @@ export function createHttpServer(
     if (req.method === "POST" && req.url === "/agent-onboarding-dismissed") {
       readJsonBody(req).then((body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const result = setAgentOnboardingDismissed(store, (body.data as { dismissed?: unknown }).dismissed);
@@ -791,8 +841,7 @@ export function createHttpServer(
     if (req.method === "POST" && req.url === "/lanes") {
       readJsonBody(req).then((body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const result = addLane(registry, envFilePath, body.data as AddLaneInput);
@@ -860,8 +909,7 @@ export function createHttpServer(
     if (req.method === "POST" && req.url === "/routing-strategy") {
       readJsonBody(req).then((body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const result = setRoutingStrategy(store, (body.data as { strategy?: unknown }).strategy);
@@ -898,8 +946,7 @@ export function createHttpServer(
     if (req.method === "POST" && req.url === "/backoff-policy") {
       readJsonBody(req).then((body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const result = setBackoffPolicy(store, (body.data as { policy?: unknown }).policy);
@@ -946,8 +993,7 @@ export function createHttpServer(
       const provider = decodeURIComponent(backoffOverrideMatch[1]);
       readJsonBody(req).then((body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const result = setBackoffPolicyOverride(store, provider, (body.data as { policy?: unknown }).policy);
@@ -976,8 +1022,7 @@ export function createHttpServer(
     if (req.method === "POST" && req.url === "/backoff-policy/progressive-level-cap") {
       readJsonBody(req).then((body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const result = setBackoffProgressiveLevelCap(store, (body.data as { value?: unknown }).value);
@@ -1004,8 +1049,7 @@ export function createHttpServer(
     if (req.method === "POST" && req.url === "/backoff-policy/exponential-multiplier") {
       readJsonBody(req).then((body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const result = setBackoffExponentialMultiplier(store, (body.data as { value?: unknown }).value);
@@ -1032,8 +1076,7 @@ export function createHttpServer(
     if (req.method === "POST" && req.url === "/backoff-policy/exponential-ceiling-ms") {
       readJsonBody(req).then((body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const result = setBackoffExponentialCeilingMs(store, (body.data as { value?: unknown }).value);
@@ -1065,8 +1108,7 @@ export function createHttpServer(
     if (req.method === "POST" && req.url === "/desktop-icon") {
       readJsonBody(req).then((body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const result = setIcon(store, (body.data as { icon?: unknown }).icon);
@@ -1133,8 +1175,7 @@ export function createHttpServer(
     if (req.method === "POST" && req.url === "/route") {
       readJsonBody(req).then((body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const data = body.data as { task_id?: unknown; task_type?: unknown; estimated_cost?: unknown };
@@ -1167,8 +1208,7 @@ export function createHttpServer(
       const decisionId = decodeURIComponent(routeOutcomeMatch[1]);
       readJsonBody(req).then((body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const data = body.data as { outcome?: unknown; actual_cost?: unknown; metadata?: unknown };
@@ -1225,8 +1265,7 @@ export function createHttpServer(
       const modelId = decodeURIComponent(modelEnabledMatch[2]);
       readJsonBody(req).then((body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const enabled = (body.data as { enabled?: unknown }).enabled;
@@ -1284,8 +1323,7 @@ export function createHttpServer(
       const laneId = decodeURIComponent(overrideMatch[1]);
       readJsonBody(req).then((body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const { state, reason } = body.data as { state?: unknown; reason?: unknown };
@@ -1313,8 +1351,7 @@ export function createHttpServer(
       const laneId = decodeURIComponent(resetAtMatch[1]);
       readJsonBody(req).then((body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const resetAt = (body.data as { reset_at?: unknown }).reset_at;
@@ -1345,8 +1382,7 @@ export function createHttpServer(
       const laneId = decodeURIComponent(headroomMatch[1]);
       readJsonBody(req).then((body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const headroom = (body.data as { headroom?: unknown }).headroom;
@@ -1372,8 +1408,7 @@ export function createHttpServer(
       const laneId = decodeURIComponent(costTierMatch[1]);
       readJsonBody(req).then((body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const costTier = (body.data as { cost_tier?: unknown }).cost_tier;
@@ -1428,8 +1463,7 @@ export function createHttpServer(
       const laneId = decodeURIComponent(laneStatusPushMatch[1]);
       readJsonBody(req).then((body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const { status } = body.data as { status?: unknown };

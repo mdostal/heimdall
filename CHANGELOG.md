@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **Runtime hardening for the long-running service (PANT-829).** Six ways the process could crash or grow without bound are fixed:
+  - Every SQLite connection that `StateStore` and `RouteLedger` open sets `PRAGMA busy_timeout = 5000`. The server, MCP and CLI processes share one WAL file, so colliding writes now wait instead of throwing `SQLITE_BUSY`.
+  - Background jobs run through `startBackgroundJob()`, which catches and logs errors. A throwing `restoreExpiredCaps()` no longer kills the process.
+  - `SIGTERM`/`SIGINT` run a graceful `shutdown()`: stop timers, drain the HTTP server (10s grace), close the DB, exit 0.
+  - An HTTP server `'error'` (e.g. `EADDRINUSE`) is logged clearly and exits 1.
+  - Request bodies are capped at 1 MiB and return 413 above that.
+  - `lane_status_history` and `telemetry_events` rows older than `HEIMDALL_RETENTION_DAYS` (default 30) are pruned at startup and daily. Each lane's latest status row is always kept.
+
 - **Lanes no longer all read `down` when Multica-autopilot scheduling isn't configured (PANT-753, heimdall#103).** With `MULTICA_AUTOPILOT_AGENT` unset, every lane logged a `MulticaAutopilotScheduler` start failure and sat on the StateStore's "no status recorded yet" `down` fallback. That all-down report can drive Pantheon's lane failover into archiving every agent. Multica-autopilot scheduling is now **opt-in**: it is only wired when `MULTICA_AUTOPILOT_AGENT` is set, because each trigger dispatches a full agent (LLM) session and spends quota on health checks. Probing stays in-process. `InProcessScheduler` probes never-probed lanes immediately at startup (new `initialDelayMs` option, `StateStore.hasRecordedStatus()`). `NodeCommandRunner` now has a default 120s timeout so a hung CLI probe can't wedge a lane. See the amendment in `docs/decisions/DEC-hdl-scheduler-backend.md`.
 
 ## [0.36.1] - 2026-09-07

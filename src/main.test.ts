@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
-import { composeService } from "./main.js";
+import { EventEmitter } from "node:events";
+import { createServer } from "node:net";
+import { composeService, installShutdownHandlers } from "./main.js";
 import type { CommandRunner } from "./core/scheduler/command-runner.js";
 
 function testEnv(): NodeJS.ProcessEnv {
@@ -499,5 +501,107 @@ test("POST /lanes/:laneId/refresh works end-to-end against the composed service"
     assert.equal(claudeLane.status, "up");
   } finally {
     service.stopAll();
+  }
+});
+
+function activeTimerCount(): number {
+  return process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+}
+
+test("PANT-829: shutdown() clears every timer composeService started and closes the server and DB — no leaked handles", async () => {
+  // Let timers left over from earlier tests in this file settle first.
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  const timersBefore = activeTimerCount();
+
+  const env = {
+    ...testEnv(),
+    // Two credentialed claude lanes, so a cap-reset rotation job starts too.
+    HEIMDALL_LANE_3_ID: "claude@second",
+    HEIMDALL_LANE_3_PROVIDER: "claude",
+    HEIMDALL_LANE_3_CREDENTIAL_REF: "CLAUDE_TOKEN_2",
+    CLAUDE_TOKEN_2: "sk-ant-fake-2",
+  };
+  const service = composeService({
+    env,
+    commandRunner: mockCommandRunner(),
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port: 0,
+  });
+  assert.equal(service.rotationControllers.size, 1, "fixture should exercise the cap-reset job");
+  await new Promise<void>((resolve) => service.httpServer.listen(0, resolve));
+  assert.ok(activeTimerCount() > timersBefore, "composeService should have started timers");
+
+  // A keep-alive client connection that would otherwise hold server.close() open.
+  const { port } = service.httpServer.address() as AddressInfo;
+  assert.equal((await fetch(`http://localhost:${port}/healthz`)).status, 200);
+
+  await service.shutdown({ graceMs: 200 });
+
+  assert.equal(service.httpServer.listening, false);
+  assert.equal(activeTimerCount(), timersBefore, `leaked timers: ${JSON.stringify(process.getActiveResourcesInfo())}`);
+  assert.throws(() => service.store.listLanes(), /not open|closed/i, "the DB must be closed");
+  // Idempotent — a second shutdown/stopAll after the first is a no-op.
+  await service.shutdown();
+  service.stopAll();
+});
+
+test("PANT-829: SIGTERM/SIGINT run the graceful shutdown then exit 0; a second signal exits 1 immediately", async () => {
+  const signals = new EventEmitter();
+  const exits: number[] = [];
+  let shutdowns = 0;
+  let finishShutdown!: () => void;
+  const uninstall = installShutdownHandlers(
+    {
+      shutdown: () => {
+        shutdowns += 1;
+        return new Promise<void>((resolve) => {
+          finishShutdown = resolve;
+        });
+      },
+    },
+    { exit: (code) => exits.push(code), signals },
+  );
+
+  signals.emit("SIGTERM", "SIGTERM");
+  assert.equal(shutdowns, 1);
+  assert.deepEqual(exits, [], "must not exit before shutdown finishes");
+
+  signals.emit("SIGINT", "SIGINT");
+  assert.deepEqual(exits, [1], "a second signal while shutting down forces exit");
+
+  finishShutdown();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(exits, [1, 0]);
+  assert.equal(shutdowns, 1);
+
+  uninstall();
+  assert.equal(signals.listenerCount("SIGTERM"), 0);
+  assert.equal(signals.listenerCount("SIGINT"), 0);
+});
+
+test("PANT-829: an HTTP server 'error' such as EADDRINUSE is reported, not an uncaught crash", async () => {
+  const blocker = createServer();
+  await new Promise<void>((resolve) => blocker.listen(0, resolve));
+  const { port } = blocker.address() as AddressInfo;
+
+  const errors: Error[] = [];
+  const service = composeService({
+    env: testEnv(),
+    commandRunner: mockCommandRunner(),
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port,
+    onFatalServerError: (err) => errors.push(err),
+  });
+
+  try {
+    service.httpServer.listen(port);
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    assert.equal(errors.length, 1);
+    assert.equal((errors[0] as NodeJS.ErrnoException).code, "EADDRINUSE");
+  } finally {
+    service.stopAll();
+    blocker.close();
   }
 });
