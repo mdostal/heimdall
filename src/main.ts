@@ -27,6 +27,7 @@ import {
   geminiAdapters,
   kimiAdapters,
   openrouterAdapters,
+  grokAdapters,
   ollamaAdapters,
   type ProviderAdapters,
 } from "./core/lane-pipeline.js";
@@ -47,6 +48,7 @@ const PROVIDER_ADAPTERS: Record<string, () => ProviderAdapters> = {
   gemini: geminiAdapters,
   kimi: kimiAdapters,
   openrouter: openrouterAdapters,
+  grok: grokAdapters,
   ollama: ollamaAdapters,
 };
 
