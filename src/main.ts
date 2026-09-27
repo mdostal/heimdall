@@ -1,8 +1,9 @@
 // Real service entrypoint — composes everything built across the
 // lane-health-status, hdl-scheduler, and hdl-actuation epics into one
 // running Heimdall: lane registry + state store + Argus telemetry + per-lane
-// MulticaAutopilotScheduler (coarse, default) + InProcessScheduler (fine,
-// suspect-lane-only) + a shared status-watcher loop that calls
+// InProcessScheduler (probes never-probed lanes at startup, fine ~5s while suspect, periodic
+// while healthy) + an opt-in per-lane MulticaAutopilotScheduler (only when
+// MULTICA_AUTOPILOT_AGENT is set — PANT-753) + a shared status-watcher loop that calls
 // ControlAdapter.reconcile() every tick for every lane — StubControlAdapter
 // for every lane, unconditionally.
 //
@@ -122,6 +123,13 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
   const sharedStubControlAdapter = new StubControlAdapter();
   const controlAdapters = new Map<string, ControlAdapter>();
 
+  const autopilotAgent = env.MULTICA_AUTOPILOT_AGENT || undefined;
+  if (!autopilotAgent) {
+    console.log(
+      "[main] MULTICA_AUTOPILOT_AGENT not set — Multica-autopilot scheduling disabled; lanes are probed in-process only.",
+    );
+  }
+
   const pipelines = new Map<string, LanePipeline>();
   const multicaSchedulers: MulticaAutopilotScheduler[] = [];
   const inProcessSchedulers: InProcessScheduler[] = [];
@@ -148,26 +156,44 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     );
     pipelines.set(lane.lane_id, pipeline);
 
-    const multicaScheduler = new MulticaAutopilotScheduler({
-      lane,
-      cron: env.HEIMDALL_AUTOPILOT_CRON ?? DEFAULT_AUTOPILOT_CRON,
-      description:
-        `Trigger a Heimdall lane refresh by sending: ` +
-        `POST http://localhost:${port}/lanes/${encodeURIComponent(lane.lane_id)}/refresh`,
-      commandRunner: options.commandRunner,
-      argus,
-    });
-    try {
-      multicaScheduler.start();
-    } catch (err) {
-      // Per-lane failure isolation (REQ-07 precedent): one lane's bad config
-      // (e.g. missing MULTICA_AUTOPILOT_AGENT) must not prevent every other
-      // lane's scheduling from starting.
-      console.error(`[main] failed to start MulticaAutopilotScheduler for lane ${lane.lane_id}:`, err);
+    // PANT-753 (heimdall#103): Multica-autopilot scheduling is OPT-IN, enabled
+    // only when MULTICA_AUTOPILOT_AGENT is configured. An autopilot trigger
+    // dispatches a full agent (LLM) session, so scheduling health probes that
+    // way spends subscription quota on health checks. Without it, every lane
+    // is still probed by its InProcessScheduler below (first probe at startup)
+    // — a missing autopilot config never leaves a lane unprobed/"down".
+    if (autopilotAgent) {
+      const multicaScheduler = new MulticaAutopilotScheduler({
+        lane,
+        cron: env.HEIMDALL_AUTOPILOT_CRON ?? DEFAULT_AUTOPILOT_CRON,
+        description:
+          `Trigger a Heimdall lane refresh by sending: ` +
+          `POST http://localhost:${port}/lanes/${encodeURIComponent(lane.lane_id)}/refresh`,
+        agent: autopilotAgent,
+        commandRunner: options.commandRunner,
+        argus,
+      });
+      try {
+        multicaScheduler.start();
+      } catch (err) {
+        // Per-lane failure isolation (REQ-07 precedent): one lane's bad config
+        // (e.g. an invalid HEIMDALL_AUTOPILOT_CRON) must not prevent every
+        // other lane's scheduling from starting.
+        console.error(`[main] failed to start MulticaAutopilotScheduler for lane ${lane.lane_id}:`, err);
+      }
+      multicaSchedulers.push(multicaScheduler);
     }
-    multicaSchedulers.push(multicaScheduler);
 
-    const inProcessScheduler = new InProcessScheduler({ lane, pipeline, store, argus });
+    // A lane with no recorded status reads as the StateStore's "down"
+    // fallback until probed — probe it right away rather than a full
+    // interval later, so a fresh start never reports every lane down.
+    const inProcessScheduler = new InProcessScheduler({
+      lane,
+      pipeline,
+      store,
+      argus,
+      initialDelayMs: store.hasRecordedStatus(lane.lane_id) ? undefined : 0,
+    });
     inProcessScheduler.start();
     inProcessSchedulers.push(inProcessScheduler);
 

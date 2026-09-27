@@ -99,9 +99,9 @@ See [Configuration Reference](configuration.md#argus--otel-telemetry) for the fu
 
 ## Multica autopilot integration
 
-Heimdall schedules coarse lane health checks as Multica autopilots. When a check fires, Multica dispatches the `MULTICA_AUTOPILOT_AGENT` agent to call `POST /lanes/:id/refresh`.
+Probe scheduling lives inside Heimdall by default: the in-process scheduler probes every never-probed lane at startup, re-probes suspect lanes every ~5s (with backoff), and refreshes healthy lanes periodically. No Multica configuration is needed for lanes to report real status.
 
-This means Heimdall's coarse-cron schedule does not require a separate cron daemon — it delegates the timer to Multica. The in-process scheduler handles fine-grained suspect-lane polling (~5s) independently.
+Multica-autopilot scheduling is **opt-in** (PANT-753): set `MULTICA_AUTOPILOT_AGENT` and Heimdall additionally registers a coarse-cron autopilot per lane; when it fires, Multica dispatches that agent to call `POST /lanes/:id/refresh`. Each firing is a full agent (LLM) session, so this spends subscription quota on health checks — only enable it if you want that trade-off.
 
 Lane status changes are reported to downstream consumers (like Auriga / Pantheon's control plane) via `GET /lanes` — Heimdall reports `multica_agent_ids` per lane so the facade knows which agents to enable/disable. **Heimdall itself no longer actuates Multica directly** (see [DEC-hdl-multica-disable-contract.md](decisions/DEC-hdl-multica-disable-contract.md) for the rationale).
 

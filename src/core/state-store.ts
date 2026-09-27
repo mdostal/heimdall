@@ -293,6 +293,15 @@ export class StateStore {
     };
   }
 
+  /** True once any status has been recorded for this lane — false while
+   * getCurrentStatus is still returning its "no status recorded yet"
+   * fallback. main.ts uses this to probe never-probed lanes at startup. */
+  hasRecordedStatus(laneId: string): boolean {
+    return (
+      this.db.prepare(`SELECT 1 FROM lane_status_history WHERE lane_id = ? LIMIT 1`).get(laneId) !== undefined
+    );
+  }
+
   /** Timestamp of the most recent status entry recorded from a specific
    * signal source for this lane, or null if none exists yet. Used by
    * escalation.ts (via lane-pipeline.ts) to decide staleness per source. */

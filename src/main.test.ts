@@ -74,6 +74,47 @@ test("composeService wires one MulticaAutopilotScheduler + one InProcessSchedule
   service.stopAll();
 });
 
+test("PANT-753: without MULTICA_AUTOPILOT_AGENT, no autopilot is registered and every lane is still probed at startup (never left on the all-down fallback)", async () => {
+  const env = testEnv();
+  delete env.MULTICA_AUTOPILOT_AGENT;
+  const commandCalls: string[][] = [];
+  const service = composeService({
+    env,
+    commandRunner: {
+      run: async (command: string, args: string[]) => {
+        commandCalls.push([command, ...args]);
+        return { stdout: "{}", stderr: "" };
+      },
+    },
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port: 0,
+  });
+
+  assert.equal(service.multicaSchedulers.length, 0, "autopilot scheduling is opt-in — no agent, no autopilot");
+  assert.equal(service.inProcessSchedulers.length, 2);
+
+  // The InProcessSchedulers' first poll fires at startup (initialDelayMs: 0),
+  // not after the 5s interval — wait for both lanes' first real probe.
+  const deadline = Date.now() + 2_000;
+  const laneIds = ["claude@mathew.dostal", "codex"];
+  while (Date.now() < deadline) {
+    if (laneIds.every((id) => service.store.getCurrentStatus(id)?.signal_source === "active_probe")) break;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  for (const id of laneIds) {
+    const current = service.store.getCurrentStatus(id);
+    assert.equal(current?.status, "up", `${id} should be probed up at startup, got ${current?.status} (${current?.reason})`);
+  }
+  assert.deepEqual(
+    commandCalls.filter((c) => c[0] === "multica"),
+    [],
+    "no multica autopilot CLI calls — autopilot triggers dispatch LLM sessions and spend quota",
+  );
+
+  service.stopAll();
+});
+
 test("hdl-rr-04: a provider with only 1 credentialed lane gets no RotationController", () => {
   const service = composeService({
     env: testEnv(), // one claude lane, one codex lane — 1 each
@@ -403,6 +444,9 @@ test("the shared status watcher calls reconcile() for every lane on each tick, n
     port: 0,
     statusWatcherIntervalMs: 10,
   });
+  // Isolate the status watcher: stop the InProcessSchedulers before their
+  // startup probe (PANT-753) can overwrite the seeded status below.
+  for (const s of service.inProcessSchedulers) s.stop();
 
   service.store.recordStatus({
     lane_id: "claude@mathew.dostal",

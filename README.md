@@ -145,14 +145,16 @@ npm run dev:http-only  # HTTP server only, no scheduling (isolated debugging)
 ```
 
 Runs `src/main.ts` — the full composed service: lane registry + SQLite state
-store + Argus OTEL telemetry + a per-lane `MulticaAutopilotScheduler` (coarse
-cron, default) and `InProcessScheduler` (fine ~5s, suspect-lane only) + the
+store + Argus OTEL telemetry + a per-lane `InProcessScheduler` (probes
+never-probed lanes at startup, fine ~5s while suspect, periodic while healthy)
+and an opt-in `MulticaAutopilotScheduler` (coarse cron) + the
 HTTP server on `http://localhost:4870` (override with `PORT=<n>`). See
 [`docs/decisions/DEC-hdl-scheduler-backend.md`](docs/decisions/DEC-hdl-scheduler-backend.md)
 for the scheduler design and the `multica-native-no-box-runners` HARD LAW it
-satisfies. Requires `MULTICA_AUTOPILOT_AGENT` to be set (see `.env.example`)
-for the Multica backend to register cron triggers; missing it fails that
-lane's coarse scheduling clearly without crashing the rest of the service.
+satisfies. The Multica backend is opt-in: it registers cron triggers only
+when `MULTICA_AUTOPILOT_AGENT` is set (see `.env.example`). Each trigger
+dispatches a full agent session and spends quota, so it is off by default —
+lanes are still probed in-process without it (PANT-753).
 
 `GET /lanes` reads the SQLite state store (override the DB path with
 `HEIMDALL_DB_PATH`, default in-memory), reflecting whatever each provider's

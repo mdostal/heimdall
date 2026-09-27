@@ -37,6 +37,18 @@ Beyond the two already-built query surfaces (agent-call/MCP, API-call/HTTP+CLI),
 
 Every tick (from either backend) and every status flip emits an OTLP span to **Argus** (Pantheon's observability god — confirmed live at Tailscale `<build-box-ip>`, OTLP `4327` gRPC / `4328` HTTP, feeding Langfuse traces/cost + SigNoz infra) via `ArgusClient` — the first Node/TypeScript OTLP emitter in Pantheon. Fire-and-forget: Argus being unreachable never breaks Heimdall's core health-check function.
 
+## Amended 2026-09-27 (PANT-753, heimdall#103): Multica autopilot is opt-in
+
+On hive, dev ran with `MULTICA_AUTOPILOT_AGENT` unset. Every lane logged a `MulticaAutopilotScheduler` start failure and every lane read `down` (the StateStore's "no status recorded yet" fallback), which can drive Pantheon's lane failover into archiving every agent. Separately, an autopilot trigger dispatches a full agent (LLM) session, so scheduling health probes through autopilots spends subscription quota on health checks.
+
+Changes:
+
+- `MulticaAutopilotScheduler` is **opt-in**. `main.ts` builds it only when `MULTICA_AUTOPILOT_AGENT` is set. A missing agent is logged once as "disabled" rather than as a per-lane failure.
+- `InProcessScheduler` is the default scheduler for every lane. It probes a lane with no recorded status immediately at startup (`initialDelayMs: 0`) instead of one interval later. A missing scheduler config can no longer leave lanes on the all-down fallback.
+- `NodeCommandRunner` has a default 120s timeout, so a hung CLI probe (e.g. `claude -p`) can't hold a lane's in-flight refresh open forever.
+
+This stays within the HARD LAW: the in-process scheduler is the service's own event loop, not a box cron/launchd daemon.
+
 ## What's still deferred
 
 - Real Multica runtime on/off API calls (actuation stub stays a stub) — future epic, once that API/contract exists.

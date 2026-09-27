@@ -59,6 +59,10 @@ export interface InProcessSchedulerOptions {
   store: StateStore;
   argus: ArgusEmitter;
   intervalMs?: number;
+  /** Delay before the first poll after start(). Defaults to intervalMs.
+   * main.ts passes 0 so every lane is probed right at startup instead of
+   * sitting on StateStore's "no status recorded yet" (down) fallback. */
+  initialDelayMs?: number;
   setTimeoutImpl?: typeof setTimeout;
   clearTimeoutImpl?: typeof clearTimeout;
   onError?: (err: unknown, lane: Lane) => void;
@@ -111,7 +115,7 @@ export class InProcessScheduler implements Scheduler {
 
   start(): void {
     this.stopped = false;
-    this.scheduleNext(this.intervalMs);
+    this.scheduleNext(this.opts.initialDelayMs ?? this.intervalMs);
   }
 
   stop(): void {

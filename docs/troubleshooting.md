@@ -132,7 +132,7 @@ Note: `claude mcp list` health-checks every registered server, which is slow (30
 
 ## Multica autopilot not triggering
 
-Verify:
+Multica-autopilot scheduling is opt-in — with `MULTICA_AUTOPILOT_AGENT` unset, no autopilots are registered by design and lanes are probed in-process only (startup logs `Multica-autopilot scheduling disabled`). If you did opt in, verify:
 1. `MULTICA_AUTOPILOT_AGENT` is set and names a real, active agent in your workspace.
 2. The agent has permission to call `POST /lanes/:id/refresh` on the Heimdall instance.
 3. Heimdall's HTTP server is reachable from the Multica runtime (same host or correct network config).
