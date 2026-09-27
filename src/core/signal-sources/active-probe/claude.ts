@@ -83,6 +83,19 @@ export async function probeClaudeSubscriptionLane(
       env: { CLAUDE_CODE_OAUTH_TOKEN: credential },
     });
   } catch (err) {
+    // A non-zero exit from the Claude CLI can mean two different things:
+    // - Real auth failure (invalid/expired token) → auth_failed, down
+    // - Weekly usage cap hit → quota_exceeded, out_of_credit
+    // parseClaudeCapSignal inspects the error message and distinguishes them.
+    const capSignal = parseClaudeCapSignal(err);
+    if (capSignal?.kind === "weekly_limit") {
+      return {
+        status: "out_of_credit",
+        reset_at: capSignal.reset_at,
+        reason: capSignal.reason,
+        error_code: "quota_exceeded",
+      };
+    }
     return {
       status: "down",
       reset_at: null,
