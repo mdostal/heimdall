@@ -33,7 +33,8 @@ import {
 } from "../core/scheduler/backoff-policies/registry.js";
 import { DEFAULT_INTERVAL_MS as BACKOFF_BASE_INTERVAL_MS } from "../core/scheduler/in-process-scheduler.js";
 import { StateStore, resolveDefaultDbPath, type ManualOverride } from "../core/state-store.js";
-import type { LaneStatus } from "../core/status-model.js";
+import type { LaneStatus, LaneStatusValue } from "../core/status-model.js";
+import { LANE_STATUS_VALUES } from "../core/status-model.js";
 import type { LaneAgentResolver } from "../core/actuation/lane-agent-resolver.js";
 import { renderDashboardHtml } from "./ui/dashboard.js";
 import { DOC_ENTRIES, getDocBySlug, renderDocMarkdown, renderDocsIndexHtml, renderDocPageHtml } from "./ui/docs-viewer.js";
@@ -601,6 +602,41 @@ export function getLaneStatuses(
  * here" from "no such route").
  */
 export type RefreshLaneFn = (laneId: string) => Promise<void>;
+
+export type PushLaneStatusResult =
+  | { ok: true; lane_id: string; status: LaneStatusValue; signal_source: "passive" }
+  | { ok: false; error: "unknown_lane"; lane_id: string }
+  | { ok: false; error: "invalid_status"; allowed_statuses: readonly LaneStatusValue[] };
+
+/**
+ * Records an externally-pushed lane status as `signal_source: "passive"`.
+ * Used by Pantheon's quota-failure watcher (PANT-185) to push
+ * `out_of_credit` the moment a task fails, rather than waiting for the next
+ * active probe cycle.  Heimdall's own actuation loop picks it up on the
+ * next reconcile tick (≤5 s).
+ */
+export function pushLaneStatus(
+  registry: LaneRegistry,
+  store: StateStore,
+  laneId: string,
+  rawStatus: unknown,
+): PushLaneStatusResult {
+  if (!registry.get(laneId)) {
+    return { ok: false, error: "unknown_lane", lane_id: laneId };
+  }
+  if (typeof rawStatus !== "string" || !(LANE_STATUS_VALUES as readonly string[]).includes(rawStatus)) {
+    return { ok: false, error: "invalid_status", allowed_statuses: LANE_STATUS_VALUES };
+  }
+  store.recordStatus({
+    lane_id: laneId,
+    status: rawStatus as LaneStatusValue,
+    reset_at: null,
+    reason: "pushed by external observer",
+    signal_source: "passive",
+    observed_at: new Date().toISOString(),
+  });
+  return { ok: true, lane_id: laneId, status: rawStatus as LaneStatusValue, signal_source: "passive" };
+}
 
 export function createHttpServer(
   registry: LaneRegistry,
@@ -1379,6 +1415,36 @@ export function createHttpServer(
       const { ok: _ok, ...wire } = result;
       res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify(wire));
+      return;
+    }
+
+    // PANT-185: passive lane-status push — external observers (Pantheon's
+    // quota-failure watcher) send PATCH /lanes/:id with { status: "..." }
+    // to update Heimdall's StateStore immediately, without waiting for the
+    // next active probe cycle.  signal_source is fixed to "passive" so the
+    // dashboard / CLI can distinguish pushed updates from probed ones.
+    const laneStatusPushMatch = req.method === "PATCH" && req.url?.match(/^\/lanes\/([^/]+)$/);
+    if (laneStatusPushMatch) {
+      const laneId = decodeURIComponent(laneStatusPushMatch[1]);
+      readJsonBody(req).then((body) => {
+        if (!body.ok) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_json" }));
+          return;
+        }
+        const { status } = body.data as { status?: unknown };
+        const result = pushLaneStatus(registry, store, laneId, status);
+        if (!result.ok) {
+          const httpStatus = result.error === "unknown_lane" ? 404 : 400;
+          const { ok: _ok, ...wire } = result;
+          res.writeHead(httpStatus, { "content-type": "application/json" });
+          res.end(JSON.stringify(wire));
+          return;
+        }
+        const { ok: _ok, ...wire } = result;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(wire));
+      });
       return;
     }
 
