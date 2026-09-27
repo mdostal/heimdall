@@ -9,8 +9,15 @@ import {
 import { StateStore } from "./state-store.js";
 
 test("PANT-829: a background job that throws is logged and the next tick still runs", async () => {
+  // Wait for three ticks rather than a fixed wall-clock window, so a slow
+  // event loop can't make this flaky; the timeout only bounds a real hang.
+  const TARGET_TICKS = 3;
   let calls = 0;
   const errors: unknown[] = [];
+  let reachedTarget!: () => void;
+  const ticked = new Promise<void>((resolve) => {
+    reachedTarget = resolve;
+  });
   const job = startBackgroundJob(
     {
       name: "always-throws",
@@ -19,16 +26,32 @@ test("PANT-829: a background job that throws is logged and the next tick still r
         throw new Error(`boom ${calls}`);
       },
     },
-    { intervalMs: 5, onError: (err) => errors.push(err) },
+    {
+      intervalMs: 5,
+      onError: (err) => {
+        errors.push(err);
+        if (errors.length === TARGET_TICKS) reachedTarget();
+      },
+    },
   );
 
+  let timeout: NodeJS.Timeout | undefined;
   try {
-    await new Promise<void>((resolve) => setTimeout(resolve, 60));
+    await Promise.race([
+      ticked,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`expected the job to keep ticking after throwing, got ${calls} call(s)`)),
+          5_000,
+        );
+      }),
+    ]);
   } finally {
+    clearTimeout(timeout);
     job.stop();
   }
 
-  assert.ok(calls >= 3, `expected the job to keep ticking after throwing, got ${calls} call(s)`);
+  assert.ok(calls >= TARGET_TICKS);
   assert.equal(errors.length, calls, "every thrown error must reach onError, none escape as uncaught");
   assert.match(String(errors[0]), /boom 1/);
 });

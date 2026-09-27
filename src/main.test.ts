@@ -504,15 +504,77 @@ test("POST /lanes/:laneId/refresh works end-to-end against the composed service"
   }
 });
 
-function activeTimerCount(): number {
-  return process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Records every timer created while installed and whether it was cleared or
+ * (for one-shot timeouts) has fired. Checking these specific handles, rather
+ * than the process-wide timer count, keeps the leak check independent of
+ * timers left behind by other tests and of how fast the event loop runs.
+ */
+function trackTimers() {
+  const originals = {
+    setTimeout: globalThis.setTimeout,
+    setInterval: globalThis.setInterval,
+    clearTimeout: globalThis.clearTimeout,
+    clearInterval: globalThis.clearInterval,
+  };
+  const live = new Map<unknown, string>();
+  const release = (handle: unknown) => {
+    live.delete(handle);
+  };
+
+  const patched = {} as typeof originals;
+  patched.setTimeout = ((fn: (...a: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+    const handle = originals.setTimeout(
+      (...a: unknown[]) => {
+        release(handle);
+        fn(...a);
+      },
+      ms,
+      ...args,
+    );
+    live.set(handle, `setTimeout(${ms})`);
+    return handle;
+  }) as typeof setTimeout;
+  patched.setInterval = ((fn: (...a: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+    const handle = originals.setInterval(fn, ms, ...args);
+    live.set(handle, `setInterval(${ms})`);
+    return handle;
+  }) as typeof setInterval;
+  patched.clearTimeout = ((handle?: Parameters<typeof clearTimeout>[0]) => {
+    release(handle);
+    originals.clearTimeout(handle);
+  }) as typeof clearTimeout;
+  patched.clearInterval = ((handle?: Parameters<typeof clearInterval>[0]) => {
+    release(handle);
+    originals.clearInterval(handle);
+  }) as typeof clearInterval;
+
+  const tracker = {
+    created: () => live.size,
+    live: () => [...live.values()],
+    install: () => Object.assign(globalThis, patched),
+    restore: () => Object.assign(globalThis, originals),
+  };
+  tracker.install();
+  return tracker;
 }
 
 test("PANT-829: shutdown() clears every timer composeService started and closes the server and DB — no leaked handles", async () => {
-  // Let timers left over from earlier tests in this file settle first.
-  await new Promise<void>((resolve) => setTimeout(resolve, 20));
-  const timersBefore = activeTimerCount();
-
+  const timers = trackTimers();
   const env = {
     ...testEnv(),
     // Two credentialed claude lanes, so a cap-reset rotation job starts too.
@@ -521,25 +583,36 @@ test("PANT-829: shutdown() clears every timer composeService started and closes 
     HEIMDALL_LANE_3_CREDENTIAL_REF: "CLAUDE_TOKEN_2",
     CLAUDE_TOKEN_2: "sk-ant-fake-2",
   };
-  const service = composeService({
-    env,
-    commandRunner: mockCommandRunner(),
-    fetchImpl: mockFetch(),
-    skipHttpListen: true,
-    port: 0,
-  });
+  let service: ReturnType<typeof composeService>;
+  try {
+    service = composeService({
+      env,
+      commandRunner: mockCommandRunner(),
+      fetchImpl: mockFetch(),
+      skipHttpListen: true,
+      port: 0,
+    });
+  } finally {
+    timers.restore();
+  }
   assert.equal(service.rotationControllers.size, 1, "fixture should exercise the cap-reset job");
   await new Promise<void>((resolve) => service.httpServer.listen(0, resolve));
-  assert.ok(activeTimerCount() > timersBefore, "composeService should have started timers");
+  assert.ok(timers.created() > 0, "composeService should have started timers");
 
   // A keep-alive client connection that would otherwise hold server.close() open.
   const { port } = service.httpServer.address() as AddressInfo;
   assert.equal((await fetch(`http://localhost:${port}/healthz`)).status, 200);
 
-  await service.shutdown({ graceMs: 200 });
+  // shutdown() starts (and must clear) its own force-close timer, so track it too.
+  timers.install();
+  try {
+    await service.shutdown({ graceMs: 200 });
+  } finally {
+    timers.restore();
+  }
 
   assert.equal(service.httpServer.listening, false);
-  assert.equal(activeTimerCount(), timersBefore, `leaked timers: ${JSON.stringify(process.getActiveResourcesInfo())}`);
+  assert.deepEqual(timers.live(), [], "every timer composeService started must be cleared by shutdown()");
   assert.throws(() => service.store.listLanes(), /not open|closed/i, "the DB must be closed");
   // Idempotent — a second shutdown/stopAll after the first is a no-op.
   await service.shutdown();
@@ -586,18 +659,27 @@ test("PANT-829: an HTTP server 'error' such as EADDRINUSE is reported, not an un
   const { port } = blocker.address() as AddressInfo;
 
   const errors: Error[] = [];
+  let reported!: () => void;
+  const errorReported = new Promise<void>((resolve) => {
+    reported = resolve;
+  });
   const service = composeService({
     env: testEnv(),
     commandRunner: mockCommandRunner(),
     fetchImpl: mockFetch(),
     skipHttpListen: true,
     port,
-    onFatalServerError: (err) => errors.push(err),
+    onFatalServerError: (err) => {
+      errors.push(err);
+      reported();
+    },
   });
 
   try {
     service.httpServer.listen(port);
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    await withTimeout(errorReported, 5_000, "onFatalServerError was never called");
+    // Let any duplicate 'error' emission surface before counting.
+    await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(errors.length, 1);
     assert.equal((errors[0] as NodeJS.ErrnoException).code, "EADDRINUSE");
   } finally {
