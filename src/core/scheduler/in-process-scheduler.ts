@@ -23,6 +23,13 @@ import {
 
 const SUSPECT_STATUSES: readonly LaneStatusValue[] = ["degraded", "down", "out_of_credit"];
 
+// How often to run a full refresh() on a lane that is healthy ("up") — not
+// to detect failures faster (the 5s polling loop already reads status on every
+// tick and will catch any new status write the moment it lands) but to keep
+// last_updated fresh so operators can see the lane is actively being monitored,
+// not just sitting on a stale timestamp from when it last recovered.
+const HEALTHY_PROBE_INTERVAL_MS = 5 * 60_000;
+
 // hdl-error-taxonomy: the fine ~5s cadence exists to catch a lane
 // self-healing within the 10-second SLA (test/sla-harness's own finding:
 // slower than ~5s risks missing the 2-tick corroboration window — see
@@ -212,11 +219,27 @@ export class InProcessScheduler implements Scheduler {
       } finally {
         this.refreshInFlight = false;
       }
+    } else if (current?.status === "up" && !this.refreshInFlight) {
+      // Healthy lane — still refresh periodically so last_updated stays
+      // current and operators can tell the lane is actively being monitored.
+      // The lane itself decides the escalation path (passive → public-status →
+      // active probe via decideSignalSource), keeping the probe cost low.
+      const lastUpdatedMs = Date.parse(current.last_updated);
+      const nowMs = Date.parse(this.nowImpl());
+      if (nowMs - lastUpdatedMs >= HEALTHY_PROBE_INTERVAL_MS) {
+        this.refreshInFlight = true;
+        try {
+          await this.opts.pipeline.refresh(this.opts.lane);
+        } catch (err) {
+          this.onError(err, this.opts.lane);
+        } finally {
+          this.refreshInFlight = false;
+        }
+      }
     }
-    // Lane is healthy (or a refresh is already in-flight — overlap guard):
-    // no refresh() call this cycle. This IS the "backs off when healthy"
-    // behavior — the expensive work (refresh) stops immediately; only the
-    // cheap local status read continues.
+    // A refresh is already in-flight (overlap guard): no refresh() call this
+    // cycle. The expensive work (refresh) is throttled; only the cheap local
+    // status read continues.
 
     // Re-read after any refresh() above so a fresh reset_at (or recovery)
     // informs the NEXT delay. A healthy lane always gets the flat interval
