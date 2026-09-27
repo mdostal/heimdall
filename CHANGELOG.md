@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Lanes no longer all read `down` when Multica-autopilot scheduling isn't configured (PANT-753, heimdall#103).** With `MULTICA_AUTOPILOT_AGENT` unset, every lane logged a `MulticaAutopilotScheduler` start failure and sat on the StateStore's "no status recorded yet" `down` fallback. That all-down report can drive Pantheon's lane failover into archiving every agent. Multica-autopilot scheduling is now **opt-in**: it is only wired when `MULTICA_AUTOPILOT_AGENT` is set, because each trigger dispatches a full agent (LLM) session and spends quota on health checks. Probing stays in-process. `InProcessScheduler` probes never-probed lanes immediately at startup (new `initialDelayMs` option, `StateStore.hasRecordedStatus()`). `NodeCommandRunner` now has a default 120s timeout so a hung CLI probe can't wedge a lane. See the amendment in `docs/decisions/DEC-hdl-scheduler-backend.md`.
+
 ## [0.36.1] - 2026-09-07
 
 ### Fixed

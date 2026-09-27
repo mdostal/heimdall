@@ -68,7 +68,7 @@ OLLAMA_DUMMY=local
 
 | Variable | Required | Description |
 |---|---|---|
-| `MULTICA_AUTOPILOT_AGENT` | Yes (for scheduling) | Multica agent ID dispatched when the coarse-cron autopilot fires. Any active agent in your workspace works. |
+| `MULTICA_AUTOPILOT_AGENT` | No (opt-in) | Enables Multica-autopilot scheduling: the agent ID dispatched when a lane's coarse-cron autopilot fires. Each trigger dispatches a full agent (LLM) session and spends quota — leave unset to rely on in-process probing only (the default). |
 
 ## Argus / OTEL telemetry
 

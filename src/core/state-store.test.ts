@@ -186,6 +186,23 @@ test("getLastObservedAt breaks observed_at ties by insertion order (rowid)", () 
   store.close();
 });
 
+test("hasRecordedStatus is false while only the no-status fallback exists, true once a status is recorded", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+
+  assert.equal(store.hasRecordedStatus("claude@mathew.dostal"), false);
+  store.recordStatus({
+    lane_id: "claude@mathew.dostal",
+    status: "up",
+    reset_at: null,
+    reason: null,
+    signal_source: "active_probe",
+    observed_at: "2026-07-25T12:00:00.000Z",
+  });
+  assert.equal(store.hasRecordedStatus("claude@mathew.dostal"), true);
+  store.close();
+});
+
 test("upsertLane updates provider/credential_ref without duplicating the row", () => {
   const store = new StateStore(":memory:");
   store.upsertLane({ lane_id: "codex", provider: "codex", credential_ref: "OLD_REF" });
