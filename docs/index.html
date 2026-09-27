@@ -1,0 +1,728 @@
+---
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Heimdall — Health-aware lane gateway and router for Pantheon. Watches every LLM/runtime lane, reports 4-state health, and routes agent tasks to the best healthy lane.">
+  <title>Heimdall — Health-aware lane gateway for Pantheon</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:          #0d1117;
+      --bg2:         #161b22;
+      --bg3:         #1c2128;
+      --border:      #30363d;
+      --text:        #e6edf3;
+      --text-muted:  #8b949e;
+      --accent:      #58a6ff;
+      --accent-dim:  #1f6feb;
+      --up:          #3fb950;
+      --degraded:    #d29922;
+      --credit:      #a371f7;
+      --down:        #f85149;
+      --radius:      8px;
+      --max-w:       1100px;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      font-size: 16px;
+      line-height: 1.6;
+    }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* ── NAV ── */
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(13,17,23,0.92);
+      backdrop-filter: blur(8px);
+      border-bottom: 1px solid var(--border);
+      padding: 0 1.5rem;
+    }
+    .nav-inner {
+      max-width: var(--max-w);
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 56px;
+    }
+    .nav-brand {
+      font-weight: 700;
+      font-size: 1.1rem;
+      color: var(--text);
+      letter-spacing: -0.02em;
+    }
+    .nav-brand span { color: var(--accent); }
+    .nav-links {
+      display: flex;
+      gap: 1.5rem;
+      list-style: none;
+      font-size: 0.875rem;
+    }
+    .nav-links a { color: var(--text-muted); transition: color 0.15s; }
+    .nav-links a:hover { color: var(--text); text-decoration: none; }
+
+    /* ── HERO ── */
+    #hero {
+      padding: 5rem 1.5rem 4rem;
+      text-align: center;
+      border-bottom: 1px solid var(--border);
+      background: radial-gradient(ellipse 80% 60% at 50% -10%, rgba(31,111,235,0.12), transparent);
+    }
+    .hero-inner { max-width: 760px; margin: 0 auto; }
+
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.25rem 0.75rem;
+      background: rgba(88,166,255,0.1);
+      border: 1px solid rgba(88,166,255,0.25);
+      border-radius: 20px;
+      font-size: 0.8rem;
+      color: var(--accent);
+      margin-bottom: 1.5rem;
+    }
+    .hero-badge::before {
+      content: "";
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--up);
+      box-shadow: 0 0 6px var(--up);
+    }
+
+    h1 {
+      font-size: clamp(2.8rem, 6vw, 4.5rem);
+      font-weight: 800;
+      letter-spacing: -0.04em;
+      line-height: 1.05;
+      margin-bottom: 0.6rem;
+    }
+    h1 .accent { color: var(--accent); }
+
+    .tagline {
+      font-size: clamp(1rem, 2vw, 1.3rem);
+      color: var(--text-muted);
+      margin-bottom: 1.25rem;
+      font-weight: 400;
+    }
+
+    .value-prop {
+      font-size: clamp(1.1rem, 2.5vw, 1.5rem);
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 2.5rem;
+    }
+
+    /* health status pills */
+    .health-pills {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 0.6rem;
+      margin-bottom: 2.5rem;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.3rem 0.8rem;
+      border-radius: 20px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      border: 1px solid;
+    }
+    .pill-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+    }
+    .pill-up     { background: rgba(63,185,80,0.1);   border-color: rgba(63,185,80,0.35);  color: var(--up);      }
+    .pill-up     .pill-dot { background: var(--up);      box-shadow: 0 0 5px var(--up); }
+    .pill-degraded { background: rgba(210,153,34,0.1); border-color: rgba(210,153,34,0.35); color: var(--degraded); }
+    .pill-degraded .pill-dot { background: var(--degraded); }
+    .pill-credit { background: rgba(163,113,247,0.1);  border-color: rgba(163,113,247,0.35); color: var(--credit);  }
+    .pill-credit .pill-dot { background: var(--credit); }
+    .pill-down   { background: rgba(248,81,73,0.1);   border-color: rgba(248,81,73,0.35);  color: var(--down);    }
+    .pill-down   .pill-dot { background: var(--down); }
+
+    .hero-actions {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+    }
+    .btn {
+      display: inline-block;
+      padding: 0.65rem 1.4rem;
+      border-radius: var(--radius);
+      font-size: 0.95rem;
+      font-weight: 600;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+    .btn:hover { opacity: 0.85; transform: translateY(-1px); text-decoration: none; }
+    .btn-primary { background: var(--accent); color: #0d1117; }
+    .btn-secondary { background: var(--bg2); border: 1px solid var(--border); color: var(--text); }
+
+    /* ── SECTIONS ── */
+    section { padding: 4rem 1.5rem; border-bottom: 1px solid var(--border); }
+    .section-inner { max-width: var(--max-w); margin: 0 auto; }
+
+    .section-label {
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 0.5rem;
+    }
+    h2 {
+      font-size: clamp(1.5rem, 3vw, 2.2rem);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      margin-bottom: 0.75rem;
+    }
+    .section-lead {
+      font-size: 1.05rem;
+      color: var(--text-muted);
+      max-width: 640px;
+      margin-bottom: 2.5rem;
+    }
+
+    /* ── CAPABILITY CARDS ── */
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 1rem;
+    }
+    .card {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .card:hover {
+      border-color: var(--accent-dim);
+      box-shadow: 0 0 0 1px var(--accent-dim);
+    }
+    .card-icon {
+      font-size: 1.6rem;
+      margin-bottom: 0.75rem;
+    }
+    .card h3 {
+      font-size: 1rem;
+      font-weight: 700;
+      margin-bottom: 0.4rem;
+    }
+    .card p {
+      font-size: 0.875rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+    .card-tag {
+      display: inline-block;
+      margin-top: 0.75rem;
+      font-size: 0.72rem;
+      font-weight: 600;
+      font-family: ui-monospace, Consolas, monospace;
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      background: rgba(88,166,255,0.1);
+      color: var(--accent);
+      border: 1px solid rgba(88,166,255,0.2);
+    }
+
+    /* ── QUICK START ── */
+    #quickstart { background: var(--bg); }
+
+    .install-block {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem 1.25rem;
+      margin-bottom: 1.5rem;
+      max-width: 660px;
+    }
+    .install-block code {
+      flex: 1;
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 0.9rem;
+      color: var(--text);
+      word-break: break-all;
+    }
+    .copy-btn {
+      flex-shrink: 0;
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      padding: 0.25rem 0.6rem;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    .copy-btn:hover { background: var(--bg2); color: var(--text); }
+
+    .code-block {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.25rem 1.5rem;
+      overflow-x: auto;
+      max-width: 660px;
+    }
+    .code-block pre {
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 0.875rem;
+      line-height: 1.7;
+      color: var(--text);
+    }
+    .code-block .comment { color: var(--text-muted); }
+    .code-block .cmd     { color: #7ee787; }
+    .code-block .flag    { color: var(--credit); }
+    .code-block .str     { color: #a5d6ff; }
+
+    .qs-note {
+      margin-top: 1rem;
+      font-size: 0.875rem;
+      color: var(--text-muted);
+    }
+    .qs-note a { color: var(--accent); }
+
+    /* ── ARCHITECTURE ── */
+    #architecture { background: var(--bg2); }
+
+    .arch-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 2rem;
+      align-items: start;
+    }
+    @media (max-width: 700px) { .arch-grid { grid-template-columns: 1fr; } }
+
+    .arch-prose p {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      margin-bottom: 0.85rem;
+    }
+    .arch-prose p:last-child { margin-bottom: 0; }
+    .arch-prose strong { color: var(--text); }
+
+    .arch-flow {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+    }
+    .arch-flow h3 {
+      font-size: 0.8rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 1rem;
+    }
+    .flow-step {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.75rem;
+      margin-bottom: 0.9rem;
+    }
+    .flow-step:last-child { margin-bottom: 0; }
+    .flow-num {
+      flex-shrink: 0;
+      width: 22px; height: 22px;
+      border-radius: 50%;
+      background: var(--accent-dim);
+      color: #fff;
+      font-size: 0.7rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-top: 1px;
+    }
+    .flow-text {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+    .flow-text strong { color: var(--text); }
+
+    /* ── DOCS LINKS ── */
+    #docs { background: var(--bg); }
+
+    .doc-links {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 0.75rem;
+      margin-bottom: 2.5rem;
+    }
+    .doc-link {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem 1.25rem;
+      color: var(--text);
+      transition: border-color 0.15s, transform 0.1s;
+      font-size: 0.9rem;
+      font-weight: 500;
+    }
+    .doc-link:hover {
+      border-color: var(--accent-dim);
+      transform: translateY(-2px);
+      text-decoration: none;
+    }
+    .doc-link-icon { font-size: 1.2rem; }
+    .doc-link-text small {
+      display: block;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      font-weight: 400;
+      margin-top: 1px;
+    }
+
+    .providers-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 1.5rem;
+    }
+    .provider-tag {
+      padding: 0.25rem 0.75rem;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      font-weight: 500;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+    }
+
+    /* ── FOOTER ── */
+    footer {
+      padding: 2.5rem 1.5rem;
+      background: var(--bg);
+      border-top: 1px solid var(--border);
+    }
+    .footer-inner {
+      max-width: var(--max-w);
+      margin: 0 auto;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 1.5rem;
+    }
+    .footer-left p {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-bottom: 0.3rem;
+    }
+    .footer-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.2rem 0.6rem;
+      background: rgba(63,185,80,0.08);
+      border: 1px solid rgba(63,185,80,0.2);
+      border-radius: 4px;
+      font-size: 0.75rem;
+      color: var(--up);
+      font-family: ui-monospace, Consolas, monospace;
+    }
+    .footer-links {
+      display: flex;
+      gap: 1.5rem;
+    }
+    .footer-links a {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      transition: color 0.15s;
+    }
+    .footer-links a:hover { color: var(--text); text-decoration: none; }
+
+    /* ── RESPONSIVE ── */
+    @media (max-width: 600px) {
+      .nav-links { display: none; }
+      section { padding: 3rem 1rem; }
+      .install-block { flex-direction: column; align-items: stretch; }
+      .footer-inner { flex-direction: column; gap: 1rem; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ── NAV ── -->
+  <nav>
+    <div class="nav-inner">
+      <span class="nav-brand">⚡ <span>Heimdall</span></span>
+      <ul class="nav-links">
+        <li><a href="#capabilities">Capabilities</a></li>
+        <li><a href="#quickstart">Quick Start</a></li>
+        <li><a href="#architecture">Architecture</a></li>
+        <li><a href="#docs">Docs</a></li>
+        <li><a href="https://github.com/mdostal/heimdall">GitHub</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- ── HERO ── -->
+  <section id="hero">
+    <div class="hero-inner">
+      <div class="hero-badge">Pantheon · Observability Daemon</div>
+      <h1><span class="accent">Heimdall</span></h1>
+      <p class="tagline">Health-aware lane gateway and router for&nbsp;<a href="https://github.com/mdostal/pantheon-v2">Pantheon</a></p>
+      <p class="value-prop">Never let a broken lane stall your agent fleet.</p>
+
+      <div class="health-pills">
+        <span class="pill pill-up">    <span class="pill-dot"></span> up</span>
+        <span class="pill pill-degraded"><span class="pill-dot"></span> degraded</span>
+        <span class="pill pill-credit"> <span class="pill-dot"></span> out_of_credit</span>
+        <span class="pill pill-down">  <span class="pill-dot"></span> down</span>
+      </div>
+
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="#quickstart">Get started</a>
+        <a class="btn btn-secondary" href="architecture.html">Read the docs</a>
+        <a class="btn btn-secondary" href="https://github.com/mdostal/heimdall">GitHub ↗</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── CAPABILITIES ── -->
+  <section id="capabilities">
+    <div class="section-inner">
+      <p class="section-label">What it does</p>
+      <h2>One service. Four jobs.</h2>
+      <p class="section-lead">Heimdall replaces ad-hoc health checks scattered across every orchestrator with a single contract your whole fleet can depend on.</p>
+
+      <div class="cards">
+        <div class="card">
+          <div class="card-icon">👁️</div>
+          <h3>4-State Health Sensing</h3>
+          <p>Layers passive observation, provider status-page polling, and sparse active probes into a single authoritative lane state — <strong>up</strong>, <strong>down</strong>, <strong>out_of_credit</strong>, or <strong>degraded</strong> — with a corroboration guard against flapping.</p>
+          <span class="card-tag">GET /lanes</span>
+        </div>
+        <div class="card">
+          <div class="card-icon">🔀</div>
+          <h3>Pluggable Lane Routing</h3>
+          <p>Routes tasks to the best healthy lane via a swappable strategy. The default scored strategy weighs health state, priority, and provider cost; supports A/B testing with outcome feedback so routing improves over time.</p>
+          <span class="card-tag">GET /available-route</span>
+        </div>
+        <div class="card">
+          <div class="card-icon">⚙️</div>
+          <h3>Multica Actuation</h3>
+          <p>Closes the loop: when a lane goes down, Heimdall toggles <code>max_concurrent_tasks</code> on the mapped Multica agents to zero so work stops flowing there — and restores it automatically when health recovers.</p>
+          <span class="card-tag">MulticaControlAdapter</span>
+        </div>
+        <div class="card">
+          <div class="card-icon">📋</div>
+          <h3>Live Model Catalog</h3>
+          <p>Maintains a per-installation model catalog sourced from each provider so agents stop calling deprecated models. Models are available via the MCP surface alongside lane health, making the catalog queryable by any MCP-capable tool.</p>
+          <span class="card-tag">MCP · HTTP</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── QUICK START ── -->
+  <section id="quickstart">
+    <div class="section-inner">
+      <p class="section-label">Quick Start</p>
+      <h2>Up in two minutes</h2>
+      <p class="section-lead">Heimdall runs as a local service. Requires <strong>Node.js ≥ 22.13.0</strong> (uses the built-in <code>node:sqlite</code> module).</p>
+
+      <div class="install-block">
+        <code>curl -fsSL https://mdostal.github.io/heimdall/install.sh | bash</code>
+        <button class="copy-btn" onclick="navigator.clipboard.writeText('curl -fsSL https://mdostal.github.io/heimdall/install.sh | bash').then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1500)})">Copy</button>
+      </div>
+
+      <p style="font-size:0.875rem;color:var(--text-muted);margin-bottom:1.5rem;">Or clone and run directly:</p>
+
+      <div class="code-block">
+        <pre><span class="comment"># Clone and install</span>
+<span class="cmd">git</span> clone https://github.com/mdostal/heimdall.git
+<span class="cmd">cd</span> heimdall
+<span class="cmd">npm</span> install
+
+<span class="comment"># Declare your lanes (provider × account × runtime triples)</span>
+<span class="cmd">cp</span> .env.example .env
+<span class="comment"># Edit .env — set HEIMDALL_LANE_1_ID, _PROVIDER, _CREDENTIAL_REF …</span>
+
+<span class="comment"># Start the service</span>
+<span class="cmd">npm</span> run dev         <span class="comment"># → http://localhost:4870</span></pre>
+      </div>
+
+      <p class="qs-note">
+        Check <code>GET /lanes</code> to see your declared lanes and their health.
+        Full configuration reference: <a href="ops/configuration.html">ops/configuration</a> ·
+        <a href="https://github.com/mdostal/heimdall/blob/main/.env.example">.env.example</a>
+      </p>
+    </div>
+  </section>
+
+  <!-- ── ARCHITECTURE ── -->
+  <section id="architecture">
+    <div class="section-inner">
+      <p class="section-label">Architecture at a glance</p>
+      <h2>Where Heimdall fits</h2>
+      <p class="section-lead">A single daemon between your orchestrators and every LLM provider — not a library, not a sidecar.</p>
+
+      <div class="arch-grid">
+        <div class="arch-prose">
+          <p>
+            Heimdall is one god in <strong>Pantheon</strong>, the open-source agent ecosystem hosted at
+            <a href="https://github.com/mdostal/pantheon-v2">mdostal/pantheon-v2</a>.
+            It owns the <em>sensing-and-actuation</em> contract for every LLM/runtime lane —
+            a <code>provider × account × runtime</code> triple — so that no other service
+            needs to re-implement health checking.
+          </p>
+          <p>
+            <strong>Auriga</strong> (the router/orchestrator) calls <code>GET /available-route</code>
+            when dispatching a task; it gets back the best healthy lane and never needs to know
+            what state each provider is in. <strong>Vesta</strong> owns lane and agent config.
+            <strong>Argus</strong> receives Heimdall's OTEL telemetry.
+          </p>
+          <p>
+            Internally, <strong>schedulers</strong> tick each lane on a coarse Multica autopilot
+            cron plus a fine in-process loop for suspect lanes. The <strong>lane pipeline</strong>
+            gathers layered signals, the <strong>status-model</strong> resolves them into a
+            4-state verdict, and the <strong>ControlAdapter</strong> reconciles Multica agent
+            concurrency accordingly.
+          </p>
+          <p>
+            <a href="architecture.html">Full architecture &amp; internal flow →</a>
+          </p>
+        </div>
+
+        <div class="arch-flow">
+          <h3>The signal loop</h3>
+          <div class="flow-step">
+            <div class="flow-num">1</div>
+            <div class="flow-text"><strong>Scheduler ticks</strong> — Multica autopilot (coarse cron) or in-process loop (~5s, suspect lanes)</div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">2</div>
+            <div class="flow-text"><strong>Lane pipeline gathers signals</strong> — passive observation → provider status page → sparse active probe</div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">3</div>
+            <div class="flow-text"><strong>Status-model resolves</strong> — corroboration guard prevents flapping; outputs one of four states</div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">4</div>
+            <div class="flow-text"><strong>State stored to SQLite</strong> — queryable via HTTP, CLI, and MCP surfaces</div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-num">5</div>
+            <div class="flow-text"><strong>ControlAdapter actuates</strong> — sets <code>max_concurrent_tasks</code> on mapped Multica agents to open or close the lane</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── DOCS ── -->
+  <section id="docs">
+    <div class="section-inner">
+      <p class="section-label">Documentation</p>
+      <h2>Go deeper</h2>
+      <p class="section-lead">Everything from the full architecture to decision records and ops guides.</p>
+
+      <div class="doc-links">
+        <a class="doc-link" href="architecture.html">
+          <span class="doc-link-icon">🏗️</span>
+          <span class="doc-link-text">
+            Architecture
+            <small>Internal flow &amp; component design</small>
+          </span>
+        </a>
+        <a class="doc-link" href="heimdall-role-and-actuation.html">
+          <span class="doc-link-icon">🎯</span>
+          <span class="doc-link-text">
+            Role &amp; Actuation
+            <small>How Heimdall fits in Pantheon</small>
+          </span>
+        </a>
+        <a class="doc-link" href="vision.html">
+          <span class="doc-link-icon">🔭</span>
+          <span class="doc-link-text">
+            Vision &amp; Roadmap
+            <small>Where this is going</small>
+          </span>
+        </a>
+        <a class="doc-link" href="scheduler-constraints.html">
+          <span class="doc-link-icon">⏱️</span>
+          <span class="doc-link-text">
+            Scheduler Constraints
+            <small>No-box-runners design</small>
+          </span>
+        </a>
+        <a class="doc-link" href="north-star.html">
+          <span class="doc-link-icon">⭐</span>
+          <span class="doc-link-text">
+            North Star
+            <small>Design principles</small>
+          </span>
+        </a>
+        <a class="doc-link" href="https://github.com/mdostal/heimdall/blob/main/CONTRIBUTING.md">
+          <span class="doc-link-icon">🤝</span>
+          <span class="doc-link-text">
+            Contributing
+            <small>Open to PRs &amp; issues</small>
+          </span>
+        </a>
+      </div>
+
+      <p class="section-label" style="margin-top:2rem;">Supported providers</p>
+      <div class="providers-row">
+        <span class="provider-tag">Claude (Anthropic)</span>
+        <span class="provider-tag">Codex (OpenAI)</span>
+        <span class="provider-tag">Gemini (Google)</span>
+        <span class="provider-tag">Kimi K3 (Moonshot)</span>
+        <span class="provider-tag">OpenRouter</span>
+        <span class="provider-tag">Ollama</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── FOOTER ── -->
+  <footer>
+    <div class="footer-inner">
+      <div class="footer-left">
+        <p>⚡ <strong>Heimdall</strong> — Health-aware lane gateway for <a href="https://github.com/mdostal/pantheon-v2">Pantheon</a></p>
+        <p>Built by <a href="https://github.com/mdostal">Mathew Dostal</a> · <a href="https://github.com/mdostal/heimdall/blob/main/LICENSE">MIT License</a></p>
+        <p style="margin-top:0.5rem;">
+          <span class="footer-badge">MIT open source</span>
+        </p>
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/mdostal/heimdall">GitHub</a>
+        <a href="https://github.com/mdostal/heimdall/issues">Issues</a>
+        <a href="https://github.com/sponsors/mdostal">Sponsor</a>
+        <a href="https://www.buymeacoffee.com/mdostal">Buy me a coffee</a>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>
