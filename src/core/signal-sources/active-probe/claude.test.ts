@@ -170,3 +170,42 @@ test("hdl-csl-02: probeClaudeSubscriptionLane never throws on a CommandRunner ex
   assert.match(result.reason ?? "", /claude CLI auth check failed/);
   assert.match(result.reason ?? "", /401/);
 });
+
+// Weekly-limit tests (PANT-729) — the CLI exits non-zero with a message
+// containing "weekly limit" when the account's usage cap is hit. This is NOT
+// an auth failure; it should resolve to out_of_credit so failover logic can
+// distinguish it from a broken credential and schedule a reset-time wait.
+function fakeWeeklyLimitRunner(resetPart: string): CommandRunner {
+  return {
+    run: async () => {
+      throw new Error(`You've hit your weekly limit · resets ${resetPart}`);
+    },
+  };
+}
+
+test("hdl-csl-02/PANT-729: weekly-limit CLI error resolves to out_of_credit, not down/auth_failed", async () => {
+  const result = await probeClaudeSubscriptionLane(
+    "sk-ant-oat01-fake",
+    fakeWeeklyLimitRunner("7pm (America/Chicago)"),
+  );
+  assert.equal(result.status, "out_of_credit");
+  assert.equal(result.error_code, "quota_exceeded");
+  assert.ok(result.reset_at !== null, "reset_at must be set for a weekly-limit error");
+});
+
+test("hdl-csl-02/PANT-729: weekly-limit reset_at is a future ISO timestamp derived from the reset time in the CLI message", async () => {
+  const result = await probeClaudeSubscriptionLane(
+    "sk-ant-oat01-fake",
+    fakeWeeklyLimitRunner("7pm (America/Chicago)"),
+  );
+  assert.ok(result.reset_at !== null, "reset_at must not be null for a weekly-limit");
+  const resetMs = Date.parse(result.reset_at!);
+  assert.ok(!Number.isNaN(resetMs), "reset_at must be a valid ISO timestamp");
+  assert.ok(resetMs > Date.now(), "reset_at must be in the future");
+});
+
+test("hdl-csl-02/PANT-729: a genuine auth failure (not weekly limit) still resolves to down/auth_failed", async () => {
+  const result = await probeClaudeSubscriptionLane("sk-ant-oat01-fake", fakeCommandRunner(false));
+  assert.equal(result.status, "down");
+  assert.equal(result.error_code, "auth_failed");
+});

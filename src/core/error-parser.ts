@@ -125,7 +125,60 @@ function extractResetAt(input: unknown, headers: HeaderLike | null, now: Date): 
   const retryAfter = parseRetryAfter(headers?.get("retry-after") ?? null, now);
   if (retryAfter) return retryAfter;
 
+  // CLI error messages (e.g. "resets 7pm (America/Chicago)") carry the reset
+  // time as human-readable text rather than a header or structured field —
+  // try to extract it before falling back to the generic 7-day default.
+  const rawMsg = [
+    getNestedString(input, ["message"]),
+    getNestedString(body, ["message"]),
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const cliReset = parseCliStyleResetTime(rawMsg, now);
+  if (cliReset) return cliReset;
+
   return new Date(now.getTime() + DEFAULT_RESET_MS).toISOString();
+}
+
+// Parses "resets 7pm (America/Chicago)" or "resets 7:30pm (America/Chicago)"
+// from a CLI error message into an absolute ISO-8601 reset timestamp. Returns
+// null if the pattern is absent or the timezone is unrecognized — callers fall
+// through to DEFAULT_RESET_MS in that case. Exported so tests can cover it
+// directly without needing a full probeClaudeSubscriptionLane round-trip.
+export function parseCliStyleResetTime(message: string, now: Date): string | null {
+  const match = message.match(/resets\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*\(([^)]+)\)/i);
+  if (!match) return null;
+  const [, hourStr, minStr = "00", ampm, tz] = match;
+  let hour = parseInt(hourStr, 10);
+  const minute = parseInt(minStr, 10);
+  if (Number.isNaN(hour) || Number.isNaN(minute)) return null;
+  if (ampm.toLowerCase() === "pm" && hour < 12) hour += 12;
+  else if (ampm.toLowerCase() === "am" && hour === 12) hour = 0;
+
+  try {
+    // Get the current local time components in the target timezone.
+    const fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      hour: "2-digit", minute: "2-digit", hour12: false,
+    });
+    const parts = Object.fromEntries(fmt.formatToParts(now).map(({ type, value }) => [type, value]));
+    const nowLocalH = parseInt(parts.hour, 10);
+    const nowLocalMin = parseInt(parts.minute, 10);
+    if (Number.isNaN(nowLocalH) || Number.isNaN(nowLocalMin)) return null;
+
+    // deltaMinutes = target local time – current local time (same timezone).
+    // Adding this to now.getTime() gives the UTC instant when local time will
+    // be hour:minute today. A negative delta means the reset already passed
+    // today; in that case the weekly cap resets 7 days from the same time.
+    const deltaMinutes = (hour * 60 + minute) - (nowLocalH * 60 + nowLocalMin);
+    let targetMs = now.getTime() + deltaMinutes * 60_000;
+    if (targetMs <= now.getTime()) {
+      targetMs += 7 * 24 * 60 * 60 * 1000;
+    }
+    return new Date(targetMs).toISOString();
+  } catch {
+    return null;
+  }
 }
 
 function classify(status: number | null, message: string): ClaudeCapKind | null {

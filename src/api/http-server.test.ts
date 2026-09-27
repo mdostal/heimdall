@@ -14,6 +14,7 @@ import {
   addLane,
   setBackoffPolicy,
   setBackoffPolicyOverride,
+  pushLaneStatus,
 } from "./http-server.js";
 import { LaneRegistry } from "../core/lane-registry.js";
 import { StateStore } from "../core/state-store.js";
@@ -1215,6 +1216,102 @@ test("hdl-mcp-01: setLaneOverride returns {ok: false, error: 'invalid_override_s
     }
   } finally {
     store.close();
+  }
+});
+
+test("PANT-185: pushLaneStatus records the status with signal_source='passive' and returns it", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  try {
+    const result = pushLaneStatus(registry, store, "claude@mathew.dostal", "out_of_credit");
+    assert.deepEqual(result, { ok: true, lane_id: "claude@mathew.dostal", status: "out_of_credit", signal_source: "passive" });
+    const current = store.getCurrentStatus("claude@mathew.dostal");
+    assert.equal(current?.status, "out_of_credit");
+    assert.equal(current?.signal_source, "passive");
+  } finally {
+    store.close();
+  }
+});
+
+test("PANT-185: pushLaneStatus returns {ok: false, error: 'unknown_lane'} for an undeclared lane", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  try {
+    const result = pushLaneStatus(registry, store, "never-declared", "down");
+    assert.deepEqual(result, { ok: false, error: "unknown_lane", lane_id: "never-declared" });
+  } finally {
+    store.close();
+  }
+});
+
+test("PANT-185: pushLaneStatus returns {ok: false, error: 'invalid_status'} for an unknown status value", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  try {
+    const result = pushLaneStatus(registry, store, "claude@mathew.dostal", "on_fire");
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.error, "invalid_status");
+      assert.deepEqual([...result.allowed_statuses].sort(), [...LANE_STATUS_VALUES].sort());
+    }
+  } finally {
+    store.close();
+  }
+});
+
+test("PANT-185: PATCH /lanes/:id records out_of_credit and returns 200 with signal_source=passive", async () => {
+  const server = createHttpServer(registryWithOneConfiguredLane(), new StateStore(":memory:"));
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes/claude%40mathew.dostal`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "out_of_credit" }),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json() as Record<string, unknown>;
+    assert.equal(body.lane_id, "claude@mathew.dostal");
+    assert.equal(body.status, "out_of_credit");
+    assert.equal(body.signal_source, "passive");
+  } finally {
+    server.close();
+  }
+});
+
+test("PANT-185: PATCH /lanes/:id returns 404 for an undeclared lane", async () => {
+  const server = createHttpServer(registryWithOneConfiguredLane(), new StateStore(":memory:"));
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes/no-such-lane`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "down" }),
+    });
+    assert.equal(res.status, 404);
+    const body = await res.json() as Record<string, unknown>;
+    assert.equal(body.error, "unknown_lane");
+  } finally {
+    server.close();
+  }
+});
+
+test("PANT-185: PATCH /lanes/:id returns 400 for an invalid status value", async () => {
+  const server = createHttpServer(registryWithOneConfiguredLane(), new StateStore(":memory:"));
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes/claude%40mathew.dostal`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "totally-bogus" }),
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json() as Record<string, unknown>;
+    assert.equal(body.error, "invalid_status");
+  } finally {
+    server.close();
   }
 });
 
