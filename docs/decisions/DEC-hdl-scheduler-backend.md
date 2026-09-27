@@ -1,3 +1,9 @@
+---
+title: DEC-hdl-scheduler-backend
+parent: Decision Records
+nav_order: 1
+---
+
 # DEC-hdl-scheduler-backend
 
 **Status:** Accepted (2026-07-25)
