@@ -1,7 +1,7 @@
-// ControlAdapter — the reconcile-every-tick interface (hda-02). Called
-// every sense-loop tick for every lane, not gated by transition-detection
-// alone — a retry-for-free design also inherited by whatever registers as
-// a lane's adapter. hdl-msh-01: StubControlAdapter is now the only
+// ControlAdapter — the reconcile interface (hda-02). PANT-827: called once
+// per lane.status_changed event (a resolved-status transition or a manual
+// override/reset_at change), no longer every tick for every lane — main.ts's
+// status-watcher poll loop is gone. hdl-msh-01: StubControlAdapter is now the only
 // implementation — Heimdall no longer actuates Multica directly (see
 // docs/decisions/DEC-hdl-multica-disable-contract.md). It wraps the
 // existing hdl-04 ActuationStub (transition-detection, loud logging) for

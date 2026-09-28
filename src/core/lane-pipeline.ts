@@ -45,10 +45,10 @@ export interface RefreshDeps {
   /** Injected clock — an ISO-8601 timestamp for "now". Never Date.now() internally. */
   now: () => string;
   /** Surfaces the last real agent response/error observed on this lane, or
-   * null if nothing recent — the REQ-01 passive-observation input. No live
-   * agent traffic routes through Heimdall yet, so real callers wire this up
-   * once that integration exists; until then, returning null is honest and
-   * correctly falls through to public-status/active-probe. */
+   * null if nothing recent — the REQ-01 passive-observation input. Read once
+   * per refresh; composeService() feeds it reported route outcomes
+   * (heimdall#96) through a consume-once RouteOutcomeTracker. Returning null
+   * falls through to public-status/active-probe. */
   lastPassiveResponse: (laneId: string) => ResponseLike | null;
   fetchImpl?: typeof fetch;
 }
@@ -145,6 +145,18 @@ export class LanePipeline {
 
   async refresh(lane: Lane): Promise<void> {
     const now = this.deps.now();
+
+    // heimdall#96: a passive observation waiting to be read (e.g. a reported
+    // route outcome) is the freshest evidence about this lane there is, so it
+    // decides the status ahead of the staleness-based choice below. Its
+    // recorded "passive" row then makes the next refresh see a fresh passive
+    // signal; with nothing new pending, that path falls back to a probe.
+    const pending = observePassiveSignal(this.deps.lastPassiveResponse(lane.lane_id));
+    if (pending) {
+      this.persistResolved(lane.lane_id, resolveStatus(pending), "passive", now);
+      return;
+    }
+
     const decision = decideSignalSource({
       now,
       passiveSignalAt: this.store.getLastObservedAt(lane.lane_id, "passive"),
@@ -154,14 +166,10 @@ export class LanePipeline {
     });
 
     if (decision.action === "use-passive") {
-      const signal = observePassiveSignal(this.deps.lastPassiveResponse(lane.lane_id));
-      if (!signal) {
-        // Thought passive was fresh but there's nothing to observe —
-        // defensive fallback rather than trusting a null read.
-        await this.refreshViaProbe(lane, now);
-        return;
-      }
-      this.persistResolved(lane.lane_id, resolveStatus(signal), "passive", now);
+      // Thought passive was fresh but there's nothing to observe (the
+      // lastPassiveResponse read above came back empty) — defensive fallback
+      // rather than trusting a null read.
+      await this.refreshViaProbe(lane, now);
       return;
     }
 

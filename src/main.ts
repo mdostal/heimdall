@@ -3,9 +3,9 @@
 // running Heimdall: lane registry + state store + Argus telemetry + per-lane
 // InProcessScheduler (probes never-probed lanes at startup, fine ~5s while suspect, periodic
 // while healthy) + an opt-in per-lane MulticaAutopilotScheduler (only when
-// MULTICA_AUTOPILOT_AGENT is set — PANT-753) + a shared status-watcher loop that calls
-// ControlAdapter.reconcile() every tick for every lane — StubControlAdapter
-// for every lane, unconditionally.
+// MULTICA_AUTOPILOT_AGENT is set — PANT-753) + a lane.status_changed
+// subscription (PANT-827) that calls ControlAdapter.reconcile() once per
+// real transition — StubControlAdapter for every lane, unconditionally.
 //
 // hdl-msh-01: Heimdall no longer actuates Multica directly (heimdall#83 —
 // Multica's real API has no working disable lever; see docs/decisions/
@@ -42,6 +42,8 @@ import { StaticLaneAgentResolver, type LaneAgentResolver } from "./core/actuatio
 import { StubControlAdapter, type ControlAdapter } from "./core/actuation/control-adapter.js";
 import { RotationController, ProviderScopedLaneRegistry } from "./core/rotation-controller.js";
 import { startCapResetRecoveryJob, type RunningBackgroundJob } from "./core/background-jobs.js";
+import { closeRouteLedgers, onRouteOutcome, useRouteLedgerPath } from "./core/route-selector.js";
+import { RouteOutcomeTracker, routeOutcomeToPassiveResponse } from "./core/signal-sources/route-outcome.js";
 
 const PROVIDER_ADAPTERS: Record<string, () => ProviderAdapters> = {
   claude: claudeAdapters,
@@ -54,7 +56,6 @@ const PROVIDER_ADAPTERS: Record<string, () => ProviderAdapters> = {
 };
 
 const DEFAULT_AUTOPILOT_CRON = "*/1 * * * *";
-const STATUS_WATCHER_INTERVAL_MS = 5_000;
 
 export interface ComposeServiceOptions {
   port?: number;
@@ -64,8 +65,6 @@ export interface ComposeServiceOptions {
   argus?: ArgusEmitter;
   /** Test-only: skip actually binding the HTTP server to a port. */
   skipHttpListen?: boolean;
-  /** Test-only: override the shared status-watcher's tick interval (default 5000ms). */
-  statusWatcherIntervalMs?: number;
 }
 
 export interface ComposedService {
@@ -105,7 +104,12 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
   const env = options.env ?? process.env;
 
   const registry = buildLaneRegistry(env);
-  const store = new StateStore(resolveDefaultDbPath(env));
+  const dbPath = resolveDefaultDbPath(env);
+  const store = new StateStore(dbPath);
+  // heimdall#96: routing decisions/outcomes live in the same DB file as lane
+  // state, so they survive a restart and every process sees them.
+  useRouteLedgerPath(dbPath);
+  const routeOutcomes = new RouteOutcomeTracker();
 
   // hdl-ot-01: Heimdall's own local record (telemetry_events) is the source
   // of truth; Argus is one downstream consumer of the same facts, composed
@@ -151,7 +155,11 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
 
     const pipeline = new LanePipeline(
       store,
-      { now: () => new Date().toISOString(), lastPassiveResponse: () => null, fetchImpl: options.fetchImpl },
+      {
+        now: () => new Date().toISOString(),
+        lastPassiveResponse: (laneId) => routeOutcomes.take(laneId),
+        fetchImpl: options.fetchImpl,
+      },
       buildAdapters(),
     );
     pipelines.set(lane.lane_id, pipeline);
@@ -200,26 +208,23 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     controlAdapters.set(lane.lane_id, sharedStubControlAdapter);
   }
 
-  // Lightweight shared observer — one timer for the whole service (not
-  // per-lane), cheap local StateStore reads only. reconcile() is called
-  // every tick for every lane regardless of whether status changed; every
-  // lane's adapter is StubControlAdapter (hdl-msh-01), so this now only
-  // records/logs the intended action via ActuationStub, never a real call.
-  const statusWatcher = setInterval(() => {
-    for (const lane of registry.list()) {
-      const current = store.getCurrentStatus(lane.lane_id);
-      if (!current) continue;
-      const adapter = controlAdapters.get(lane.lane_id);
-      if (!adapter) continue;
-      const manualOverride = store.getManualOverride(lane.lane_id);
-      adapter
-        .reconcile(lane, current.status, { reason: current.reason, reset_at: current.reset_at, manualOverride })
-        .catch((err) => {
-          console.error(`[main] reconcile() failed for lane ${lane.lane_id}:`, err);
-        });
-    }
-  }, options.statusWatcherIntervalMs ?? STATUS_WATCHER_INTERVAL_MS);
-  statusWatcher.unref?.();
+  // PANT-827 ("nothing polls"): reconcile() runs once per lane.status_changed
+  // event — a resolved-status transition, or a manual override/reset_at
+  // change — instead of every tick for every lane. Every lane's adapter is
+  // StubControlAdapter (hdl-msh-01), so this only records/logs the intended
+  // action via ActuationStub, never a real call.
+  const stopReconcileSubscription = store.events.onStatusChanged((event) => {
+    const lane = registry.get(event.lane_id);
+    const adapter = controlAdapters.get(event.lane_id);
+    const current = store.getCurrentStatus(event.lane_id);
+    if (!lane || !adapter || !current) return;
+    const manualOverride = store.getManualOverride(event.lane_id);
+    adapter
+      .reconcile(lane, current.status, { reason: current.reason, reset_at: current.reset_at, manualOverride })
+      .catch((err) => {
+        console.error(`[main] reconcile() failed for lane ${lane.lane_id}:`, err);
+      });
+  });
 
   const refreshLane: RefreshLaneFn = async (laneId: string): Promise<void> => {
     const lane = registry.get(laneId);
@@ -229,6 +234,21 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     }
     await pipeline.refresh(lane);
   };
+
+  // heimdall#96: close the routing loop. A reported outcome becomes a
+  // passive observation of the lane that served the decision, and the lane
+  // is refreshed right away so the outcome decides its status now rather
+  // than at the scheduler's next (possibly minutes-away) tick. Corroboration
+  // still applies: a single failure outcome only shows `degraded`.
+  const unsubscribeRouteOutcomes = onRouteOutcome((event) => {
+    if (!pipelines.has(event.laneId)) return;
+    const response = routeOutcomeToPassiveResponse(event, new Date());
+    if (!response) return;
+    routeOutcomes.record(event.laneId, response);
+    refreshLane(event.laneId).catch((err) => {
+      console.error(`[main] refresh after route outcome failed for lane ${event.laneId}:`, err);
+    });
+  });
 
   // hdl-rr-04: rotation is a credential-selection concern orthogonal to
   // which lane routing picks — it decides which account backs a given
@@ -259,11 +279,16 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     controlAdapters,
     rotationControllers,
     stopAll: () => {
-      clearInterval(statusWatcher);
+      stopReconcileSubscription();
       for (const s of multicaSchedulers) s.stop();
       for (const s of inProcessSchedulers) s.stop();
       for (const job of rotationJobs) job.stop();
+      unsubscribeRouteOutcomes();
       httpServer.close();
+      // Open GET /events (SSE) streams never end on their own — without this
+      // close() would wait on them forever.
+      httpServer.closeAllConnections();
+      closeRouteLedgers();
       store.close();
     },
   };

@@ -4,6 +4,11 @@ import { LaneRegistry } from "../core/lane-registry.js";
 import { StateStore } from "../core/state-store.js";
 import { EnvCredentialSource } from "../core/credential-source.js";
 import { renderMetrics } from "./metrics.js";
+import { useRouteLedgerPath } from "../core/route-selector.js";
+
+// heimdall#96: the route ledger defaults to the per-machine DB file; keep this
+// file's routing decisions in memory instead.
+useRouteLedgerPath(":memory:");
 
 test("hdl-ot-03: renderMetrics output is well-formed Prometheus text exposition format", () => {
   const registry = new LaneRegistry(

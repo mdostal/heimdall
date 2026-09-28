@@ -153,6 +153,9 @@ export class RouteLedger {
       new DatabaseSync(normalized.path ?? ":memory:", { enableForeignKeyConstraints: true });
     this.ownsDatabase = normalized.database === undefined;
     this.now = normalized.now ?? (() => new Date());
+    // heimdall#96: the ledger now shares StateStore's DB file, so another
+    // connection may hold the write lock briefly — wait rather than fail.
+    if (this.ownsDatabase) this.db.exec("PRAGMA busy_timeout = 5000");
     this.db.exec(SCHEMA);
   }
 
