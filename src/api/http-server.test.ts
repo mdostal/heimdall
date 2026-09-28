@@ -15,6 +15,7 @@ import {
   setBackoffPolicy,
   setBackoffPolicyOverride,
   pushLaneStatus,
+  MAX_REQUEST_BODY_BYTES,
 } from "./http-server.js";
 import { LaneRegistry } from "../core/lane-registry.js";
 import { StateStore } from "../core/state-store.js";
@@ -3316,6 +3317,90 @@ test("hdl-bp-05: POST /backoff-policy/exponential-ceiling-ms rejects a value at 
     }
   } finally {
     server.close();
+    store.close();
+  }
+});
+
+test("PANT-829: a request body over MAX_REQUEST_BODY_BYTES gets 413, not buffered or parsed", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const oversized = JSON.stringify({ theme: "terminal", padding: "x".repeat(MAX_REQUEST_BODY_BYTES) });
+    const res = await fetch(`http://localhost:${port}/theme`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: oversized,
+    });
+    assert.equal(res.status, 413);
+    assert.deepEqual(await res.json(), { error: "payload_too_large", max_bytes: MAX_REQUEST_BODY_BYTES });
+
+    const getRes = await fetch(`http://localhost:${port}/theme`);
+    assert.equal((await getRes.json()).active, "mission-control", "a rejected body must not be applied");
+  } finally {
+    server.close();
+    server.closeAllConnections();
+    store.close();
+  }
+});
+
+test("PANT-829: a chunked body with no Content-Length is still capped at MAX_REQUEST_BODY_BYTES", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const chunk = new TextEncoder().encode("x".repeat(64 * 1024));
+    let sent = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent > MAX_REQUEST_BODY_BYTES * 2) {
+          controller.close();
+          return;
+        }
+        sent += chunk.length;
+        controller.enqueue(chunk);
+      },
+    });
+    const res = await fetch(`http://localhost:${port}/theme`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+      duplex: "half",
+    } as RequestInit);
+    assert.equal(res.status, 413);
+  } finally {
+    server.close();
+    server.closeAllConnections();
+    store.close();
+  }
+});
+
+test("PANT-829: a body at the limit is still accepted, and invalid JSON is still a 400", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const base = JSON.stringify({ theme: "terminal", padding: "" });
+    const atLimit = JSON.stringify({ theme: "terminal", padding: "x".repeat(MAX_REQUEST_BODY_BYTES - base.length) });
+    assert.equal(Buffer.byteLength(atLimit), MAX_REQUEST_BODY_BYTES);
+    const okRes = await fetch(`http://localhost:${port}/theme`, { method: "POST", body: atLimit });
+    assert.equal(okRes.status, 200);
+
+    const badRes = await fetch(`http://localhost:${port}/theme`, { method: "POST", body: "{not json" });
+    assert.equal(badRes.status, 400);
+    assert.deepEqual(await badRes.json(), { error: "invalid_json" });
+  } finally {
+    server.close();
+    server.closeAllConnections();
     store.close();
   }
 });

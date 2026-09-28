@@ -17,7 +17,7 @@
 // inject a mock CommandRunner/fetchImpl and inspect every piece without
 // touching a real Argus connection or binding a real port.
 
-import { buildLaneRegistry, createHttpServer, type RefreshLaneFn } from "./api/http-server.js";
+import { buildLaneRegistry, createHttpServer, endEventStreams, type RefreshLaneFn } from "./api/http-server.js";
 import type { Server } from "node:http";
 import { StateStore, resolveDefaultDbPath } from "./core/state-store.js";
 import type { LaneRegistry } from "./core/lane-registry.js";
@@ -41,7 +41,12 @@ import type { CommandRunner } from "./core/scheduler/command-runner.js";
 import { StaticLaneAgentResolver, type LaneAgentResolver } from "./core/actuation/lane-agent-resolver.js";
 import { StubControlAdapter, type ControlAdapter } from "./core/actuation/control-adapter.js";
 import { RotationController, ProviderScopedLaneRegistry } from "./core/rotation-controller.js";
-import { startCapResetRecoveryJob, type RunningBackgroundJob } from "./core/background-jobs.js";
+import {
+  startCapResetRecoveryJob,
+  startHistoryRetentionJob,
+  resolveRetentionDays,
+  type RunningBackgroundJob,
+} from "./core/background-jobs.js";
 import { SensingMetrics } from "./core/telemetry/sensing-metrics.js";
 import { resolveReadinessStalenessMs } from "./api/readiness.js";
 import { closeRouteLedgers, onRouteOutcome, useRouteLedgerPath } from "./core/route-selector.js";
@@ -58,6 +63,7 @@ const PROVIDER_ADAPTERS: Record<string, () => ProviderAdapters> = {
 };
 
 const DEFAULT_AUTOPILOT_CRON = "*/1 * * * *";
+const SHUTDOWN_GRACE_MS = 10_000;
 
 export interface ComposeServiceOptions {
   port?: number;
@@ -67,6 +73,8 @@ export interface ComposeServiceOptions {
   argus?: ArgusEmitter;
   /** Test-only: skip actually binding the HTTP server to a port. */
   skipHttpListen?: boolean;
+  /** Test-only: called instead of process.exit(1) when the HTTP server emits 'error' (e.g. EADDRINUSE). */
+  onFatalServerError?: (err: Error) => void;
 }
 
 export interface ComposedService {
@@ -80,7 +88,14 @@ export interface ComposedService {
   rotationControllers: Map<string, RotationController>;
   /** PANT-824 — probe/transition/scheduler-start-failure counters behind GET /metrics and GET /readyz. */
   sensing: SensingMetrics;
+  /** Stops every timer/job and closes the server and DB immediately. Idempotent. */
   stopAll: () => void;
+  /**
+   * PANT-829 graceful shutdown: stops every timer/job, stops accepting new
+   * connections and waits for in-flight requests to finish (up to
+   * graceMs, then drops remaining connections), then closes the DB. Idempotent.
+   */
+  shutdown: (options?: { graceMs?: number }) => Promise<void>;
 }
 
 // hdl-rr-04: mirrors PROVIDER_ADAPTERS' "every lane always gets a real
@@ -278,12 +293,28 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
   // background job for the first time on either branch and exposes it for
   // manual inspection/rotation via GET/POST /rotation/:provider.
   const rotationControllers = buildRotationControllers(registry, store);
-  const rotationJobs: RunningBackgroundJob[] = [];
+  const backgroundJobs: RunningBackgroundJob[] = [];
   for (const controller of rotationControllers.values()) {
-    rotationJobs.push(startCapResetRecoveryJob(controller));
+    backgroundJobs.push(startCapResetRecoveryJob(controller));
   }
 
+  // PANT-829: lane_status_history (a row every ~5s per suspect lane) and
+  // telemetry_events are otherwise append-only forever.
+  backgroundJobs.push(startHistoryRetentionJob(store, { retentionDays: resolveRetentionDays(env) }));
+
   const httpServer = createHttpServer(registry, store, refreshLane, undefined, options.fetchImpl, rotationControllers, resolver, sensing, resolveReadinessStalenessMs(env));
+  // PANT-829: without a listener, EADDRINUSE and friends surface as an
+  // uncaught exception with a raw stack. Log what actually went wrong and
+  // exit non-zero so a supervisor sees a clean failure.
+  httpServer.on("error", (err: NodeJS.ErrnoException) => {
+    const hint = err.code === "EADDRINUSE" ? ` — port ${port} is already in use (set PORT to change it)` : "";
+    console.error(`[main] HTTP server error${hint}:`, err.message);
+    if (options.onFatalServerError) {
+      options.onFatalServerError(err);
+      return;
+    }
+    process.exit(1);
+  });
   if (!options.skipHttpListen) {
     httpServer.listen(port, () => {
       console.log(`heimdall service listening on http://localhost:${port}`);
@@ -300,18 +331,84 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     rotationControllers,
     sensing,
     stopAll: () => {
-      stopReconcileSubscription();
-      for (const s of multicaSchedulers) s.stop();
-      for (const s of inProcessSchedulers) s.stop();
-      for (const job of rotationJobs) job.stop();
-      unsubscribeRouteOutcomes();
-      httpServer.close();
-      // Open GET /events (SSE) streams never end on their own — without this
-      // close() would wait on them forever.
-      httpServer.closeAllConnections();
+      stopBackgroundWork();
+      if (httpServer.listening) {
+        httpServer.close();
+        // Open GET /events (SSE) streams never end on their own — without this
+        // close() would wait on them forever.
+        httpServer.closeAllConnections();
+      }
       closeRouteLedgers();
       store.close();
     },
+    shutdown: async ({ graceMs = SHUTDOWN_GRACE_MS } = {}) => {
+      stopBackgroundWork();
+      if (httpServer.listening) {
+        await new Promise<void>((resolve) => {
+          const force = setTimeout(() => httpServer.closeAllConnections(), graceMs);
+          force.unref();
+          httpServer.close(() => {
+            clearTimeout(force);
+            resolve();
+          });
+          // SSE streams never finish on their own; end them now so only real
+          // in-flight requests use the grace period.
+          endEventStreams(httpServer);
+          httpServer.closeIdleConnections();
+        });
+      }
+      closeRouteLedgers();
+      store.close();
+    },
+  };
+
+  function stopBackgroundWork(): void {
+    stopReconcileSubscription();
+    for (const s of multicaSchedulers) s.stop();
+    for (const s of inProcessSchedulers) s.stop();
+    for (const job of backgroundJobs) job.stop();
+    unsubscribeRouteOutcomes();
+  }
+}
+
+/**
+ * PANT-829: SIGTERM (container stop/restart) and SIGINT (Ctrl-C) run the
+ * graceful shutdown and exit 0, instead of killing the process mid-request.
+ * A second signal while shutting down exits immediately.
+ */
+export function installShutdownHandlers(
+  service: Pick<ComposedService, "shutdown">,
+  {
+    exit = (code) => process.exit(code),
+    signals = process,
+  }: {
+    exit?: (code: number) => void;
+    /** Test-only: where signal listeners are attached (default: process). */
+    signals?: Pick<NodeJS.EventEmitter, "on" | "off">;
+  } = {},
+): () => void {
+  let shuttingDown = false;
+  const onSignal = (signal: NodeJS.Signals): void => {
+    if (shuttingDown) {
+      console.warn(`[main] received ${signal} again — exiting immediately.`);
+      exit(1);
+      return;
+    }
+    shuttingDown = true;
+    console.log(`[main] received ${signal} — shutting down.`);
+    service.shutdown().then(
+      () => exit(0),
+      (err) => {
+        console.error("[main] error during shutdown:", err);
+        exit(1);
+      },
+    );
+  };
+  signals.on("SIGTERM", onSignal);
+  signals.on("SIGINT", onSignal);
+  return () => {
+    signals.off("SIGTERM", onSignal);
+    signals.off("SIGINT", onSignal);
   };
 }
 
@@ -324,7 +421,7 @@ if (isMainModule) {
   // title so operators/monitors can find it by name (e.g. `pgrep heimdall`).
   process.title = "heimdall";
   startArgusSdk();
-  composeService();
+  installShutdownHandlers(composeService());
   // heimdall#95: installed only after composeService() returned, so a
   // startup failure still crashes the process exactly as before. From here
   // on, a stray rejected promise (one bad request, one failed probe) is

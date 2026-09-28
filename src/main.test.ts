@@ -1,12 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
+import { EventEmitter } from "node:events";
+import { createServer } from "node:net";
+import { composeService, installShutdownHandlers } from "./main.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { composeService } from "./main.js";
 import type { CommandRunner } from "./core/scheduler/command-runner.js";
 import { resolveDefaultDbPath } from "./core/state-store.js";
 import { RouteLedger } from "./core/routing/route-ledger.js";
@@ -524,6 +526,218 @@ test("POST /lanes/:laneId/refresh works end-to-end against the composed service"
     assert.equal(claudeLane.status, "up");
   } finally {
     service.stopAll();
+  }
+});
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Records every timer created while installed and whether it was cleared or
+ * (for one-shot timeouts) has fired. Checking these specific handles, rather
+ * than the process-wide timer count, keeps the leak check independent of
+ * timers left behind by other tests and of how fast the event loop runs.
+ */
+function trackTimers() {
+  const originals = {
+    setTimeout: globalThis.setTimeout,
+    setInterval: globalThis.setInterval,
+    clearTimeout: globalThis.clearTimeout,
+    clearInterval: globalThis.clearInterval,
+  };
+  const live = new Map<unknown, string>();
+  const release = (handle: unknown) => {
+    live.delete(handle);
+  };
+
+  const patched = {} as typeof originals;
+  patched.setTimeout = ((fn: (...a: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+    const handle = originals.setTimeout(
+      (...a: unknown[]) => {
+        release(handle);
+        fn(...a);
+      },
+      ms,
+      ...args,
+    );
+    live.set(handle, `setTimeout(${ms})`);
+    return handle;
+  }) as typeof setTimeout;
+  patched.setInterval = ((fn: (...a: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+    const handle = originals.setInterval(fn, ms, ...args);
+    live.set(handle, `setInterval(${ms})`);
+    return handle;
+  }) as typeof setInterval;
+  patched.clearTimeout = ((handle?: Parameters<typeof clearTimeout>[0]) => {
+    release(handle);
+    originals.clearTimeout(handle);
+  }) as typeof clearTimeout;
+  patched.clearInterval = ((handle?: Parameters<typeof clearInterval>[0]) => {
+    release(handle);
+    originals.clearInterval(handle);
+  }) as typeof clearInterval;
+
+  const tracker = {
+    created: () => live.size,
+    live: () => [...live.values()],
+    install: () => Object.assign(globalThis, patched),
+    restore: () => Object.assign(globalThis, originals),
+  };
+  tracker.install();
+  return tracker;
+}
+
+test("PANT-829: shutdown() clears every timer composeService started and closes the server and DB — no leaked handles", async () => {
+  const timers = trackTimers();
+  const env = {
+    ...testEnv(),
+    // Two credentialed claude lanes, so a cap-reset rotation job starts too.
+    HEIMDALL_LANE_3_ID: "claude@second",
+    HEIMDALL_LANE_3_PROVIDER: "claude",
+    HEIMDALL_LANE_3_CREDENTIAL_REF: "CLAUDE_TOKEN_2",
+    CLAUDE_TOKEN_2: "sk-ant-fake-2",
+  };
+  let service: ReturnType<typeof composeService>;
+  try {
+    service = composeService({
+      env,
+      commandRunner: mockCommandRunner(),
+      fetchImpl: mockFetch(),
+      skipHttpListen: true,
+      port: 0,
+    });
+  } finally {
+    timers.restore();
+  }
+  assert.equal(service.rotationControllers.size, 1, "fixture should exercise the cap-reset job");
+  await new Promise<void>((resolve) => service.httpServer.listen(0, resolve));
+  assert.ok(timers.created() > 0, "composeService should have started timers");
+
+  // A keep-alive client connection that would otherwise hold server.close() open.
+  const { port } = service.httpServer.address() as AddressInfo;
+  assert.equal((await fetch(`http://localhost:${port}/healthz`)).status, 200);
+
+  // shutdown() starts (and must clear) its own force-close timer, so track it too.
+  timers.install();
+  try {
+    await service.shutdown({ graceMs: 200 });
+  } finally {
+    timers.restore();
+  }
+
+  assert.equal(service.httpServer.listening, false);
+  assert.deepEqual(timers.live(), [], "every timer composeService started must be cleared by shutdown()");
+  // PANT-827 replaced the status-watcher poll with a lane.status_changed
+  // subscription; shutdown() must release it like it clears the timers.
+  assert.equal(service.store.events.listenerCount(), 0, "the reconcile subscription must be released");
+  assert.throws(() => service.store.listLanes(), /not open|closed/i, "the DB must be closed");
+  // Idempotent — a second shutdown/stopAll after the first is a no-op.
+  await service.shutdown();
+  service.stopAll();
+});
+
+test("PANT-829: an open GET /events (SSE) stream is ended by shutdown() instead of holding it for the grace period", async () => {
+  const service = composeService({
+    env: testEnv(),
+    commandRunner: mockCommandRunner(),
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port: 0,
+  });
+  await new Promise<void>((resolve) => service.httpServer.listen(0, resolve));
+  const { port } = service.httpServer.address() as AddressInfo;
+
+  const res = await fetch(`http://localhost:${port}/events`);
+  assert.equal(res.status, 200);
+  const reader = res.body!.getReader();
+  const first = await reader.read();
+  assert.match(new TextDecoder().decode(first.value), /: connected/);
+
+  // A grace period far longer than the 10s timeout below: if the stream held
+  // shutdown() open, it would only finish at the force-close, so this fails.
+  await withTimeout(service.shutdown({ graceMs: 60_000 }), 10_000, "shutdown() waited on the open SSE stream");
+
+  assert.equal(service.httpServer.listening, false);
+  assert.equal((await reader.read()).done, true, "the client sees the stream end");
+});
+
+test("PANT-829: SIGTERM/SIGINT run the graceful shutdown then exit 0; a second signal exits 1 immediately", async () => {
+  const signals = new EventEmitter();
+  const exits: number[] = [];
+  let shutdowns = 0;
+  let finishShutdown!: () => void;
+  const uninstall = installShutdownHandlers(
+    {
+      shutdown: () => {
+        shutdowns += 1;
+        return new Promise<void>((resolve) => {
+          finishShutdown = resolve;
+        });
+      },
+    },
+    { exit: (code) => exits.push(code), signals },
+  );
+
+  signals.emit("SIGTERM", "SIGTERM");
+  assert.equal(shutdowns, 1);
+  assert.deepEqual(exits, [], "must not exit before shutdown finishes");
+
+  signals.emit("SIGINT", "SIGINT");
+  assert.deepEqual(exits, [1], "a second signal while shutting down forces exit");
+
+  finishShutdown();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(exits, [1, 0]);
+  assert.equal(shutdowns, 1);
+
+  uninstall();
+  assert.equal(signals.listenerCount("SIGTERM"), 0);
+  assert.equal(signals.listenerCount("SIGINT"), 0);
+});
+
+test("PANT-829: an HTTP server 'error' such as EADDRINUSE is reported, not an uncaught crash", async () => {
+  const blocker = createServer();
+  await new Promise<void>((resolve) => blocker.listen(0, resolve));
+  const { port } = blocker.address() as AddressInfo;
+
+  const errors: Error[] = [];
+  let reported!: () => void;
+  const errorReported = new Promise<void>((resolve) => {
+    reported = resolve;
+  });
+  const service = composeService({
+    env: testEnv(),
+    commandRunner: mockCommandRunner(),
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port,
+    onFatalServerError: (err) => {
+      errors.push(err);
+      reported();
+    },
+  });
+
+  try {
+    service.httpServer.listen(port);
+    await withTimeout(errorReported, 5_000, "onFatalServerError was never called");
+    // Let any duplicate 'error' emission surface before counting.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(errors.length, 1);
+    assert.equal((errors[0] as NodeJS.ErrnoException).code, "EADDRINUSE");
+  } finally {
+    service.stopAll();
+    blocker.close();
   }
 });
 

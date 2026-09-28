@@ -1,4 +1,4 @@
-export type ClaudeCapKind = "rate_limit" | "weekly_limit" | "oauth_expired";
+export type ClaudeCapKind = "rate_limit" | "session_limit" | "weekly_limit" | "oauth_expired";
 
 export interface ClaudeCapSignal {
   kind: ClaudeCapKind;
@@ -18,7 +18,11 @@ interface ErrorLike {
   message?: unknown;
 }
 
-const DEFAULT_RESET_MS = 7 * 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_RESET_MS = 7 * DAY_MS;
+// The Claude subscription session window is 5 hours, so a session limit with
+// no readable reset time recovers well before the weekly default would say.
+const SESSION_RESET_MS = 5 * 60 * 60 * 1000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -157,7 +161,14 @@ function extractHeaderResetAt(headers: HeaderLike | null, now: Date): string | n
   return candidates.reduce((latest, candidate) => (Date.parse(candidate) > Date.parse(latest) ? candidate : latest));
 }
 
-function extractResetAt(input: unknown, headers: HeaderLike | null, now: Date): string {
+// Older Claude Code builds printed the 5-hour limit as
+// "Claude AI usage limit reached|<epoch seconds>".
+function parsePipeEpochReset(message: string): string | null {
+  const match = message.match(/limit reached\|(\d{9,13})\b/i);
+  return match ? parseResetTimestamp(match[1]) : null;
+}
+
+function extractResetAt(input: unknown, headers: HeaderLike | null, now: Date, kind: ClaudeCapKind): string {
   const body = extractBody(input);
   const explicit =
     getNestedString(body, ["reset_at"]) ??
@@ -180,10 +191,13 @@ function extractResetAt(input: unknown, headers: HeaderLike | null, now: Date): 
   ]
     .filter(Boolean)
     .join(" ");
-  const cliReset = parseCliStyleResetTime(rawMsg, now);
+  const isSession = kind === "session_limit";
+  const cliReset = parseCliStyleResetTime(rawMsg, now, isSession ? DAY_MS : DEFAULT_RESET_MS);
   if (cliReset) return cliReset;
+  const pipeReset = parsePipeEpochReset(rawMsg);
+  if (pipeReset) return pipeReset;
 
-  return new Date(now.getTime() + DEFAULT_RESET_MS).toISOString();
+  return new Date(now.getTime() + (isSession ? SESSION_RESET_MS : DEFAULT_RESET_MS)).toISOString();
 }
 
 // Parses "resets 7pm (America/Chicago)" or "resets 7:30pm (America/Chicago)"
@@ -191,7 +205,9 @@ function extractResetAt(input: unknown, headers: HeaderLike | null, now: Date): 
 // null if the pattern is absent or the timezone is unrecognized — callers fall
 // through to DEFAULT_RESET_MS in that case. Exported so tests can cover it
 // directly without needing a full probeClaudeSubscriptionLane round-trip.
-export function parseCliStyleResetTime(message: string, now: Date): string | null {
+// `rollover` is how far a reset time that already passed today moves forward:
+// a week for the weekly cap, a day for the 5-hour session limit.
+export function parseCliStyleResetTime(message: string, now: Date, rollover: number = DEFAULT_RESET_MS): string | null {
   const match = message.match(/resets\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*\(([^)]+)\)/i);
   if (!match) return null;
   const [, hourStr, minStr = "00", ampm, tz] = match;
@@ -215,11 +231,11 @@ export function parseCliStyleResetTime(message: string, now: Date): string | nul
     // deltaMinutes = target local time – current local time (same timezone).
     // Adding this to now.getTime() gives the UTC instant when local time will
     // be hour:minute today. A negative delta means the reset already passed
-    // today; in that case the weekly cap resets 7 days from the same time.
+    // today; in that case it moves forward by `rollover`.
     const deltaMinutes = (hour * 60 + minute) - (nowLocalH * 60 + nowLocalMin);
     let targetMs = now.getTime() + deltaMinutes * 60_000;
     if (targetMs <= now.getTime()) {
-      targetMs += 7 * 24 * 60 * 60 * 1000;
+      targetMs += rollover;
     }
     return new Date(targetMs).toISOString();
   } catch {
@@ -272,6 +288,12 @@ function classify(status: number | null, message: string): ClaudeCapKind | null 
   if (message.includes("weekly") && (message.includes("limit") || message.includes("cap"))) {
     return "weekly_limit";
   }
+  // Claude Code 2.1.x prints "You've hit your session limit · resets 3pm (tz)"
+  // (the binary builds it from "You've hit your " + "session limit"); older
+  // builds said "5-hour limit" or "Claude AI usage limit reached|<epoch>".
+  if (/session limit|5-hour (?:usage )?limit|usage limit reached/.test(message)) {
+    return "session_limit";
+  }
   if (status === 429) {
     return message.includes("weekly") ? "weekly_limit" : "rate_limit";
   }
@@ -292,7 +314,7 @@ export function parseClaudeCapSignal(input: unknown, now: Date = new Date()): Cl
 
   return {
     kind,
-    reset_at: extractResetAt(input, extractHeaders(input), now),
+    reset_at: extractResetAt(input, extractHeaders(input), now, kind),
     reason,
   };
 }
