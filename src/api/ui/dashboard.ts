@@ -750,12 +750,12 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       var detail = lane.signal_state === "never_probed"
         ? "never probed"
         : "stale — last probed " + (lane.last_probed_at || "unknown");
-      return "<span class=\"badge badge-no-signal\" title=\"" + escapeHtml("status " + lane.status + ", " + detail) + "\">" +
+      return "<span class=\\"badge badge-no-signal\\" title=\\"" + escapeHtml("status " + lane.status + ", " + detail) + "\\">" +
         escapeHtml(lane.signal_state === "never_probed" ? "no signal" : "no signal (stale)") + "</span>";
     }
     var badgeClass = "badge badge-" + escapeHtml(lane.status);
     var label = BADGE_LABEL[lane.status] || lane.status;
-    return "<span class=\"" + badgeClass + "\">" + escapeHtml(label) + "</span>";
+    return "<span class=\\"" + badgeClass + "\\">" + escapeHtml(label) + "</span>";
   }
 
   function renderRow(lane) {
@@ -764,7 +764,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       "<td>" + escapeHtml(lane.lane_id) + "</td>" +
       "<td>" + escapeHtml(lane.provider) + "</td>" +
       "<td>" + escapeHtml(lane.model || "") + priorityBadge(lane.priority) + "</td>" +
-      "<td><span class=\\"" + badgeClass + "\\">" + escapeHtml(label) + "</span>" + overrideBadge(lane.manual_override) + "</td>" +
+      "<td>" + statusBadge(lane) + overrideBadge(lane.manual_override) + "</td>" +
       "<td>" + tokenChip(lane) + "</td>" +
       "<td class=\\"reason\\">" + errorCodeChip(lane) + escapeHtml(lane.reason) + "</td>" +
       "<td>" + resetAtCell(lane) + "</td>" +
