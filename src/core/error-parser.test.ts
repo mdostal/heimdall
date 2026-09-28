@@ -1,6 +1,6 @@
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
-import { parseClaudeCapSignal, type ClaudeCapKind } from "./error-parser.js";
+import { parseClaudeCapSignal, parseTryAgainAtResetTime, type ClaudeCapKind } from "./error-parser.js";
 import { ERROR_CODES, type ErrorCode } from "./status-model.js";
 import { probeClaudeLane, probeClaudeSubscriptionLane } from "./signal-sources/active-probe/claude.js";
 import { probeCodexLane } from "./signal-sources/active-probe/codex.js";
@@ -386,11 +386,53 @@ test("error code: every ErrorCode value is produced by at least one real-error c
   assert.deepEqual([...covered].sort(), [...ERROR_CODES].sort());
 });
 
-// Known gap, filed rather than fixed here. It runs as `todo` so it reports
-// without failing the suite; drop the flag once the linked ticket lands.
-test("error code: Codex usage limit with no retry-after takes reset_at from its 'try again at' text", { todo: "PANT-841" }, async (t) => {
+test("error code: Codex usage limit with no retry-after takes reset_at from its 'try again at' text", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: NOW });
   const result = await probeCodexLane("sk-proj-x", respondWith(429, openAiError("usage_limit_reached", CODEX_USAGE_LIMIT)));
   assert.equal(result.error_code, "quota_exceeded");
-  assert.notEqual(result.reset_at, null);
+  // Codex renders the time in the CLI host's local zone, so the expectation is
+  // built the same way and holds under any TZ.
+  assert.equal(result.reset_at, new Date(2026, 9, 13, 20, 25).toISOString());
+});
+
+// ---------------------------------------------------------------------------
+// Codex "try again at" reset text (PANT-841). Formats come from
+// codex-rs/protocol/src/error.rs format_retry_timestamp: local time, no zone,
+// date omitted when the reset is later the same local day.
+// ---------------------------------------------------------------------------
+
+const tryAgainCases: Array<{ name: string; message: string; reset_at: string | null }> = [
+  { name: "dated form", message: CODEX_USAGE_LIMIT, reset_at: new Date(2026, 9, 13, 20, 25).toISOString() },
+  {
+    name: "capitalised 'Try again at' with a curly apostrophe (Enterprise/unknown plan copy)",
+    message: "You’ve hit your usage limit. Try again at Nov 1st, 2026 9:05 AM.",
+    reset_at: new Date(2026, 10, 1, 9, 5).toISOString(),
+  },
+  { name: "12 AM is midnight", message: "try again at Dec 2nd, 2026 12:00 AM.", reset_at: new Date(2026, 11, 2, 0, 0).toISOString() },
+  { name: "12 PM is noon", message: "try again at Dec 3rd, 2026 12:30 PM.", reset_at: new Date(2026, 11, 3, 12, 30).toISOString() },
+  {
+    name: "same-day form carries only the time",
+    message: "You've hit your usage limit. or try again at 11:59 PM.",
+    reset_at: new Date(NOW.getFullYear(), NOW.getMonth(), NOW.getDate(), 23, 59).toISOString(),
+  },
+  { name: "impossible date", message: "try again at Feb 30th, 2026 8:25 PM.", reset_at: null },
+  { name: "unknown month", message: "try again at Foo 3rd, 2026 8:25 PM.", reset_at: null },
+  { name: "'try again later' has no time", message: "You've hit your usage limit. Try again later.", reset_at: null },
+  { name: "unrelated text", message: "rate limited", reset_at: null },
+];
+
+for (const c of tryAgainCases) {
+  test(`try again at: ${c.name}`, () => {
+    assert.equal(parseTryAgainAtResetTime(c.message, NOW), c.reset_at);
+  });
+}
+
+test("error code: Codex usage limit prefers retry-after over the 'try again at' text", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  const result = await probeCodexLane(
+    "sk-proj-x",
+    respondWith(429, openAiError("usage_limit_reached", CODEX_USAGE_LIMIT), { "retry-after": "60" }),
+  );
+  assert.equal(result.error_code, "quota_exceeded");
+  assert.equal(result.reset_at, "2026-09-27T12:01:00.000Z");
 });
