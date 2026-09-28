@@ -64,6 +64,7 @@ OLLAMA_DUMMY=local
 | `HEIMDALL_RETENTION_DAYS` | `30` | Days of `lane_status_history` and `telemetry_events` to keep. Older rows are pruned at startup and daily; each lane's latest status row is always kept. Non-positive or non-numeric values fall back to the default. |
 | `HEIMDALL_HOME` | `~/.heimdall` | Root directory for Heimdall local state (token registry, etc). |
 | `HEIMDALL_TOKEN_REGISTRY_PATH` | `$HEIMDALL_HOME/token-registry.json` | Path to the multi-account token registry file. |
+| `HEIMDALL_READINESS_STALENESS_MS` | `900000` (15 min) | `GET /readyz` reports `degraded` if no lane has been observed within this window. |
 
 ## Multica integration
 

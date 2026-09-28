@@ -47,6 +47,8 @@ import {
   resolveRetentionDays,
   type RunningBackgroundJob,
 } from "./core/background-jobs.js";
+import { SensingMetrics } from "./core/telemetry/sensing-metrics.js";
+import { resolveReadinessStalenessMs } from "./api/readiness.js";
 import { closeRouteLedgers, onRouteOutcome, useRouteLedgerPath } from "./core/route-selector.js";
 import { RouteOutcomeTracker, routeOutcomeToPassiveResponse } from "./core/signal-sources/route-outcome.js";
 
@@ -84,6 +86,8 @@ export interface ComposedService {
   controlAdapters: Map<string, ControlAdapter>;
   /** hdl-rr-04 — keyed by provider, only present for providers with 2+ credentialed lanes (nothing to rotate between otherwise). */
   rotationControllers: Map<string, RotationController>;
+  /** PANT-824 — probe/transition/scheduler-start-failure counters behind GET /metrics and GET /readyz. */
+  sensing: SensingMetrics;
   /** Stops every timer/job and closes the server and DB immediately. Idempotent. */
   stopAll: () => void;
   /**
@@ -149,6 +153,7 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     );
   }
 
+  const sensing = new SensingMetrics();
   const pipelines = new Map<string, LanePipeline>();
   const multicaSchedulers: MulticaAutopilotScheduler[] = [];
   const inProcessSchedulers: InProcessScheduler[] = [];
@@ -165,6 +170,13 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
       console.error(
         `[main] no ProviderAdapters registered for provider "${lane.provider}" (lane ${lane.lane_id}) — skipping scheduling for this lane.`,
       );
+      // Declared but never sensed — surface it on /metrics and /readyz
+      // rather than only in the log.
+      sensing.recordSchedulerStartFailure(
+        lane.lane_id,
+        "in_process",
+        new Error(`no ProviderAdapters registered for provider "${lane.provider}"`),
+      );
       continue;
     }
 
@@ -176,6 +188,7 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
         fetchImpl: options.fetchImpl,
       },
       buildAdapters(),
+      sensing,
     );
     pipelines.set(lane.lane_id, pipeline);
 
@@ -203,6 +216,7 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
         // (e.g. an invalid HEIMDALL_AUTOPILOT_CRON) must not prevent every
         // other lane's scheduling from starting.
         console.error(`[main] failed to start MulticaAutopilotScheduler for lane ${lane.lane_id}:`, err);
+        sensing.recordSchedulerStartFailure(lane.lane_id, "multica_autopilot", err);
       }
       multicaSchedulers.push(multicaScheduler);
     }
@@ -217,7 +231,13 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
       argus,
       initialDelayMs: store.hasRecordedStatus(lane.lane_id) ? undefined : 0,
     });
-    inProcessScheduler.start();
+    try {
+      inProcessScheduler.start();
+    } catch (err) {
+      // Same per-lane isolation as the autopilot scheduler above.
+      console.error(`[main] failed to start InProcessScheduler for lane ${lane.lane_id}:`, err);
+      sensing.recordSchedulerStartFailure(lane.lane_id, "in_process", err);
+    }
     inProcessSchedulers.push(inProcessScheduler);
 
     controlAdapters.set(lane.lane_id, sharedStubControlAdapter);
@@ -282,7 +302,7 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
   // telemetry_events are otherwise append-only forever.
   backgroundJobs.push(startHistoryRetentionJob(store, { retentionDays: resolveRetentionDays(env) }));
 
-  const httpServer = createHttpServer(registry, store, refreshLane, undefined, options.fetchImpl, rotationControllers, resolver);
+  const httpServer = createHttpServer(registry, store, refreshLane, undefined, options.fetchImpl, rotationControllers, resolver, sensing, resolveReadinessStalenessMs(env));
   // PANT-829: without a listener, EADDRINUSE and friends surface as an
   // uncaught exception with a raw stack. Log what actually went wrong and
   // exit non-zero so a supervisor sees a clean failure.
@@ -309,6 +329,7 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     inProcessSchedulers,
     controlAdapters,
     rotationControllers,
+    sensing,
     stopAll: () => {
       stopBackgroundWork();
       if (httpServer.listening) {

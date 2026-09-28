@@ -1222,11 +1222,64 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
     return { families: families, order: order };
   }
 
+  function parseLabels(labels) {
+    var out = {};
+    var re = /([a-zA-Z_]+)="([^"]*)"/g;
+    var m;
+    while ((m = re.exec(labels)) !== null) out[m[1]] = m[2];
+    return out;
+  }
+
+  // PANT-824: per-lane sensing summary above the raw table — probes by
+  // result, last-probe age, status transitions, mean probe duration and
+  // scheduler start failures, i.e. "is each lane actually being sensed".
+  function renderSensingSummary(parsed) {
+    var lanes = {};
+    var laneOrder = [];
+    function lane(id) {
+      if (!lanes[id]) {
+        lanes[id] = { probes: {}, age: null, transitions: 0, durSum: 0, durCount: 0, schedFailures: 0 };
+        laneOrder.push(id);
+      }
+      return lanes[id];
+    }
+    function each(name, fn) {
+      (parsed.families[name] || []).forEach(function (s) { fn(parseLabels(s.labels), Number(s.value)); });
+    }
+    each("heimdall_probes_total", function (l, v) {
+      var key = l.result === "up" || l.error_code === "none" ? l.result : l.result + " (" + l.error_code + ")";
+      var entry = lane(l.lane);
+      entry.probes[key] = (entry.probes[key] || 0) + v;
+    });
+    each("heimdall_lane_last_probe_age_seconds", function (l, v) { lane(l.lane).age = v; });
+    each("heimdall_lane_status_transitions_total", function (l, v) { lane(l.lane).transitions += v; });
+    each("heimdall_probe_duration_seconds_sum", function (l, v) { lane(l.lane).durSum += v; });
+    each("heimdall_probe_duration_seconds_count", function (l, v) { lane(l.lane).durCount += v; });
+    each("heimdall_scheduler_start_failures_total", function (l, v) { lane(l.lane).schedFailures += v; });
+    if (laneOrder.length === 0) return "";
+    var html = "<h3>Sensing</h3><table><thead><tr><th>Lane</th><th>Probes</th><th>Last probe</th>" +
+      "<th>Transitions</th><th>Mean probe</th><th>Scheduler start failures</th></tr></thead><tbody>";
+    laneOrder.forEach(function (id) {
+      var e = lanes[id];
+      var probes = Object.keys(e.probes).map(function (k) { return escapeHtml(k) + ": " + e.probes[k]; }).join(", ") || "none";
+      var age = e.age === null ? "never" : e.age + "s ago";
+      var mean = e.durCount > 0 ? (e.durSum / e.durCount).toFixed(2) + "s" : "—";
+      html += "<tr><td>" + escapeHtml(id) + "</td><td>" + probes + "</td><td>" + escapeHtml(age) +
+        "</td><td>" + e.transitions + "</td><td>" + escapeHtml(mean) + "</td><td>" +
+        (e.schedFailures > 0 ? "<strong>" + e.schedFailures + "</strong>" : "0") + "</td></tr>";
+    });
+    html += "</tbody></table>";
+    return html;
+  }
+
   function renderTelemetry(text) {
     var root = document.getElementById("telemetry-root");
     var parsed = parsePrometheusText(text);
     var rows = [];
     parsed.order.forEach(function (name) {
+      // Histogram buckets are unreadable as table rows — the sensing
+      // summary shows the mean from _sum/_count instead.
+      if (/_bucket$/.test(name)) return;
       parsed.families[name].forEach(function (sample) {
         rows.push({ name: name, labels: sample.labels, value: sample.value });
       });
@@ -1235,7 +1288,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       root.innerHTML = "<div class=\\"empty-state\\">No telemetry recorded yet.</div>";
       return;
     }
-    var html = "<table><thead><tr><th>Metric</th><th>Labels</th><th>Value</th></tr></thead><tbody>";
+    var html = renderSensingSummary(parsed) + "<table><thead><tr><th>Metric</th><th>Labels</th><th>Value</th></tr></thead><tbody>";
     rows.forEach(function (row) {
       html +=
         "<tr><td>" + escapeHtml(row.name) + "</td><td>" + escapeHtml(row.labels) +

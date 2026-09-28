@@ -2643,8 +2643,8 @@ test("hdl-ot-03: GET /metrics reflects real telemetry_events counts with correct
   try {
     const res = await fetch(`http://localhost:${port}/metrics`);
     const body = await res.text();
-    assert.match(body, /heimdall_actuation_results_total\{provider="claude",action="disable",success="true"\} 2/);
-    assert.match(body, /heimdall_actuation_results_total\{provider="claude",action="enable",success="false"\} 1/);
+    // PANT-824: removed — stub adapters can never produce actuation results.
+    assert.doesNotMatch(body, /heimdall_actuation_results_total/);
     assert.match(body, /heimdall_rotation_events_total\{provider="claude",kind="capped"\} 1/);
     assert.match(body, /heimdall_model_substitutions_total\{provider="claude"\} 1/);
   } finally {
@@ -2665,6 +2665,7 @@ test("hdl-ot-04: GET / (dashboard) includes a Telemetry panel that loads from GE
     const body = await res.text();
     assert.match(body, /id="telemetry-root"/);
     assert.match(body, /fetch\("\/metrics"\)/, "the panel must load its state from GET /metrics");
+    assert.match(body, /heimdall_lane_last_probe_age_seconds/, "PANT-824: the panel summarizes the sensing metrics");
   } finally {
     server.close();
     store.close();

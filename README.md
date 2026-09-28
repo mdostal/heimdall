@@ -202,6 +202,7 @@ access, fetched on demand.
 curl http://localhost:4870/lanes
 curl -X POST http://localhost:4870/lanes/<laneId>/refresh   # force a refresh
 curl http://localhost:4870/healthz                          # liveness only, no lane data
+curl http://localhost:4870/readyz                           # readiness: 503 + reasons if lanes aren't being sensed
 curl -X POST http://localhost:4870/lanes/<laneId>/override \
   -H "content-type: application/json" -d '{"state":"disabled"}'   # manual override: enabled | disabled | auto
 curl -X POST http://localhost:4870/lanes/<laneId>/reset-at \
@@ -263,7 +264,8 @@ unrecognized tool *name* throws a real MCP protocol error.
 
 Other scripts: `npm test` (Node built-in test runner via `tsx`),
 `npm run build` (type-check + compile to `dist/`), `npm run sla-report`
-(status-correctness SLA harness).
+(status-correctness SLA harness; the only thing that rewrites the tracked
+`test/sla-harness/report.md`).
 
 **Actuation** (v2) is enabled per-lane by mapping it to Multica agents via
 `HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS` plus `MULTICA_BASE_URL` /

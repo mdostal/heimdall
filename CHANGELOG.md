@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Sensing KPIs in `GET /metrics` and a real readiness check, `GET /readyz` (PANT-824).** Every past incident was a sensing failure: probes never started (PANT-753), a quota error was misclassified (PANT-729), lanes were never probed (PANT-181). None of them showed up in a metric, and `/healthz` stayed green throughout. New metrics: `heimdall_probes_total{lane,provider,source,result,error_code}` (passive route outcomes from heimdall#96 count as `source="passive"`), `heimdall_probe_duration_seconds{lane,provider}` (histogram, networked cycles only), `heimdall_lane_last_probe_age_seconds{lane}`, `heimdall_lane_status_transitions_total{lane,from,to}` and `heimdall_scheduler_start_failures_total{lane,scheduler}`. They are recorded by `LanePipeline` and `composeService()` through a new in-memory `SensingMetrics`, with no new dependency and the same hand-rolled exposition format. `GET /readyz` returns 503 `degraded` with reasons when a lane's scheduler failed to start, the state DB is unwritable, or no lane has been observed within `HEIMDALL_READINESS_STALENESS_MS` (default 15 min). `/healthz` is still a static liveness check. The dashboard Telemetry panel gains a per-lane Sensing summary. See `docs/operations.md`.
+
+### Removed
+
+- **`heimdall_actuation_results_total`** could never be non-zero. Every lane has used `StubControlAdapter` since hdl-msh-01, and nothing calls `emitActuationResult()`.
+
 ### Changed
 
 - **Lane status is event-driven; the status-watcher poll loop is gone (PANT-827).** `main.ts` used to run a service-wide `setInterval` that called `ControlAdapter.reconcile()` for every lane every 5s whether or not anything had changed. Now `StateStore` emits an in-process `lane.status_changed` event (`{lane_id, from, to, error_code, reset_at, observed_at, cause}`) only when a lane's resolved status actually changes, or when its manual override or manual reset_at changes. `reconcile()` subscribes to that event, so it runs once per transition. The dashboard subscribes to a new `GET /events` Server-Sent Events stream fed by the same emitter and re-fetches `GET /lanes` on each event. It falls back to the old 5s poll only when SSE is unavailable. Known limit: the emitter is in-process, so a status or override written by a separate process against the same DB file (the `heimdall` CLI, `heimdall mcp`) does not emit. Active-probe scheduling (`InProcessScheduler`) is unchanged.
