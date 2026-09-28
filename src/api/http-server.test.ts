@@ -3318,3 +3318,70 @@ test("hdl-bp-05: POST /backoff-policy/exponential-ceiling-ms rejects a value at 
     store.close();
   }
 });
+
+test("GET /events streams lane.status_changed within 1s of recordStatus() changing a lane (PANT-827)", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+  store.recordStatus({
+    lane_id: "claude@mathew.dostal",
+    status: "up",
+    reset_at: null,
+    reason: null,
+    signal_source: "active_probe",
+    observed_at: "2026-09-27T10:00:00.000Z",
+  });
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  const controller = new AbortController();
+
+  try {
+    const res = await fetch(`http://localhost:${port}/events`, { signal: controller.signal });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /^text\/event-stream/);
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+
+    const changedAt = Date.now();
+    store.recordStatus({
+      lane_id: "claude@mathew.dostal",
+      status: "out_of_credit",
+      reset_at: null,
+      reason: "quota",
+      error_code: "quota_exceeded",
+      signal_source: "passive",
+      observed_at: "2026-09-27T10:00:05.000Z",
+    });
+
+    let buffer = "";
+    const deadline = setTimeout(() => controller.abort(), 1000);
+    try {
+      while (!/event: lane\.status_changed\ndata: .*\n\n/.test(buffer)) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+      }
+    } finally {
+      clearTimeout(deadline);
+    }
+    assert.ok(Date.now() - changedAt < 1000, "event must arrive within 1s");
+
+    const data = buffer.match(/event: lane\.status_changed\ndata: (.*)\n\n/)![1];
+    const event = JSON.parse(data);
+    assert.equal(event.lane_id, "claude@mathew.dostal");
+    assert.equal(event.from, "up");
+    assert.equal(event.to, "out_of_credit");
+    assert.equal(event.error_code, "quota_exceeded");
+    assert.equal(event.cause, "status");
+  } finally {
+    controller.abort();
+    server.closeAllConnections();
+    server.close();
+    store.close();
+  }
+
+  // The closed stream unsubscribed from the store's emitter.
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  assert.equal(store.events.listenerCount(), 0);
+});
