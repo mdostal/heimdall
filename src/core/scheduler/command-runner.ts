@@ -32,11 +32,16 @@ export interface CommandRunner {
 
 export class NodeCommandRunner implements CommandRunner {
   async run(command: string, args: string[], options?: CommandRunOptions): Promise<CommandResult> {
-    const { stdout, stderr } = await execFileAsync(command, args, {
+    const pending = execFileAsync(command, args, {
       encoding: "utf8",
       timeout: options?.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
       ...(options?.env ? { env: { ...process.env, ...options.env } } : {}),
     });
+    // Nothing is ever written to a command's stdin, so close it: a CLI that
+    // reads a piped stdin until EOF (`codex exec` does, confirmed live
+    // 2026-09-28, PANT-694) otherwise hangs until the timeout.
+    pending.child.stdin?.end();
+    const { stdout, stderr } = await pending;
     return { stdout, stderr };
   }
 }
