@@ -64,6 +64,7 @@ OLLAMA_DUMMY=local
 | `HEIMDALL_RETENTION_DAYS` | `30` | Days of `lane_status_history` and `telemetry_events` to keep. Older rows are pruned at startup and daily; each lane's latest status row is always kept. Non-positive or non-numeric values fall back to the default. |
 | `HEIMDALL_HOME` | `~/.heimdall` | Root directory for Heimdall local state (token registry, etc). |
 | `HEIMDALL_TOKEN_REGISTRY_PATH` | `$HEIMDALL_HOME/token-registry.json` | Path to the multi-account token registry file. |
+| `HEIMDALL_CODEX_HOME_ROOT` | `$HEIMDALL_HOME/codex` | Where Heimdall keeps its own `CODEX_HOME` for each ChatGPT-login codex lane. Put it on a persistent volume. See [Codex credentials](#codex-credentials). |
 | `HEIMDALL_SIGNAL_STALE_MULTIPLIER` | `3` | A lane's `signal_state` becomes `stale` when its last observation is older than this many × its expected probe interval (PANT-823). With the default 5-minute interval that is 15 min. |
 | `HEIMDALL_READINESS_STALENESS_MS` | `900000` (15 min) | `GET /readyz` reports `degraded` if no lane has been observed within this window. |
 
@@ -87,6 +88,32 @@ Heimdall emits spans and metrics to this endpoint. If no collector is reachable,
 ## OpenRouter sub-routes
 
 OpenRouter lanes nest multiple independently-toggled routes under one credential. Declare with `HEIMDALL_LANE_<N>_PROVIDER=openrouter`. The lane's `MODEL` is the OpenRouter model slug. Each OpenRouter lane is a separate entry in the registry — they share no state.
+
+## Codex credentials
+
+A `codex` lane's credential can take one of two shapes. Heimdall picks the probe from the shape:
+
+| Credential | How it is probed |
+|---|---|
+| OpenAI Platform API key (`sk-...`) | `GET https://api.openai.com/v1/models`. Free. |
+| A full Codex CLI `auth.json` (JSON with `tokens.id_token`, `access_token`, `refresh_token`) | Runs the real `codex` CLI: `codex exec --ephemeral "reply with the single word OK"`. It spends a small amount of inference, like Claude subscription lanes. |
+
+A bare ChatGPT access token (`eyJ...`) is reported `down`/`auth_failed` without making a network call. `api.openai.com` rejects it (403 `Missing scopes: api.model.read`), and the CLI can't run on it without the id and refresh tokens.
+
+**Give Heimdall its own login.** Codex refreshes the session in `auth.json` itself, and each refresh token can be used once. If Heimdall's probe and another runtime (for example Multica's codex agents) share one session, whichever refreshes second fails with `refresh token was already used`. Create a separate session for Heimdall and vault that file:
+
+```bash
+CODEX_HOME="$(mktemp -d)" codex login --device-auth
+jq -c . "$CODEX_HOME/auth.json"   # store this one line as the lane's secret, then delete the directory
+```
+
+Store it on one line: `HEIMDALL_CREDENTIAL_SOURCE=pantheon` reads the secret back from a `VALUE=<secret>` line.
+
+Never store a copy of another runtime's `~/.codex/auth.json`.
+
+Heimdall writes the seed once to `$HEIMDALL_CODEX_HOME_ROOT/<hash of seed>/auth.json` (mode 600). After that the CLI owns the file and keeps its refreshed tokens there. Probes of one session run one at a time. A new seed (a new login) gets a new directory. If that directory is lost, the original seed is written again, and its refresh token may already have been spent. The lane then reports `auth_failed` with a re-provision hint until you vault a fresh login.
+
+The `codex` CLI must be on `PATH` (`npm install -g @openai/codex`).
 
 ## Credential security
 
