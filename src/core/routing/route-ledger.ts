@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { SQLITE_BUSY_TIMEOUT_MS } from "../state-store.js";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS routing_decisions (
@@ -152,10 +153,12 @@ export class RouteLedger {
       normalized.database ??
       new DatabaseSync(normalized.path ?? ":memory:", { enableForeignKeyConstraints: true });
     this.ownsDatabase = normalized.database === undefined;
+    // PANT-829: same shared-file contention as StateStore — wait for another
+    // writer's lock instead of throwing SQLITE_BUSY. Only on connections we
+    // open; a borrowed connection is configured by its owner.
+    if (this.ownsDatabase) this.db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
+    // heimdall#96 also relies on this: the ledger now shares StateStore's DB file.
     this.now = normalized.now ?? (() => new Date());
-    // heimdall#96: the ledger now shares StateStore's DB file, so another
-    // connection may hold the write lock briefly — wait rather than fail.
-    if (this.ownsDatabase) this.db.exec("PRAGMA busy_timeout = 5000");
     this.db.exec(SCHEMA);
   }
 
