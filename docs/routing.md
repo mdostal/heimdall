@@ -94,6 +94,23 @@ Response:
 }
 ```
 
+If the routing policy file is missing or invalid, Heimdall does **not** fall
+back to another strategy. `POST /route`, and `GET /available-route` while the
+`scored` strategy is active, answer `503` and keep serving every other
+request:
+
+```json
+{
+  "error": "routing_policy_unavailable",
+  "detail": "Failed to load routing policy from /path/to/config/routing-policy.yaml: ENOENT ..."
+}
+```
+
+Deploy `config/routing-policy.yaml` (or set `HEIMDALL_REPO_ROOT`) to fix it.
+The policy is retried on the next request, so no restart is needed. Any other
+handler error answers `500 {"error": "internal_error", "detail": ...}`, and
+the process stays up.
+
 When no healthy lane is available:
 
 ```json

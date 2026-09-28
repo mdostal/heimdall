@@ -27,7 +27,7 @@ import { InProcessScheduler } from "../core/scheduler/in-process-scheduler.js";
 import type { Lane } from "../core/lane-registry.js";
 import type { ArgusEmitter } from "../core/telemetry/argus-client.js";
 import type { LaneAgentResolver } from "../core/actuation/lane-agent-resolver.js";
-import { useRouteLedgerPath } from "../core/route-selector.js";
+import { useRouteLedgerPath, useRoutePolicyPath } from "../core/route-selector.js";
 
 // heimdall#96: the route ledger defaults to the per-machine DB file; keep this
 // file's routing decisions in memory instead.
@@ -3470,4 +3470,123 @@ test("GET /events streams lane.status_changed within 1s of recordStatus() changi
   // The closed stream unsubscribed from the store's emitter.
   await new Promise<void>((resolve) => setTimeout(resolve, 20));
   assert.equal(store.events.listenerCount(), 0);
+});
+
+// heimdall#95: one bad request must never take the whole process (and every
+// lane with it) down. These run in-process, so an unhandled rejection or
+// uncaught exception here would fail the test file outright.
+function missingPolicyPath(): string {
+  return path.join(os.tmpdir(), `heimdall-no-policy-${Date.now()}-${Math.random().toString(36).slice(2)}.yaml`);
+}
+
+test("heimdall#95: POST /route with no routing policy file returns 503 routing_policy_unavailable, and GET /healthz still answers 200", async () => {
+  const registry = registryWithRouteLanes();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  useRoutePolicyPath(missingPolicyPath());
+
+  try {
+    const res = await fetch(`http://localhost:${port}/route`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ task_id: "no-policy-1", task_type: "build" }),
+    });
+    assert.equal(res.status, 503);
+    assert.match(res.headers.get("content-type") ?? "", /application\/json/);
+    const body = await res.json();
+    assert.equal(body.error, "routing_policy_unavailable");
+    assert.match(body.detail, /Failed to load routing policy/);
+
+    const health = await fetch(`http://localhost:${port}/healthz`);
+    assert.equal(health.status, 200);
+    assert.deepEqual(await health.json(), { status: "ok" });
+  } finally {
+    useRoutePolicyPath(undefined);
+    server.close();
+    store.close();
+  }
+});
+
+test("heimdall#95: GET /available-route with the scored strategy active and no policy file returns 503, not a crash", async () => {
+  const registry = registryWithRouteLanes();
+  const store = new StateStore(":memory:");
+  store.setSetting("routing_strategy", "scored");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  useRoutePolicyPath(missingPolicyPath());
+
+  try {
+    const res = await fetch(`http://localhost:${port}/available-route?task-type=build`);
+    assert.equal(res.status, 503);
+    const body = await res.json();
+    assert.equal(body.error, "routing_policy_unavailable");
+
+    const health = await fetch(`http://localhost:${port}/healthz`);
+    assert.equal(health.status, 200);
+  } finally {
+    useRoutePolicyPath(undefined);
+    server.close();
+    store.close();
+  }
+});
+
+test("heimdall#95: a handler that throws inside its body callback returns a JSON 500 and the server keeps serving", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  store.setSetting = () => {
+    throw new Error("simulated settings write failure");
+  };
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  const originalConsoleError = console.error;
+  console.error = () => {};
+
+  try {
+    const res = await fetch(`http://localhost:${port}/theme`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ theme: "terminal" }),
+    });
+    assert.equal(res.status, 500);
+    const body = await res.json();
+    assert.deepEqual(body, { error: "internal_error", detail: "simulated settings write failure" });
+
+    const health = await fetch(`http://localhost:${port}/healthz`);
+    assert.equal(health.status, 200);
+  } finally {
+    console.error = originalConsoleError;
+    server.close();
+    store.close();
+  }
+});
+
+test("heimdall#95: a synchronous throw in a route returns a JSON 500 and the server keeps serving", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  store.getSetting = () => {
+    throw new Error("simulated settings read failure");
+  };
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  const originalConsoleError = console.error;
+  console.error = () => {};
+
+  try {
+    const res = await fetch(`http://localhost:${port}/available-route?task-type=build`);
+    assert.equal(res.status, 500);
+    const body = await res.json();
+    assert.deepEqual(body, { error: "internal_error", detail: "simulated settings read failure" });
+
+    const health = await fetch(`http://localhost:${port}/healthz`);
+    assert.equal(health.status, 200);
+  } finally {
+    console.error = originalConsoleError;
+    server.close();
+    store.close();
+  }
 });
