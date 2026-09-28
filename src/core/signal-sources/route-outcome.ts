@@ -22,6 +22,7 @@ const FAILURE_OUTCOMES = new Set(["failure", "failed", "error"]);
 // one outcome only ever shows `degraded`.
 const CAP_KIND_TO_STATUS: Record<ClaudeCapKind, { status: PassiveSignalValue; errorCode: ErrorCode }> = {
   rate_limit: { status: "down", errorCode: "rate_limit" },
+  session_limit: { status: "out_of_credit", errorCode: "quota_exceeded" },
   weekly_limit: { status: "out_of_credit", errorCode: "quota_exceeded" },
   oauth_expired: { status: "down", errorCode: "auth_failed" },
 };

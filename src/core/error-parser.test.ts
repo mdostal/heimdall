@@ -86,6 +86,8 @@ test("reset headers: a CLI-style message still applies when headers are garbage"
 // bodies (docs.anthropic.com/api/errors, platform.openai.com/docs/guides/error-codes),
 // and the Codex usage-limit text quoted in signal-inventory.md.
 const CLAUDE_WEEKLY_CLI = "You've hit your weekly limit · resets 7pm (America/Chicago)";
+// Claude Code 2.1.283 builds this from "You've hit your " + "session limit".
+const CLAUDE_SESSION_CLI = "You've hit your session limit · resets 3pm (America/Chicago)";
 const CLAUDE_AUTH_CLI = "Failed to authenticate. API Error: 401 OAuth access token is invalid.";
 const CODEX_USAGE_LIMIT =
   "You've hit your usage limit. Upgrade to Pro (https://openai.com/chatgpt/pricing) or try again at Oct 13th, 2026 8:25 PM.";
@@ -110,6 +112,30 @@ const capCases: Array<{ name: string; input: unknown; kind: ClaudeCapKind | null
     input: new Error("You've hit your weekly limit · resets 6am (America/Chicago)"),
     kind: "weekly_limit",
     reset_at: "2026-10-04T11:00:00.000Z",
+  },
+  {
+    name: "Claude CLI 5-hour session limit reads its reset time (3pm Chicago = 20:00Z)",
+    input: new Error(CLAUDE_SESSION_CLI),
+    kind: "session_limit",
+    reset_at: "2026-09-27T20:00:00.000Z",
+  },
+  {
+    name: "Claude CLI session limit whose reset time already passed today rolls a day forward",
+    input: new Error("You've hit your session limit · resets 6am (America/Chicago)"),
+    kind: "session_limit",
+    reset_at: "2026-09-28T11:00:00.000Z",
+  },
+  {
+    name: "Claude CLI '5-hour limit reached' with no timezone falls back to five hours",
+    input: new Error("5-hour limit reached ∙ resets 3pm"),
+    kind: "session_limit",
+    reset_at: "2026-09-27T17:00:00.000Z",
+  },
+  {
+    name: "older Claude CLI 'usage limit reached|<epoch>' reads the epoch",
+    input: new Error("Claude AI usage limit reached|1790000000"),
+    kind: "session_limit",
+    reset_at: new Date(1_790_000_000_000).toISOString(),
   },
   {
     name: "Anthropic 429 whose message names a weekly limit",
@@ -158,15 +184,6 @@ for (const c of capCases) {
   });
 }
 
-// Known gaps, filed rather than fixed here (PANT-825 is tests-only). They run
-// as `todo` so they report without failing the suite; drop the flag once the
-// linked ticket lands.
-test("cap signal: Claude CLI 5-hour session limit is a cap, not null", { todo: "PANT-840" }, () => {
-  const signal = parseClaudeCapSignal(new Error("You've hit your session limit · resets 3pm (America/Chicago)"), NOW);
-  assert.notEqual(signal, null);
-  assert.equal(signal?.reset_at, "2026-09-27T20:00:00.000Z");
-});
-
 // --- ErrorCode, end to end through the probes --------------------------------
 
 function fakeResponse(status: number, body?: unknown, responseHeaders: Record<string, string> = {}): Response {
@@ -201,6 +218,12 @@ const errorCodeCases: Array<{ name: string; probe: Probe; code: ErrorCode; reset
     probe: () => probeClaudeSubscriptionLane("sk-ant-oat01-x", cliFailsWith(CLAUDE_WEEKLY_CLI)),
     code: "quota_exceeded",
     reset_at: "2026-09-28T00:00:00.000Z",
+  },
+  {
+    name: "Claude CLI 5-hour session limit → quota_exceeded with the CLI's reset time, not auth_failed",
+    probe: () => probeClaudeSubscriptionLane("sk-ant-oat01-x", cliFailsWith(CLAUDE_SESSION_CLI)),
+    code: "quota_exceeded",
+    reset_at: "2026-09-27T20:00:00.000Z",
   },
   {
     name: "Claude CLI invalid OAuth token → auth_failed",
@@ -363,16 +386,8 @@ test("error code: every ErrorCode value is produced by at least one real-error c
   assert.deepEqual([...covered].sort(), [...ERROR_CODES].sort());
 });
 
-test("error code: Claude CLI 5-hour session limit is not auth_failed", { todo: "PANT-840" }, async (t) => {
-  t.mock.timers.enable({ apis: ["Date"], now: NOW });
-  const result = await probeClaudeSubscriptionLane(
-    "sk-ant-oat01-x",
-    cliFailsWith("You've hit your session limit · resets 3pm (America/Chicago)"),
-  );
-  assert.notEqual(result.error_code, "auth_failed");
-  assert.equal(result.reset_at, "2026-09-27T20:00:00.000Z");
-});
-
+// Known gap, filed rather than fixed here. It runs as `todo` so it reports
+// without failing the suite; drop the flag once the linked ticket lands.
 test("error code: Codex usage limit with no retry-after takes reset_at from its 'try again at' text", { todo: "PANT-841" }, async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: NOW });
   const result = await probeCodexLane("sk-proj-x", respondWith(429, openAiError("usage_limit_reached", CODEX_USAGE_LIMIT)));
