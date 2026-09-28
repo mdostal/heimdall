@@ -91,6 +91,12 @@ export class ScoredStrategy implements RoutingStrategy {
     this.options.ledgerPath = path;
   }
 
+  /** Re-points the routing policy at `path` (undefined = the default path); the next selectRoute() reloads it. */
+  usePolicyPath(path: string | undefined): void {
+    this.options.policyPath = path;
+    this.policy = null;
+  }
+
   /** Closes the ledger connection; the next call reopens it lazily at the same path. */
   closeLedger(): void {
     this.ledger?.close();
