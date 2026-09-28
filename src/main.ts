@@ -44,6 +44,8 @@ import { RotationController, ProviderScopedLaneRegistry } from "./core/rotation-
 import { startCapResetRecoveryJob, type RunningBackgroundJob } from "./core/background-jobs.js";
 import { SensingMetrics } from "./core/telemetry/sensing-metrics.js";
 import { resolveReadinessStalenessMs } from "./api/readiness.js";
+import { closeRouteLedgers, onRouteOutcome, useRouteLedgerPath } from "./core/route-selector.js";
+import { RouteOutcomeTracker, routeOutcomeToPassiveResponse } from "./core/signal-sources/route-outcome.js";
 
 const PROVIDER_ADAPTERS: Record<string, () => ProviderAdapters> = {
   claude: claudeAdapters,
@@ -109,7 +111,12 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
   const env = options.env ?? process.env;
 
   const registry = buildLaneRegistry(env);
-  const store = new StateStore(resolveDefaultDbPath(env));
+  const dbPath = resolveDefaultDbPath(env);
+  const store = new StateStore(dbPath);
+  // heimdall#96: routing decisions/outcomes live in the same DB file as lane
+  // state, so they survive a restart and every process sees them.
+  useRouteLedgerPath(dbPath);
+  const routeOutcomes = new RouteOutcomeTracker();
 
   // hdl-ot-01: Heimdall's own local record (telemetry_events) is the source
   // of truth; Argus is one downstream consumer of the same facts, composed
@@ -163,7 +170,11 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
 
     const pipeline = new LanePipeline(
       store,
-      { now: () => new Date().toISOString(), lastPassiveResponse: () => null, fetchImpl: options.fetchImpl },
+      {
+        now: () => new Date().toISOString(),
+        lastPassiveResponse: (laneId) => routeOutcomes.take(laneId),
+        fetchImpl: options.fetchImpl,
+      },
       buildAdapters(),
       sensing,
     );
@@ -250,6 +261,21 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     await pipeline.refresh(lane);
   };
 
+  // heimdall#96: close the routing loop. A reported outcome becomes a
+  // passive observation of the lane that served the decision, and the lane
+  // is refreshed right away so the outcome decides its status now rather
+  // than at the scheduler's next (possibly minutes-away) tick. Corroboration
+  // still applies: a single failure outcome only shows `degraded`.
+  const unsubscribeRouteOutcomes = onRouteOutcome((event) => {
+    if (!pipelines.has(event.laneId)) return;
+    const response = routeOutcomeToPassiveResponse(event, new Date());
+    if (!response) return;
+    routeOutcomes.record(event.laneId, response);
+    refreshLane(event.laneId).catch((err) => {
+      console.error(`[main] refresh after route outcome failed for lane ${event.laneId}:`, err);
+    });
+  });
+
   // hdl-rr-04: rotation is a credential-selection concern orthogonal to
   // which lane routing picks — it decides which account backs a given
   // provider's calls, not which provider/lane serves a task. Never wired
@@ -284,7 +310,9 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
       for (const s of multicaSchedulers) s.stop();
       for (const s of inProcessSchedulers) s.stop();
       for (const job of rotationJobs) job.stop();
+      unsubscribeRouteOutcomes();
       httpServer.close();
+      closeRouteLedgers();
       store.close();
     },
   };

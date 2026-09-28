@@ -1,8 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { composeService } from "./main.js";
 import type { CommandRunner } from "./core/scheduler/command-runner.js";
+import { resolveDefaultDbPath } from "./core/state-store.js";
+import { RouteLedger } from "./core/routing/route-ledger.js";
 
 function testEnv(): NodeJS.ProcessEnv {
   return {
@@ -499,6 +504,139 @@ test("POST /lanes/:laneId/refresh works end-to-end against the composed service"
     assert.equal(claudeLane.status, "up");
   } finally {
     service.stopAll();
+  }
+});
+
+// --- heimdall#96: closed routing loop + persisted route ledger -------------
+
+function singleClaudeLaneEnv(dbPath?: string): NodeJS.ProcessEnv {
+  return {
+    HEIMDALL_LANE_1_ID: "claude@mathew.dostal",
+    HEIMDALL_LANE_1_PROVIDER: "claude",
+    HEIMDALL_LANE_1_CREDENTIAL_REF: "CLAUDE_TOKEN",
+    CLAUDE_TOKEN: "sk-ant-fake",
+    ...(dbPath ? { HEIMDALL_DB_PATH: dbPath } : {}),
+  };
+}
+
+async function waitFor(check: () => boolean, what: string, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+async function postJson(port: number, path: string, body: unknown): Promise<Response> {
+  return fetch(`http://localhost:${port}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+async function routeDecision(port: number, taskId: string): Promise<{ decision_id: string; chosen_lane: string | null }> {
+  const res = await postJson(port, "/route", { task_id: taskId, task_type: "build" });
+  assert.equal(res.status, 200);
+  return (await res.json()) as { decision_id: string; chosen_lane: string | null };
+}
+
+const RATE_LIMIT_FAILURE = {
+  outcome: "failure",
+  metadata: {
+    error: { status: 429, body: { type: "error", error: { type: "rate_limit_error", message: "rate limited" } } },
+  },
+};
+
+test("heimdall#96: route outcomes feed lane status as a corroborated passive signal", async () => {
+  const laneId = "claude@mathew.dostal";
+  const service = composeService({
+    env: singleClaudeLaneEnv(":memory:"),
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port: 0,
+  });
+  await new Promise<void>((resolve) => service.httpServer.listen(0, resolve));
+  const { port } = service.httpServer.address() as AddressInfo;
+
+  try {
+    // Startup probe (mockFetch → 200) makes the lane routable.
+    await waitFor(() => service.store.getCurrentStatus(laneId)?.status === "up", "startup probe");
+
+    const first = await routeDecision(port, "task-1");
+    assert.equal(first.chosen_lane, laneId);
+    const firstRes = await postJson(port, `/route/${first.decision_id}/outcome`, RATE_LIMIT_FAILURE);
+    assert.equal(firstRes.status, 200);
+
+    // One failure outcome is not enough: the lane shows degraded, not down.
+    await waitFor(() => service.store.getCurrentStatus(laneId)?.signal_source === "passive", "first passive status");
+    const afterOne = service.store.getCurrentStatus(laneId);
+    assert.equal(afterOne?.status, "degraded");
+    assert.equal(afterOne?.error_code, "rate_limit");
+
+    // Degraded lanes aren't routing candidates, so record the second decision
+    // while the lane is forced on — the outcome is what's under test.
+    service.store.setManualOverride(laneId, "enabled");
+    const second = await routeDecision(port, "task-2");
+    assert.equal(second.chosen_lane, laneId);
+    await postJson(port, `/route/${second.decision_id}/outcome`, RATE_LIMIT_FAILURE);
+
+    await waitFor(() => service.store.getCurrentStatus(laneId)?.status === "down", "corroborated down");
+    const afterTwo = service.store.getCurrentStatus(laneId);
+    assert.equal(afterTwo?.signal_source, "passive");
+    assert.equal(afterTwo?.error_code, "rate_limit");
+
+    // A success outcome is passive evidence of up.
+    const third = await routeDecision(port, "task-3");
+    await postJson(port, `/route/${third.decision_id}/outcome`, { outcome: "success" });
+    await waitFor(() => service.store.getCurrentStatus(laneId)?.status === "up", "passive up");
+    assert.equal(service.store.getCurrentStatus(laneId)?.signal_source, "passive");
+  } finally {
+    service.stopAll();
+  }
+});
+
+test("heimdall#96: with HEIMDALL_DB_PATH unset, the route ledger shares StateStore's file and a decision survives a composeService() restart", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "heimdall-home-"));
+  const originalHome = process.env.HOME;
+  const originalDbPath = process.env.HEIMDALL_DB_PATH;
+  process.env.HOME = home;
+  delete process.env.HEIMDALL_DB_PATH;
+
+  try {
+    const env = singleClaudeLaneEnv();
+    const dbPath = resolveDefaultDbPath(env);
+    assert.equal(dbPath, path.join(home, ".local", "share", "heimdall", "heimdall.db"));
+
+    const first = composeService({ env, fetchImpl: mockFetch(), skipHttpListen: true, port: 0 });
+    let decisionId: string;
+    try {
+      await new Promise<void>((resolve) => first.httpServer.listen(0, resolve));
+      const { port } = first.httpServer.address() as AddressInfo;
+      decisionId = (await routeDecision(port, "task-persist")).decision_id;
+    } finally {
+      first.stopAll();
+    }
+
+    // The decision is in the StateStore's own file, not an in-memory ledger.
+    const ledger = new RouteLedger(dbPath);
+    assert.ok(ledger.getDecision(decisionId), "decision must be written to the StateStore DB file");
+    ledger.close();
+
+    const second = composeService({ env, fetchImpl: mockFetch(), skipHttpListen: true, port: 0 });
+    try {
+      await new Promise<void>((resolve) => second.httpServer.listen(0, resolve));
+      const { port } = second.httpServer.address() as AddressInfo;
+      const res = await postJson(port, `/route/${decisionId}/outcome`, { outcome: "success" });
+      assert.equal(res.status, 200, "the restarted service must still know the decision");
+    } finally {
+      second.stopAll();
+    }
+  } finally {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalDbPath !== undefined) process.env.HEIMDALL_DB_PATH = originalDbPath;
+    fs.rmSync(home, { recursive: true, force: true });
   }
 });
 

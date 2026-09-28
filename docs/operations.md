@@ -90,8 +90,8 @@ Metrics exported:
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `heimdall_lanes` | gauge | `provider`, `status` | Declared lanes by current status. |
-| `heimdall_probes_total` | counter | `lane`, `provider`, `result`, `error_code` | One per sensing cycle (`LanePipeline.refresh()`, whatever signal source it used). `result` is the raw pre-corroboration verdict (`up`/`down`/`out_of_credit`/`degraded`), or `error` when the refresh threw (`error_code="exception"`). `error_code` is the classified error, `unconfigured` for a lane with no credential, or `none`. |
-| `heimdall_probe_duration_seconds` | histogram | `lane`, `provider` | Wall-clock duration of each sensing cycle. Buckets: 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30s. |
+| `heimdall_probes_total` | counter | `lane`, `provider`, `source`, `result`, `error_code` | One per sensing cycle (`LanePipeline.refresh()`). `source` is the signal the cycle used: `active_probe`, `public_status`, `passive` (a reported route outcome, heimdall#96), or `unconfigured` (no credential, resolved without a probe). `result` is the raw pre-corroboration verdict (`up`/`down`/`out_of_credit`/`degraded`), or `error` when the refresh threw (`error_code="exception"`). `error_code` is the classified error, `unconfigured` for a lane with no credential, or `none`. |
+| `heimdall_probe_duration_seconds` | histogram | `lane`, `provider` | Wall-clock duration of each **networked** sensing cycle (`source` `active_probe` or `public_status`). Buckets: 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30s. |
 | `heimdall_lane_last_probe_age_seconds` | gauge | `lane` | Seconds since the lane's most recent recorded observation. Read from the state DB, so it survives restarts. **A lane that has never been observed has no sample**, so alert on `absent()` or use `GET /readyz`. |
 | `heimdall_lane_status_transitions_total` | counter | `lane`, `from`, `to` | Every status change the pipeline writes. `from="none"` is a lane's first-ever status. A new `down` passes through `degraded` until it is corroborated. |
 | `heimdall_scheduler_start_failures_total` | counter | `lane`, `scheduler` | A lane scheduler (`in_process` or `multica_autopilot`) failed to start, or the lane's provider has no adapters (`in_process`). Any non-zero value means that lane is not being sensed as configured. |
@@ -99,6 +99,8 @@ Metrics exported:
 | `heimdall_model_substitutions_total` | counter | `provider` | Declared model substituted for a live, enabled alternative. |
 | `heimdall_routing_decisions_total` | counter | `result` | Scored-strategy routing decisions (`lane`/`no_route`). |
 | `heimdall_model_catalog_entries` | gauge | `provider`, `enabled` | Model catalog size. |
+
+**Passive route outcomes count as sensing cycles (decision, PANT-824 × heimdall#96).** A reported route outcome that decides a lane's status goes through `refresh()` just like a probe and can change status, so it is counted in `heimdall_probes_total` with `source="passive"`. Leaving it out would make status transitions appear with no matching sensing cycle. Filter with `source!="passive"` for provider-probe volume only. Passive and `unconfigured` cycles do no network I/O and resolve in microseconds, so they are **not** timed in `heimdall_probe_duration_seconds`; timing them would pull the histogram toward zero and hide real probe latency.
 
 Probe, duration, transition and scheduler-failure counters are held in memory and reset when the process restarts (standard Prometheus counter semantics; `rate()`/`increase()` handle the reset). The others are read from the state DB.
 

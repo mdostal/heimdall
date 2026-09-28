@@ -25,11 +25,14 @@ export type SchedulerKind = "in_process" | "multica_autopilot";
 export interface ProbeObservation {
   lane: string;
   provider: string;
+  /** Signal source the cycle used: passive | public_status | active_probe | unconfigured. */
+  source: string;
   /** Raw (pre-corroboration) verdict — up/down/out_of_credit/degraded — or "error" when the refresh itself threw. */
   result: string;
   /** Classified ErrorCode, "unconfigured", "exception", or "none". */
   errorCode: string;
-  durationSeconds: number;
+  /** null = not timed (a passive or unconfigured cycle does no network I/O — see lane-pipeline.ts TIMED_SOURCES). */
+  durationSeconds: number | null;
 }
 
 export interface SchedulerStartFailure {
@@ -62,8 +65,10 @@ export class SensingMetrics {
   constructor(private readonly nowImpl: () => string = () => new Date().toISOString()) {}
 
   recordProbe(obs: ProbeObservation): void {
-    const key = [obs.lane, obs.provider, obs.result, obs.errorCode].join(SEP);
+    const key = [obs.lane, obs.provider, obs.source, obs.result, obs.errorCode].join(SEP);
     this.probeCounts.set(key, (this.probeCounts.get(key) ?? 0) + 1);
+    const durationSeconds = obs.durationSeconds;
+    if (durationSeconds === null) return;
 
     const durationKey = [obs.lane, obs.provider].join(SEP);
     let histogram = this.durations.get(durationKey);
@@ -77,9 +82,9 @@ export class SensingMetrics {
       };
       this.durations.set(durationKey, histogram);
     }
-    const bucketIndex = PROBE_DURATION_BUCKETS_SECONDS.findIndex((bound) => obs.durationSeconds <= bound);
+    const bucketIndex = PROBE_DURATION_BUCKETS_SECONDS.findIndex((bound) => durationSeconds <= bound);
     if (bucketIndex !== -1) histogram.bucketCounts[bucketIndex] += 1;
-    histogram.sum += obs.durationSeconds;
+    histogram.sum += durationSeconds;
     histogram.count += 1;
   }
 
@@ -99,10 +104,10 @@ export class SensingMetrics {
     });
   }
 
-  probeCounters(): Array<{ lane: string; provider: string; result: string; error_code: string; count: number }> {
+  probeCounters(): Array<{ lane: string; provider: string; source: string; result: string; error_code: string; count: number }> {
     return [...this.probeCounts.entries()].map(([key, count]) => {
-      const [lane, provider, result, error_code] = key.split(SEP);
-      return { lane, provider, result, error_code, count };
+      const [lane, provider, source, result, error_code] = key.split(SEP);
+      return { lane, provider, source, result, error_code, count };
     });
   }
 

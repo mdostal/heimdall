@@ -26,6 +26,11 @@ import { InProcessScheduler } from "../core/scheduler/in-process-scheduler.js";
 import type { Lane } from "../core/lane-registry.js";
 import type { ArgusEmitter } from "../core/telemetry/argus-client.js";
 import type { LaneAgentResolver } from "../core/actuation/lane-agent-resolver.js";
+import { useRouteLedgerPath } from "../core/route-selector.js";
+
+// heimdall#96: the route ledger defaults to the per-machine DB file; keep this
+// file's routing decisions in memory instead.
+useRouteLedgerPath(":memory:");
 
 /** Never the real repo .env — every POST /lanes test uses one of these, cleaned up after. */
 function tmpEnvPath(): string {

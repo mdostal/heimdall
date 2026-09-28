@@ -7,6 +7,11 @@ import { renderMetrics } from "./metrics.js";
 import { SensingMetrics } from "../core/telemetry/sensing-metrics.js";
 import { LanePipeline, type ProviderAdapters } from "../core/lane-pipeline.js";
 import type { LaneStatusValue, ErrorCode } from "../core/status-model.js";
+import { useRouteLedgerPath } from "../core/route-selector.js";
+
+// heimdall#96: the route ledger defaults to the per-machine DB file; keep this
+// file's routing decisions in memory instead.
+useRouteLedgerPath(":memory:");
 
 test("hdl-ot-03: renderMetrics output is well-formed Prometheus text exposition format", () => {
   const registry = new LaneRegistry(
@@ -16,7 +21,7 @@ test("hdl-ot-03: renderMetrics output is well-formed Prometheus text exposition 
   const store = new StateStore(":memory:");
   store.recordTelemetryEvent("rotation_event", { provider: "claude", kind: "rotated" });
   const sensing = new SensingMetrics();
-  sensing.recordProbe({ lane: "claude@x", provider: "claude", result: "up", errorCode: "none", durationSeconds: 0.0000001 });
+  sensing.recordProbe({ lane: "claude@x", provider: "claude", source: "active_probe", result: "up", errorCode: "none", durationSeconds: 0.0000001 });
   sensing.recordStatusTransition("claude@x", "none", "up");
   sensing.recordSchedulerStartFailure("claude@x", "multica_autopilot", new Error("bad cron"));
   store.recordStatus({ lane_id: "claude@x", status: "up", reset_at: null, reason: null, signal_source: "active_probe", observed_at: new Date().toISOString() });
@@ -100,8 +105,8 @@ test("PANT-824: a fake probe driven up -> down -> up shows up in probes, transit
   // "now" = 90s after the last probe (which was recorded at clockMs - 120s).
   const body = renderMetrics(registry, store, sensing, () => new Date(clockMs - 120_000 + 90_000));
 
-  assert.equal(sampleValue(body, 'heimdall_probes_total{lane="claude@x",provider="claude",result="up",error_code="none"}'), 2);
-  assert.equal(sampleValue(body, 'heimdall_probes_total{lane="claude@x",provider="claude",result="down",error_code="server_error"}'), 2);
+  assert.equal(sampleValue(body, 'heimdall_probes_total{lane="claude@x",provider="claude",source="active_probe",result="up",error_code="none"}'), 2);
+  assert.equal(sampleValue(body, 'heimdall_probes_total{lane="claude@x",provider="claude",source="active_probe",result="down",error_code="server_error"}'), 2);
 
   assert.equal(sampleValue(body, 'heimdall_lane_status_transitions_total{lane="claude@x",from="none",to="up"}'), 1);
   assert.equal(sampleValue(body, 'heimdall_lane_status_transitions_total{lane="claude@x",from="up",to="degraded"}'), 1);
@@ -133,7 +138,7 @@ test("PANT-824: a probe adapter that throws is still counted, as result=error", 
   await assert.rejects(pipeline.refresh(lane), /boom/);
 
   const body = renderMetrics(registry, store, sensing);
-  assert.equal(sampleValue(body, 'heimdall_probes_total{lane="codex",provider="codex",result="error",error_code="exception"}'), 1);
+  assert.equal(sampleValue(body, 'heimdall_probes_total{lane="codex",provider="codex",source="active_probe",result="error",error_code="exception"}'), 1);
   // Never observed -> no last-probe-age sample (alert with absent(), or use GET /readyz).
   assert.equal(sampleValue(body, 'heimdall_lane_last_probe_age_seconds{lane="codex"}'), undefined);
   store.close();
@@ -144,5 +149,49 @@ test("PANT-824: heimdall_actuation_results_total is no longer exported (stub ada
   const store = new StateStore(":memory:");
   store.recordTelemetryEvent("actuation_result", { provider: "claude", action: "disable", success: "true" });
   assert.ok(!renderMetrics(registry, store).includes("heimdall_actuation_results_total"));
+  store.close();
+});
+
+test("PANT-824 x heimdall#96: a passive route-outcome refresh is counted as source=passive but not timed", async () => {
+  const lane = { lane_id: "claude@x", provider: "claude", credential_ref: "C", credential: "secret" };
+  const registry = new LaneRegistry([{ lane_id: lane.lane_id, provider: lane.provider, credential_ref: "C" }], new EnvCredentialSource({ C: "secret" }));
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: lane.lane_id, provider: lane.provider, credential_ref: "C" });
+  const sensing = new SensingMetrics();
+
+  // One pending route outcome (success -> passive "up"), consumed once, like RouteOutcomeTracker.take().
+  let pending: { ok: true; classifiedStatus: "up" } | null = { ok: true, classifiedStatus: "up" };
+  let probeCalls = 0;
+  let mono = 0;
+  const pipeline = new LanePipeline(
+    store,
+    {
+      now: () => "2026-09-27T12:00:00.000Z",
+      lastPassiveResponse: () => {
+        const taken = pending;
+        pending = null;
+        return taken;
+      },
+      monotonicNowMs: () => (mono += 500),
+    },
+    {
+      checkPublicStatus: async () => ({ status: "up", reason: null }),
+      probe: async () => {
+        probeCalls++;
+        return { status: "up", reset_at: null, reason: null, error_code: null };
+      },
+    },
+    sensing,
+  );
+
+  await pipeline.refresh(lane);
+  assert.equal(probeCalls, 0, "the pending route outcome decides the status without an active probe");
+  assert.equal(store.getCurrentStatus(lane.lane_id)?.signal_source, "passive");
+
+  const body = renderMetrics(registry, store, sensing);
+  assert.equal(sampleValue(body, 'heimdall_probes_total{lane="claude@x",provider="claude",source="passive",result="up",error_code="none"}'), 1);
+  assert.equal(sampleValue(body, 'heimdall_lane_status_transitions_total{lane="claude@x",from="none",to="up"}'), 1);
+  // Passive reads do no network I/O, so they stay out of the latency histogram.
+  assert.equal(sampleValue(body, 'heimdall_probe_duration_seconds_count{lane="claude@x",provider="claude"}'), undefined);
   store.close();
 });
