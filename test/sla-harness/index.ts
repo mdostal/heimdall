@@ -24,6 +24,9 @@
 // this is a concrete, measured constraint on scheduler interval choice, not
 // a hypothetical.
 
+import { writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { LanePipeline, claudeAdapters, type RefreshDeps } from "../../src/core/lane-pipeline.js";
 import { StateStore } from "../../src/core/state-store.js";
 import type { Lane } from "../../src/core/lane-registry.js";
@@ -179,7 +182,14 @@ export function renderReport(results: MeasurementResult[]): string {
 const isMainModule =
   process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`;
 
+// The tracked report.md is only ever rewritten here, by `npm run sla-report`,
+// never by `npm test` — the test suite writes its copy to a temp dir so a
+// plain test run leaves the working tree clean.
+export const REPORT_PATH = join(dirname(fileURLToPath(import.meta.url)), "report.md");
+
 if (isMainModule) {
   const results = await runAllScenarios();
-  console.log(renderReport(results));
+  const report = renderReport(results);
+  writeFileSync(REPORT_PATH, report, "utf-8");
+  console.log(report);
 }
