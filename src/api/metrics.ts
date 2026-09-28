@@ -9,6 +9,7 @@ import type { LaneRegistry } from "../core/lane-registry.js";
 import type { StateStore } from "../core/state-store.js";
 import { getRoutingDecisionCounts } from "../core/route-selector.js";
 import type { SensingMetrics } from "../core/telemetry/sensing-metrics.js";
+import { getLaneSignal, resolveSignalStaleMultiplier, SIGNAL_STATES } from "../core/signal-state.js";
 
 function escapeLabelValue(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
@@ -54,10 +55,16 @@ export function renderMetrics(
   store: StateStore,
   sensing?: SensingMetrics,
   now: () => Date = () => new Date(),
+  signalStaleMultiplier: number = resolveSignalStaleMultiplier(),
 ): string {
+  // PANT-823: a never-probed lane is counted as status="unknown", not
+  // "down" — its "down" is StateStore's REQ-07 no-signal fallback, not an
+  // observed outage. GET /lanes still reports it as down + never_probed.
   const laneCountsByProviderStatus = new Map<string, number>();
   for (const lane of registry.list()) {
-    const status = store.getCurrentStatus(lane.lane_id)?.status ?? "down";
+    const status = store.hasRecordedStatus(lane.lane_id)
+      ? (store.getCurrentStatus(lane.lane_id)?.status ?? "unknown")
+      : "unknown";
     const key = `${lane.provider}\u0000${status}`;
     laneCountsByProviderStatus.set(key, (laneCountsByProviderStatus.get(key) ?? 0) + 1);
   }
@@ -163,6 +170,22 @@ export function renderMetrics(
       .filter((sample) => Number.isFinite(sample.value)),
   };
 
+  // One sample per (lane, state), 1 for the lane's current state and 0 for
+  // the others — the usual Prometheus enum-gauge shape, so
+  // `heimdall_lane_signal_state{state="stale"} == 1` alerts per lane.
+  const signalStateFamily: MetricFamily = {
+    name: "heimdall_lane_signal_state",
+    help: "Whether a lane's status rests on a recent observation: never_probed, fresh, or stale (last observation older than N x the lane's expected probe interval). 1 = current state.",
+    type: "gauge",
+    samples: registry.list().flatMap((lane) => {
+      const { signal_state } = getLaneSignal(store, lane.lane_id, { now: new Date(nowMs), multiplier: signalStaleMultiplier });
+      return SIGNAL_STATES.map((state) => ({
+        labels: { lane: lane.lane_id, state },
+        value: state === signal_state ? 1 : 0,
+      }));
+    }),
+  };
+
   const transitionsFamily: MetricFamily = {
     name: "heimdall_lane_status_transitions_total",
     help: "Total recorded lane status changes; from=none is a lane's first-ever status.",
@@ -188,6 +211,7 @@ export function renderMetrics(
     probesFamily,
     probeDurationFamily,
     lastProbeAgeFamily,
+    signalStateFamily,
     transitionsFamily,
     schedulerFailuresFamily,
     rotationFamily,

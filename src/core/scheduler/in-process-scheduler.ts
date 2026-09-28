@@ -28,7 +28,7 @@ const SUSPECT_STATUSES: readonly LaneStatusValue[] = ["degraded", "down", "out_o
 // tick and will catch any new status write the moment it lands) but to keep
 // last_updated fresh so operators can see the lane is actively being monitored,
 // not just sitting on a stale timestamp from when it last recovered.
-const HEALTHY_PROBE_INTERVAL_MS = 5 * 60_000;
+export const HEALTHY_PROBE_INTERVAL_MS = 5 * 60_000;
 
 // hdl-error-taxonomy: the fine ~5s cadence exists to catch a lane
 // self-healing within the 10-second SLA (test/sla-harness's own finding:
@@ -41,7 +41,7 @@ const HEALTHY_PROBE_INTERVAL_MS = 5 * 60_000;
 // no self-healing event to risk missing within the SLA window. 5 minutes
 // balances "stop wasting probes on a lane that won't recover on its own"
 // against "notice reasonably soon once an operator does fix it".
-const AUTH_FAILED_BACKOFF_MS = 5 * 60_000;
+export const AUTH_FAILED_BACKOFF_MS = 5 * 60_000;
 
 // hdl-bp-04: the active BackoffPolicy is resolved fresh from the settings
 // table on every tick (see computeDelayMs below) — per-lane-provider

@@ -97,10 +97,11 @@ Metrics exported:
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `heimdall_lanes` | gauge | `provider`, `status` | Declared lanes by current status. |
+| `heimdall_lanes` | gauge | `provider`, `status` | Declared lanes by current status. A lane that has never been observed counts as `status="unknown"`, not `down` (PANT-823). `GET /lanes` still reports it as `down` with `signal_state: "never_probed"`. |
 | `heimdall_probes_total` | counter | `lane`, `provider`, `source`, `result`, `error_code` | One per sensing cycle (`LanePipeline.refresh()`). `source` is the signal the cycle used: `active_probe`, `public_status`, `passive` (a reported route outcome, heimdall#96), or `unconfigured` (no credential, resolved without a probe). `result` is the raw pre-corroboration verdict (`up`/`down`/`out_of_credit`/`degraded`), or `error` when the refresh threw (`error_code="exception"`). `error_code` is the classified error, `unconfigured` for a lane with no credential, or `none`. |
 | `heimdall_probe_duration_seconds` | histogram | `lane`, `provider` | Wall-clock duration of each **networked** sensing cycle (`source` `active_probe` or `public_status`). Buckets: 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30s. |
 | `heimdall_lane_last_probe_age_seconds` | gauge | `lane` | Seconds since the lane's most recent recorded observation. Read from the state DB, so it survives restarts. **A lane that has never been observed has no sample**, so alert on `absent()` or use `GET /readyz`. |
+| `heimdall_lane_signal_state` | gauge | `lane`, `state` | Whether the lane's status rests on a recent observation (PANT-823). One sample per `state` (`never_probed`, `fresh`, `stale`): `1` for the lane's current state, `0` for the others. `stale` means the last observation is older than `HEIMDALL_SIGNAL_STALE_MULTIPLIER` (default 3) × the lane's expected probe interval. See `signal_state` in [the API reference](api-reference.md#get-lanes-response-shape). |
 | `heimdall_lane_status_transitions_total` | counter | `lane`, `from`, `to` | Every status change the pipeline writes. `from="none"` is a lane's first-ever status. A new `down` passes through `degraded` until it is corroborated. |
 | `heimdall_scheduler_start_failures_total` | counter | `lane`, `scheduler` | A lane scheduler (`in_process` or `multica_autopilot`) failed to start, or the lane's provider has no adapters (`in_process`). Any non-zero value means that lane is not being sensed as configured. |
 | `heimdall_rotation_events_total` | counter | `provider`, `kind` | Account rotation events (`capped`/`rotated`). |
@@ -118,6 +119,7 @@ Suggested alerts:
 - `increase(heimdall_scheduler_start_failures_total[1h]) > 0`: a lane isn't being scheduled.
 - `heimdall_lane_last_probe_age_seconds > 900`: a lane has gone unobserved for 15 min. A healthy lane is re-probed every 5 min. An `auth_failed` lane backs off to 5 min; one with a known reset time waits until that time.
 - `sum by (lane) (rate(heimdall_probes_total{result="error"}[15m])) > 0`: a probe adapter is throwing.
+- `heimdall_lane_signal_state{state!="fresh"} == 1`: a lane has no live signal (never probed, or stale). Unlike `heimdall_lane_last_probe_age_seconds`, this also covers never-probed lanes and allows for a known reset time.
 
 The dashboard's **Telemetry** panel shows a per-lane *Sensing* summary built from these metrics: probes by result, last-probe age, transitions, mean probe duration and scheduler start failures. The raw metrics table sits below it.
 

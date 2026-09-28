@@ -98,6 +98,29 @@ test("getLaneStatuses returns entries matching the LaneRouterContract shape", ()
   store.close();
 });
 
+test("PANT-823: getLaneStatuses reports signal_state + last_probed_at, never_probed -> fresh -> stale, status unchanged", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const now = new Date("2026-09-28T12:00:00.000Z");
+
+  const [neverProbed] = getLaneStatuses(registry, store, undefined, now);
+  assert.equal(neverProbed.status, "down"); // REQ-07 fallback, still reported
+  assert.equal(neverProbed.signal_state, "never_probed");
+  assert.equal(neverProbed.last_probed_at, null);
+
+  store.recordStatus({ lane_id: "claude@mathew.dostal", status: "up", reset_at: null, reason: null, signal_source: "active_probe", observed_at: now.toISOString() });
+  const [fresh] = getLaneStatuses(registry, store, undefined, now);
+  assert.equal(fresh.status, "up");
+  assert.equal(fresh.signal_state, "fresh");
+  assert.equal(fresh.last_probed_at, now.toISOString());
+
+  const [stale] = getLaneStatuses(registry, store, undefined, new Date(now.getTime() + 3 * 60 * 60_000));
+  assert.equal(stale.status, "up");
+  assert.equal(stale.signal_state, "stale");
+  assert.equal(stale.last_probed_at, now.toISOString());
+  store.close();
+});
+
 test("hdl-msh-02: getLaneStatuses always includes multica_agent_ids, [] when unmapped, populated when a resolver has a mapping", () => {
   const registry = registryWithRouteLanes();
   const store = new StateStore(":memory:");
@@ -2619,9 +2642,11 @@ test("hdl-ot-03: GET /metrics returns 200 with valid Prometheus text format on a
     const body = await res.text();
     assert.match(body, /^# HELP heimdall_lanes /m);
     assert.match(body, /^# TYPE heimdall_lanes gauge$/m);
-    // A declared-but-never-probed lane still counts as a lane (status
-    // defaults to "down" — same fallback GET /lanes already uses).
-    assert.match(body, /heimdall_lanes\{provider="claude",status="down"\} 1/);
+    // A declared-but-never-probed lane still counts as a lane, under
+    // status="unknown" (PANT-823) — GET /lanes' "down" for it is the REQ-07
+    // no-signal fallback, not an observed outage.
+    assert.match(body, /heimdall_lanes\{provider="claude",status="unknown"\} 1/);
+    assert.doesNotMatch(body, /heimdall_lanes\{provider="claude",status="down"\}/);
   } finally {
     server.close();
     store.close();
