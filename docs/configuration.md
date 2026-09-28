@@ -63,6 +63,7 @@ OLLAMA_DUMMY=local
 | `HEIMDALL_DB_PATH` | `~/.local/share/heimdall/heimdall.db` | SQLite state store path. Set to `:memory:` for ephemeral (tests only). |
 | `HEIMDALL_HOME` | `~/.heimdall` | Root directory for Heimdall local state (token registry, etc). |
 | `HEIMDALL_TOKEN_REGISTRY_PATH` | `$HEIMDALL_HOME/token-registry.json` | Path to the multi-account token registry file. |
+| `HEIMDALL_READINESS_STALENESS_MS` | `900000` (15 min) | `GET /readyz` reports `degraded` if no lane has been observed within this window. |
 
 ## Multica integration
 

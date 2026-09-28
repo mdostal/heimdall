@@ -85,11 +85,33 @@ GET /metrics
 
 Returns Prometheus-compatible text metrics. Scrape this endpoint with Prometheus or Grafana Alloy.
 
-Key metrics:
-- `heimdall_lane_status` — gauge per lane (1=up, 0=down)
-- `heimdall_route_decisions_total` — counter by lane and task_type
-- `heimdall_probe_duration_seconds` — histogram of probe latencies
-- `heimdall_outcome_reported_total` — counter by outcome value
+Metrics exported:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `heimdall_lanes` | gauge | `provider`, `status` | Declared lanes by current status. |
+| `heimdall_probes_total` | counter | `lane`, `provider`, `source`, `result`, `error_code` | One per sensing cycle (`LanePipeline.refresh()`). `source` is the signal the cycle used: `active_probe`, `public_status`, `passive` (a reported route outcome, heimdall#96), or `unconfigured` (no credential, resolved without a probe). `result` is the raw pre-corroboration verdict (`up`/`down`/`out_of_credit`/`degraded`), or `error` when the refresh threw (`error_code="exception"`). `error_code` is the classified error, `unconfigured` for a lane with no credential, or `none`. |
+| `heimdall_probe_duration_seconds` | histogram | `lane`, `provider` | Wall-clock duration of each **networked** sensing cycle (`source` `active_probe` or `public_status`). Buckets: 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30s. |
+| `heimdall_lane_last_probe_age_seconds` | gauge | `lane` | Seconds since the lane's most recent recorded observation. Read from the state DB, so it survives restarts. **A lane that has never been observed has no sample**, so alert on `absent()` or use `GET /readyz`. |
+| `heimdall_lane_status_transitions_total` | counter | `lane`, `from`, `to` | Every status change the pipeline writes. `from="none"` is a lane's first-ever status. A new `down` passes through `degraded` until it is corroborated. |
+| `heimdall_scheduler_start_failures_total` | counter | `lane`, `scheduler` | A lane scheduler (`in_process` or `multica_autopilot`) failed to start, or the lane's provider has no adapters (`in_process`). Any non-zero value means that lane is not being sensed as configured. |
+| `heimdall_rotation_events_total` | counter | `provider`, `kind` | Account rotation events (`capped`/`rotated`). |
+| `heimdall_model_substitutions_total` | counter | `provider` | Declared model substituted for a live, enabled alternative. |
+| `heimdall_routing_decisions_total` | counter | `result` | Scored-strategy routing decisions (`lane`/`no_route`). |
+| `heimdall_model_catalog_entries` | gauge | `provider`, `enabled` | Model catalog size. |
+
+**Passive route outcomes count as sensing cycles (decision, PANT-824 × heimdall#96).** A reported route outcome that decides a lane's status goes through `refresh()` just like a probe and can change status, so it is counted in `heimdall_probes_total` with `source="passive"`. Leaving it out would make status transitions appear with no matching sensing cycle. Filter with `source!="passive"` for provider-probe volume only. Passive and `unconfigured` cycles do no network I/O and resolve in microseconds, so they are **not** timed in `heimdall_probe_duration_seconds`; timing them would pull the histogram toward zero and hide real probe latency.
+
+Probe, duration, transition and scheduler-failure counters are held in memory and reset when the process restarts (standard Prometheus counter semantics; `rate()`/`increase()` handle the reset). The others are read from the state DB.
+
+`heimdall_actuation_results_total` was **removed** (PANT-824). Every lane's control adapter has been `StubControlAdapter` since hdl-msh-01, and nothing calls `emitActuationResult()`, so it could only ever read zero. The stub's intended actions are logged, not counted. Downstream actuators read what to do from `GET /lanes`.
+
+Suggested alerts:
+- `increase(heimdall_scheduler_start_failures_total[1h]) > 0`: a lane isn't being scheduled.
+- `heimdall_lane_last_probe_age_seconds > 900`: a lane has gone unobserved for 15 min. A healthy lane is re-probed every 5 min. An `auth_failed` lane backs off to 5 min; one with a known reset time waits until that time.
+- `sum by (lane) (rate(heimdall_probes_total{result="error"}[15m])) > 0`: a probe adapter is throwing.
+
+The dashboard's **Telemetry** panel shows a per-lane *Sensing* summary built from these metrics: probes by result, last-probe age, transitions, mean probe duration and scheduler start failures. The raw metrics table sits below it.
 
 ## Argus / OTEL telemetry
 
@@ -123,14 +145,30 @@ curl -X POST http://localhost:4870/backoff-policy/exponential-ceiling-ms \
 
 Per-provider overrides are also supported (`/backoff-policy/override/:provider`).
 
-## Health check endpoint
+## Health and readiness endpoints
 
 ```bash
 GET /healthz
-# {"ok":true}
+# {"status":"ok"}
 ```
 
-Use this as your load balancer or container orchestrator health check. Heimdall returns 200 even when some lanes are unhealthy — the service itself is alive; lane health is reported separately via `GET /lanes`.
+Liveness only: the process is up and serving HTTP. Use it for restart decisions and the desktop app's sidecar startup check. It always returns 200, even when lanes are unhealthy or sensing is broken.
+
+```bash
+GET /readyz
+# 200 {"status":"ready","reasons":[],"checks":{...}}
+# 503 {"status":"degraded","reasons":["lane codex: multica_autopilot scheduler failed to start — ..."],"checks":{...}}
+```
+
+Readiness asks whether Heimdall is actually sensing. It returns `503` with `status: "degraded"` and human-readable `reasons` when any of these checks fail:
+
+| Check | Degraded when |
+|---|---|
+| `schedulers` | Any lane's scheduler failed to start, or the lane's provider has no adapters. `failed_lanes` names them. |
+| `state_db` | A rolled-back test write to the state DB fails (read-only file, locked, disk error). |
+| `probe_freshness` | Lanes are declared but **no** lane has been observed within the staleness window (default 15 min, `HEIMDALL_READINESS_STALENESS_MS`), or none has ever been observed. Per-lane staleness is left to `heimdall_lane_last_probe_age_seconds`. |
+
+With no lanes declared, `probe_freshness` passes because there is nothing to sense. Lane *health* (a lane being `down`) never affects readiness; that is reported via `GET /lanes`.
 
 ## Dashboard UI
 

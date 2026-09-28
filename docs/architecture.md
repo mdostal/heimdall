@@ -72,7 +72,7 @@ flowchart TB
 6. On a routing request, the **route selector** picks a healthy, override-aware lane via the active pluggable strategy; the **scored** strategy also records a decision to its ledger and accepts an outcome report back.
 7. For providers with 2+ credentialed lanes, **RotationController** detects cap signals and can fail over to the next healthy account.
 
-Every actuation result, rotation event, and model substitution is recorded **locally first** (`telemetry_events`, exposed via `GET /metrics`) — Argus is one optional downstream consumer of the same facts, not the source of truth.
+Every rotation event and model substitution is recorded **locally first** (`telemetry_events`, exposed via `GET /metrics`), alongside in-process sensing counters for probes, status transitions and scheduler start failures (see [operations](operations.md#metrics-endpoint)) — Argus is one optional downstream consumer of the same facts, not the source of truth.
 
 ## Metrics, Toggles & A/B Testing
 Per the Pantheon OSS standard, Heimdall supports:

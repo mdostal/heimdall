@@ -25,7 +25,8 @@ All request/response bodies are JSON. Errors return `{"error":"<message>"}` with
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/healthz` | Liveness check. Returns `{"ok":true}`. |
+| `GET` | `/healthz` | Liveness check. Always returns `{"status":"ok"}`. |
+| `GET` | `/readyz` | Readiness check: are lanes actually being sensed? `200 {"status":"ready"}` or `503 {"status":"degraded","reasons":[...]}` with per-check detail. See [operations](operations.md#health-and-readiness-endpoints). |
 | `GET` | `/metrics` | Prometheus-compatible metrics scrape endpoint. |
 
 ### Lanes

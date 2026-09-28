@@ -659,3 +659,86 @@ test("heimdall#96: with HEIMDALL_DB_PATH unset, the route ledger shares StateSto
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("PANT-824: a scheduler that fails to start makes GET /readyz report degraded, naming that lane, and is counted in /metrics", async () => {
+  const env = testEnv();
+  // 6-field cron is rejected synchronously by MulticaAutopilotScheduler.start().
+  env.HEIMDALL_AUTOPILOT_CRON = "*/5 * * * * *";
+  const service = composeService({
+    env,
+    commandRunner: mockCommandRunner(),
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port: 0,
+  });
+
+  await new Promise<void>((resolve) => service.httpServer.listen(0, resolve));
+  const { port } = service.httpServer.address() as AddressInfo;
+
+  try {
+    // Probe both lanes so freshness passes — the scheduler failure alone must degrade readiness.
+    for (const laneId of ["claude@mathew.dostal", "codex"]) {
+      await fetch(`http://localhost:${port}/lanes/${encodeURIComponent(laneId)}/refresh`, { method: "POST" });
+    }
+
+    const res = await fetch(`http://localhost:${port}/readyz`);
+    assert.equal(res.status, 503);
+    const body = await res.json();
+    assert.equal(body.status, "degraded");
+    assert.equal(body.checks.schedulers.ok, false);
+    assert.deepEqual(body.checks.schedulers.failed_lanes.sort(), ["claude@mathew.dostal", "codex"]);
+    assert.ok(body.reasons.some((r: string) => r.includes("claude@mathew.dostal") && r.includes("multica_autopilot")));
+    assert.equal(body.checks.state_db.ok, true);
+    assert.equal(body.checks.probe_freshness.ok, true);
+
+    const metrics = await (await fetch(`http://localhost:${port}/metrics`)).text();
+    assert.match(metrics, /heimdall_scheduler_start_failures_total\{lane="claude@mathew\.dostal",scheduler="multica_autopilot"\} 1/);
+
+    // Liveness is unaffected.
+    const health = await fetch(`http://localhost:${port}/healthz`);
+    assert.equal(health.status, 200);
+  } finally {
+    service.stopAll();
+  }
+});
+
+test("PANT-824: GET /readyz is ready once every lane's scheduler started and a lane has been probed", async () => {
+  const service = composeService({
+    env: testEnv(),
+    commandRunner: mockCommandRunner(),
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port: 0,
+  });
+
+  await new Promise<void>((resolve) => service.httpServer.listen(0, resolve));
+  const { port } = service.httpServer.address() as AddressInfo;
+
+  try {
+    await fetch(`http://localhost:${port}/lanes/${encodeURIComponent("codex")}/refresh`, { method: "POST" });
+    const res = await fetch(`http://localhost:${port}/readyz`);
+    const body = await res.json();
+    assert.equal(res.status, 200, JSON.stringify(body));
+    assert.equal(body.status, "ready");
+    assert.deepEqual(body.reasons, []);
+  } finally {
+    service.stopAll();
+  }
+});
+
+test("PANT-824: a lane whose provider has no adapters is recorded as an in_process scheduler start failure", () => {
+  const env = testEnv();
+  env.HEIMDALL_LANE_3_ID = "mystery";
+  env.HEIMDALL_LANE_3_PROVIDER = "some-fictional-llm-provider";
+  env.HEIMDALL_LANE_3_CREDENTIAL_REF = "GEMINI_TOKEN";
+  env.GEMINI_TOKEN = "fake";
+  const service = composeService({ env, commandRunner: mockCommandRunner(), fetchImpl: mockFetch(), skipHttpListen: true, port: 0 });
+  try {
+    const failures = service.sensing.listSchedulerStartFailures();
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0].lane, "mystery");
+    assert.equal(failures[0].scheduler, "in_process");
+  } finally {
+    service.stopAll();
+  }
+});

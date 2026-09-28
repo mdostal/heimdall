@@ -46,6 +46,8 @@ import { appendLane, deriveCredentialRef, laneIdAlreadyDeclared } from "../core/
 import { refreshModelCatalog, getModelCatalog, setModelEnabled } from "../core/model-catalog.js";
 import { NoHealthyAccountsAvailableError, type RotationController } from "../core/rotation-controller.js";
 import { renderMetrics } from "./metrics.js";
+import { evaluateReadiness, resolveReadinessStalenessMs } from "./readiness.js";
+import type { SensingMetrics } from "../core/telemetry/sensing-metrics.js";
 import type { JsonValue } from "../core/routing/route-ledger.js";
 import { PolicyLoader } from "../core/routing/policy-loader.js";
 
@@ -649,6 +651,10 @@ export function createHttpServer(
   // hdl-msh-02: which Multica agent(s) a lane maps to, surfaced on GET
   // /lanes so a downstream actuator (Pantheon's facade) can act on it.
   laneAgentResolver?: LaneAgentResolver,
+  // PANT-824: the service-wide sensing counters (probes, transitions,
+  // scheduler start failures) — feeds GET /metrics and GET /readyz.
+  sensing?: SensingMetrics,
+  readinessStalenessMs: number = resolveReadinessStalenessMs(),
 ): Server {
   return createServer((req, res) => {
     // Liveness alias — distinct from /lanes on purpose: a monitor (e.g.
@@ -657,6 +663,22 @@ export function createHttpServer(
     if (req.method === "GET" && req.url === "/healthz") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ status: "ok" }));
+      return;
+    }
+
+    // PANT-824: readiness — is Heimdall actually sensing? 200 "ready" or
+    // 503 "degraded" with reasons; see readiness.ts for the checks.
+    if (req.method === "GET" && req.url === "/readyz") {
+      let report;
+      try {
+        report = evaluateReadiness({ registry, store, sensing, stalenessMs: readinessStalenessMs });
+      } catch (err) {
+        res.writeHead(503, { "content-type": "application/json" });
+        res.end(JSON.stringify({ status: "degraded", reasons: [`readiness check failed — ${err instanceof Error ? err.message : String(err)}`] }));
+        return;
+      }
+      res.writeHead(report.status === "ready" ? 200 : 503, { "content-type": "application/json" });
+      res.end(JSON.stringify(report));
       return;
     }
 
@@ -684,7 +706,7 @@ export function createHttpServer(
 
     if (req.method === "GET" && req.url === "/metrics") {
       res.writeHead(200, { "content-type": "text/plain; version=0.0.4; charset=utf-8" });
-      res.end(renderMetrics(registry, store));
+      res.end(renderMetrics(registry, store, sensing));
       return;
     }
 

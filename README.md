@@ -202,6 +202,7 @@ access, fetched on demand.
 curl http://localhost:4870/lanes
 curl -X POST http://localhost:4870/lanes/<laneId>/refresh   # force a refresh
 curl http://localhost:4870/healthz                          # liveness only, no lane data
+curl http://localhost:4870/readyz                           # readiness: 503 + reasons if lanes aren't being sensed
 curl -X POST http://localhost:4870/lanes/<laneId>/override \
   -H "content-type: application/json" -d '{"state":"disabled"}'   # manual override: enabled | disabled | auto
 curl -X POST http://localhost:4870/lanes/<laneId>/reset-at \
