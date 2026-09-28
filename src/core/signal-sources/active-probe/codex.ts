@@ -27,7 +27,7 @@
 // Uses GET /v1/models as the minimal-cost real call (parallel to Claude's
 // adapter) — lightweight, authenticated, no completion tokens spent.
 
-import { parseRetryAfter } from "../../error-parser.js";
+import { parseRetryAfter, parseTryAgainAtResetTime } from "../../error-parser.js";
 import type { ErrorCode } from "../../status-model.js";
 
 export type ProbeStatusValue = "up" | "down" | "out_of_credit" | "degraded";
@@ -85,7 +85,12 @@ export async function probeCodexLane(
       // Malformed/non-JSON error body — fall through to the rate-limit default.
     }
     const code = body.error?.code ?? body.error?.type ?? "";
-    const resetAt = parseRetryAfter(response.headers.get("retry-after"), new Date());
+    const now = new Date();
+    // retry-after is authoritative; without it, fall back to the reset time
+    // Codex's usage-limit message states in free text ("try again at ...").
+    const resetAt =
+      parseRetryAfter(response.headers.get("retry-after"), now) ??
+      parseTryAgainAtResetTime(body.error?.message ?? "", now);
 
     if (BILLING_CODE_PATTERN.test(code)) {
       return { status: "out_of_credit", reset_at: resetAt, reason: body.error?.message ?? "insufficient quota", error_code: "billing_error" };

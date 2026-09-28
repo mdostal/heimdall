@@ -227,6 +227,44 @@ export function parseCliStyleResetTime(message: string, now: Date): string | nul
   }
 }
 
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+
+// Parses Codex CLI's usage-limit reset text into an absolute ISO-8601 reset
+// timestamp. Codex (codex-rs/protocol/src/error.rs, format_retry_timestamp)
+// renders the reset in the LOCAL timezone of the machine running the CLI and
+// names no zone, in one of two forms:
+//   "try again at Oct 13th, 2026 8:25 PM."  (reset on a later local day)
+//   "try again at 8:25 PM."                 (reset later the same local day)
+// So the text is read in this process's local timezone, which is correct when
+// Heimdall runs on the same host as the CLI. Returns null if the pattern is
+// absent or names an impossible date.
+export function parseTryAgainAtResetTime(message: string, now: Date): string | null {
+  const match = message.match(
+    /try again at\s+(?:([a-z]{3})\w*\s+(\d{1,2})(?:st|nd|rd|th)?,\s*(\d{4})\s+)?(\d{1,2}):(\d{2})\s*([ap]m)/i,
+  );
+  if (!match) return null;
+  const [, monStr, dayStr, yearStr, hourStr, minStr, ampm] = match;
+  let hour = parseInt(hourStr, 10);
+  const minute = parseInt(minStr, 10);
+  if (hour < 1 || hour > 12 || minute > 59) return null;
+  if (ampm.toLowerCase() === "pm" && hour < 12) hour += 12;
+  else if (ampm.toLowerCase() === "am" && hour === 12) hour = 0;
+
+  let year = now.getFullYear();
+  let month = now.getMonth();
+  let day = now.getDate();
+  if (monStr) {
+    month = MONTHS.indexOf(monStr.toLowerCase());
+    if (month === -1) return null;
+    year = parseInt(yearStr, 10);
+    day = parseInt(dayStr, 10);
+  }
+  const reset = new Date(year, month, day, hour, minute);
+  // Reject rollovers such as "Feb 30th".
+  if (reset.getMonth() !== month || reset.getDate() !== day) return null;
+  return reset.toISOString();
+}
+
 function classify(status: number | null, message: string): ClaudeCapKind | null {
   if (message.includes("oauth") && (message.includes("expired") || message.includes("invalid"))) {
     return "oauth_expired";
