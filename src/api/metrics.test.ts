@@ -195,3 +195,36 @@ test("PANT-824 x heimdall#96: a passive route-outcome refresh is counted as sour
   assert.equal(sampleValue(body, 'heimdall_probe_duration_seconds_count{lane="claude@x",provider="claude"}'), undefined);
   store.close();
 });
+
+test("PANT-823: a never-probed lane is counted under status=\"unknown\", never \"down\", and heimdall_lane_signal_state reports it", () => {
+  const registry = new LaneRegistry(
+    [
+      { lane_id: "claude@never", provider: "claude", credential_ref: "C" },
+      { lane_id: "claude@fresh", provider: "claude", credential_ref: "C" },
+      { lane_id: "claude@stale", provider: "claude", credential_ref: "C" },
+    ],
+    new EnvCredentialSource({ C: "secret" }),
+  );
+  const store = new StateStore(":memory:");
+  for (const lane of registry.list()) {
+    store.upsertLane({ lane_id: lane.lane_id, provider: lane.provider, credential_ref: lane.credential_ref });
+  }
+  const now = new Date("2026-09-28T12:00:00.000Z");
+  store.recordStatus({ lane_id: "claude@fresh", status: "down", reset_at: null, reason: "probe failed", signal_source: "active_probe", observed_at: now.toISOString() });
+  store.recordStatus({ lane_id: "claude@stale", status: "up", reset_at: null, reason: null, signal_source: "active_probe", observed_at: "2026-09-28T09:00:00.000Z" });
+
+  const body = renderMetrics(registry, store, undefined, () => now, 3);
+
+  // Only the lane that was actually observed down counts as down.
+  assert.equal(sampleValue(body, 'heimdall_lanes{provider="claude",status="down"}'), 1);
+  assert.equal(sampleValue(body, 'heimdall_lanes{provider="claude",status="unknown"}'), 1);
+  assert.equal(sampleValue(body, 'heimdall_lanes{provider="claude",status="up"}'), 1);
+
+  assert.match(body, /^# TYPE heimdall_lane_signal_state gauge$/m);
+  assert.equal(sampleValue(body, 'heimdall_lane_signal_state{lane="claude@never",state="never_probed"}'), 1);
+  assert.equal(sampleValue(body, 'heimdall_lane_signal_state{lane="claude@never",state="fresh"}'), 0);
+  assert.equal(sampleValue(body, 'heimdall_lane_signal_state{lane="claude@fresh",state="fresh"}'), 1);
+  assert.equal(sampleValue(body, 'heimdall_lane_signal_state{lane="claude@stale",state="stale"}'), 1);
+  assert.equal(sampleValue(body, 'heimdall_lane_signal_state{lane="claude@stale",state="fresh"}'), 0);
+  store.close();
+});

@@ -183,6 +183,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
   .badge-degraded { background: var(--hd-status-degraded); }
   .badge-down { background: var(--hd-status-down); }
   .badge-out_of_credit { background: var(--hd-status-credit); }
+  .badge-no-signal { background: var(--hd-status-off); }
   .override-badge {
     display: inline-block;
     margin-left: 0.4rem;
@@ -480,6 +481,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       <span><i class="legend-dot" style="background:var(--hd-status-degraded)"></i>degraded</span>
       <span><i class="legend-dot" style="background:var(--hd-status-credit)"></i>out of credit</span>
       <span><i class="legend-dot" style="background:var(--hd-status-down)"></i>down</span>
+      <span><i class="legend-dot" style="background:var(--hd-status-off)"></i>no signal</span>
       <span><i class="legend-dot" style="border:1.3px solid var(--hd-status-off);background:transparent"></i>overridden</span>
     </div>
   </div>
@@ -735,9 +737,28 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
     return "<span class=\\"error-code-chip\\">" + escapeHtml(lane.error_code) + "</span> ";
   }
 
-  function renderRow(lane) {
+  // PANT-823: a never-probed or stale lane has no live signal, so its
+  // status (often the REQ-07 "down" fallback) isn't an observed outage —
+  // shown grey as "no signal" instead of in its status colour. The raw
+  // status stays visible in the badge's tooltip and in GET /lanes.
+  function hasNoSignal(lane) {
+    return lane.signal_state === "never_probed" || lane.signal_state === "stale";
+  }
+
+  function statusBadge(lane) {
+    if (hasNoSignal(lane)) {
+      var detail = lane.signal_state === "never_probed"
+        ? "never probed"
+        : "stale — last probed " + (lane.last_probed_at || "unknown");
+      return "<span class=\"badge badge-no-signal\" title=\"" + escapeHtml("status " + lane.status + ", " + detail) + "\">" +
+        escapeHtml(lane.signal_state === "never_probed" ? "no signal" : "no signal (stale)") + "</span>";
+    }
     var badgeClass = "badge badge-" + escapeHtml(lane.status);
     var label = BADGE_LABEL[lane.status] || lane.status;
+    return "<span class=\"" + badgeClass + "\">" + escapeHtml(label) + "</span>";
+  }
+
+  function renderRow(lane) {
     return (
       "<tr>" +
       "<td>" + escapeHtml(lane.lane_id) + "</td>" +
@@ -817,8 +838,12 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       var angle = (i / n) * 2 * Math.PI;
       var cx = (100 + ring * Math.sin(angle)).toFixed(2);
       var cy = (100 - ring * Math.cos(angle)).toFixed(2);
-      var colorVar = "var(" + (SCOPE_COLOR_VAR[lane.status] || SCOPE_COLOR_VAR.down) + ")";
-      var title = escapeHtml(lane.lane_id) + " — " + escapeHtml(lane.status) + (lane.manual_override ? " (overridden)" : "");
+      var colorVar = hasNoSignal(lane)
+        ? "var(--hd-status-off)"
+        : "var(" + (SCOPE_COLOR_VAR[lane.status] || SCOPE_COLOR_VAR.down) + ")";
+      var title = escapeHtml(lane.lane_id) + " — " + escapeHtml(lane.status) +
+        (hasNoSignal(lane) ? " (no signal: " + escapeHtml(lane.signal_state) + ")" : "") +
+        (lane.manual_override ? " (overridden)" : "");
       if (lane.manual_override) {
         blips +=
           "<g class=\\"blip\\"><title>" + title + "</title>" +

@@ -60,7 +60,9 @@ All request/response bodies are JSON. Errors return `{"error":"<message>"}` with
     "manual_reset_at": null,
     "manual_headroom": null,
     "manual_cost_tier": null,
-    "multica_agent_ids": ["abc123"]
+    "multica_agent_ids": ["abc123"],
+    "signal_state": "fresh",
+    "last_probed_at": "2026-09-27T00:00:00.000Z"
   }
 ]
 ```
@@ -70,6 +72,25 @@ All request/response bodies are JSON. Errors return `{"error":"<message>"}` with
 `signal_source` values: `"passive"` | `"public_status"` | `"active_probe"`
 
 `error_code` values: `"rate_limit"` | `"quota_exceeded"` | `"billing_error"` | `"auth_failed"` | `"server_error"` | `"network_error"` | `"unknown"` | `null`
+
+`signal_state` values: `"never_probed"` | `"fresh"` | `"stale"` (PANT-823)
+
+`signal_state` says whether `status` rests on a recent observation. It is on every lane in `GET /lanes`, the `heimdall.lanes.list` MCP tool and the `heimdall` CLI's JSON output, alongside `last_probed_at`.
+
+| `signal_state` | Meaning | `last_probed_at` |
+|---|---|---|
+| `never_probed` | No observation has ever been recorded for this lane. `status` is the REQ-07 fallback (`"down"`, reason `unconfigured — no status recorded yet`, `last_updated` 1970-01-01), **not** an observed outage. | `null` |
+| `fresh` | The last observation is within the staleness window. `status` is a live reading. | timestamp of the last observation |
+| `stale` | The last observation is older than N × the lane's expected probe interval. `status` is the last verdict Heimdall saw, and nothing has confirmed it since. | timestamp of the last observation |
+
+`status` is never changed by `signal_state`, so REQ-07 still holds: every declared lane is reported, and a lane with no signal still reads `down`. **Consumers that act on `down` (e.g. Pantheon's lane reconciler, PANT-763) should act only when `signal_state` is `"fresh"`.** Treat `never_probed` and `stale` as "no signal".
+
+The staleness window:
+
+- The expected probe interval is the longest routine gap the in-process scheduler leaves between two refreshes of the lane: the 5-minute healthy re-probe, the 5-minute `auth_failed` backoff, or the active backoff policy's ceiling for the lane's provider, whichever is longest.
+- N is `HEIMDALL_SIGNAL_STALE_MULTIPLIER` (default `3`), so the default window is 15 minutes.
+- While a lane is `degraded`/`down`/`out_of_credit` with a known reset time (`manual_reset_at`, else `reset_at`), the scheduler deliberately waits until that time before re-probing. The window then starts at the reset time instead of the last observation.
+- Any recorded observation counts, including a passive status push or a reported route outcome.
 
 ### Routing
 
@@ -178,7 +199,7 @@ npx heimdall agent init
 
 | Tool name | Description |
 |---|---|
-| `heimdall.lanes.list` | List all lanes with current health state |
+| `heimdall.lanes.list` | List all lanes with current health state (same shape as `GET /lanes`, including `signal_state`/`last_probed_at`) |
 | `heimdall.lanes.override` | Set or clear a manual health override on a lane |
 | `heimdall.lanes.setResetAt` | Set or clear a scheduled reset time on a lane |
 | `heimdall.lanes.add` | Add a new lane at runtime |

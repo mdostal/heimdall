@@ -7,17 +7,23 @@
 import { buildLaneRegistry, getLaneStatuses } from "./http-server.js";
 import { StateStore, resolveDefaultDbPath } from "../core/state-store.js";
 import type { LaneStatus } from "../core/status-model.js";
+import type { SignalState } from "../core/signal-state.js";
 import { runRouteCommand, runRouteOutcomeCommand } from "../cli/route-command.js";
 import { runAgentCommand } from "../cli/agent-command.js";
 
-export function formatAsTable(lanes: readonly LaneStatus[]): string {
+// PANT-823: getLaneStatuses() always sets signal_state; optional here so a
+// bare LaneStatus (tests, older callers) still renders, as "-".
+type CliLane = LaneStatus & { signal_state?: SignalState };
+
+export function formatAsTable(lanes: readonly CliLane[]): string {
   if (lanes.length === 0) return "No lanes configured.";
 
-  const headers = ["LANE_ID", "PROVIDER", "STATUS", "RESET_AT", "REASON", "LAST_UPDATED", "SOURCE"];
+  const headers = ["LANE_ID", "PROVIDER", "STATUS", "SIGNAL", "RESET_AT", "REASON", "LAST_UPDATED", "SOURCE"];
   const rows = lanes.map((lane) => [
     lane.lane_id,
     lane.provider,
     lane.status,
+    lane.signal_state ?? "-",
     lane.reset_at ?? "-",
     lane.reason ?? "-",
     lane.last_updated,
@@ -31,13 +37,13 @@ export function formatAsTable(lanes: readonly LaneStatus[]): string {
   return [formatRow(headers), ...rows.map(formatRow)].join("\n");
 }
 
-export function formatAsJson(lanes: readonly LaneStatus[]): string {
+export function formatAsJson(lanes: readonly CliLane[]): string {
   return JSON.stringify(lanes, null, 2);
 }
 
 export type OutputFormat = "json" | "table";
 
-export function renderLanes(lanes: readonly LaneStatus[], format: OutputFormat): string {
+export function renderLanes(lanes: readonly CliLane[], format: OutputFormat): string {
   return format === "table" ? formatAsTable(lanes) : formatAsJson(lanes);
 }
 

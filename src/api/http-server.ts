@@ -37,6 +37,7 @@ import { LANE_STATUS_CHANGED } from "../core/lane-events.js";
 import type { LaneStatus, LaneStatusValue } from "../core/status-model.js";
 import { LANE_STATUS_VALUES } from "../core/status-model.js";
 import type { LaneAgentResolver } from "../core/actuation/lane-agent-resolver.js";
+import { getLaneSignal, type SignalState } from "../core/signal-state.js";
 import { renderDashboardHtml } from "./ui/dashboard.js";
 import { DOC_ENTRIES, getDocBySlug, renderDocMarkdown, renderDocsIndexHtml, renderDocPageHtml } from "./ui/docs-viewer.js";
 import { createRequire } from "node:module";
@@ -123,6 +124,11 @@ export interface LaneStatusWithOverride extends LaneStatus {
    * mapping is configured — never omitted. Heimdall itself no longer acts
    * on this mapping (see docs/decisions/DEC-hdl-multica-disable-contract.md). */
   multica_agent_ids: string[];
+  /** PANT-823 — whether `status` rests on a recent observation. never_probed
+   * and stale lanes keep their `status` (REQ-07) but carry no live signal —
+   * a consumer must not treat their "down" as a sensed outage. */
+  signal_state: SignalState;
+  last_probed_at: string | null;
 }
 
 const VALID_OVERRIDE_STATES = new Set(["enabled", "disabled", "auto"]);
@@ -567,6 +573,7 @@ export function getLaneStatuses(
   registry: LaneRegistry,
   store: StateStore,
   resolver?: LaneAgentResolver,
+  now: Date = new Date(),
 ): LaneStatusWithOverride[] {
   // Ensure every declared lane is present in the store (REQ-07: a lane with a
   // missing/invalid credential is still known — it just resolves to
@@ -592,6 +599,7 @@ export function getLaneStatuses(
       manual_headroom: store.getManualHeadroom(status.lane_id),
       manual_cost_tier: store.getManualCostTier(status.lane_id),
       multica_agent_ids: resolver?.resolve(status.lane_id) ?? [],
+      ...getLaneSignal(store, status.lane_id, { now }),
     };
   });
 }
