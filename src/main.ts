@@ -325,4 +325,11 @@ if (isMainModule) {
   process.title = "heimdall";
   startArgusSdk();
   composeService();
+  // heimdall#95: installed only after composeService() returned, so a
+  // startup failure still crashes the process exactly as before. From here
+  // on, a stray rejected promise (one bad request, one failed probe) is
+  // logged loudly and contained instead of taking every lane down with it.
+  process.on("unhandledRejection", (reason) => {
+    console.error("[main] UNHANDLED PROMISE REJECTION — contained, Heimdall keeps running:", reason);
+  });
 }

@@ -4,7 +4,7 @@
 // lane) — no real signal detection yet; that's lhs-03f.
 // See .pHive/epics/lane-health-status/stories/lhs-02-credential-loading-state-storage.yaml
 
-import { createServer, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { EnvCredentialSource, type CredentialSource } from "../core/credential-source.js";
 import { PantheonSecretCredentialSource } from "../core/pantheon-secret-credential-source.js";
 import { loadLaneDeclarations, LaneRegistry, type LaneCostTier } from "../core/lane-registry.js";
@@ -49,7 +49,7 @@ import { renderMetrics } from "./metrics.js";
 import { evaluateReadiness, resolveReadinessStalenessMs } from "./readiness.js";
 import type { SensingMetrics } from "../core/telemetry/sensing-metrics.js";
 import type { JsonValue } from "../core/routing/route-ledger.js";
-import { PolicyLoader } from "../core/routing/policy-loader.js";
+import { PolicyLoader, PolicyValidationError } from "../core/routing/policy-loader.js";
 
 const DEFAULT_ENV_FILE_PATH = ".env";
 
@@ -76,9 +76,10 @@ const iconSetsRoot =
   process.env.HEIMDALL_ICON_SETS_ROOT ?? join(process.cwd(), "app", "src-tauri", "resources", "icon-sets");
 
 /** Collects and JSON-parses a request body. Shared by every mutation route (override, reset-at, add-lane). */
-function readJsonBody(req: import("node:http").IncomingMessage): Promise<{ ok: true; data: unknown } | { ok: false }> {
-  return new Promise((resolve) => {
+function readJsonBody(req: IncomingMessage): Promise<{ ok: true; data: unknown } | { ok: false }> {
+  return new Promise((resolve, reject) => {
     let rawBody = "";
+    req.on("error", reject);
     req.on("data", (chunk) => {
       rawBody += chunk;
     });
@@ -90,6 +91,35 @@ function readJsonBody(req: import("node:http").IncomingMessage): Promise<{ ok: t
       }
     });
   });
+}
+
+/**
+ * heimdall#95: the one error response for a handler that threw. A missing or
+ * invalid routing policy is the operator's config problem, not a bug, so it
+ * gets its own 503 (see docs/routing.md); anything else is a 500. Either way
+ * the process keeps serving every other lane.
+ */
+function sendHandlerError(res: ServerResponse, err: unknown): void {
+  const detail = err instanceof Error ? err.message : String(err);
+  const policyUnavailable = err instanceof PolicyValidationError;
+  if (!policyUnavailable) console.error("[http] request handler failed:", err);
+  if (res.headersSent) {
+    res.destroy();
+    return;
+  }
+  res.writeHead(policyUnavailable ? 503 : 500, { "content-type": "application/json" });
+  res.end(JSON.stringify({ error: policyUnavailable ? "routing_policy_unavailable" : "internal_error", detail }));
+}
+
+/** readJsonBody + the handler, with any throw or rejection turned into sendHandlerError() instead of an unhandled rejection (heimdall#95). */
+function handleJsonBody(
+  req: IncomingMessage,
+  res: ServerResponse,
+  handler: (body: { ok: true; data: unknown } | { ok: false }) => void | Promise<void>,
+): void {
+  readJsonBody(req)
+    .then(handler)
+    .catch((err) => sendHandlerError(res, err));
 }
 
 /**
@@ -656,7 +686,7 @@ export function createHttpServer(
   sensing?: SensingMetrics,
   readinessStalenessMs: number = resolveReadinessStalenessMs(),
 ): Server {
-  return createServer((req, res) => {
+  const handleRequest = (req: IncomingMessage, res: ServerResponse): void => {
     // Liveness alias — distinct from /lanes on purpose: a monitor (e.g.
     // Salus) should be able to confirm the process is up and serving HTTP
     // without that check depending on lane declarations or StateStore reads.
@@ -728,7 +758,7 @@ export function createHttpServer(
     }
 
     if (req.method === "POST" && req.url === "/theme") {
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_json" }));
@@ -757,7 +787,7 @@ export function createHttpServer(
     }
 
     if (req.method === "POST" && req.url === "/agent-onboarding-dismissed") {
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_json" }));
@@ -831,7 +861,7 @@ export function createHttpServer(
     // loadLaneDeclarations() only runs at boot, so the new lane is inert
     // until the operator restarts (see the response's restart_command).
     if (req.method === "POST" && req.url === "/lanes") {
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_json" }));
@@ -900,7 +930,7 @@ export function createHttpServer(
     }
 
     if (req.method === "POST" && req.url === "/routing-strategy") {
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_json" }));
@@ -938,7 +968,7 @@ export function createHttpServer(
     }
 
     if (req.method === "POST" && req.url === "/backoff-policy") {
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_json" }));
@@ -986,7 +1016,7 @@ export function createHttpServer(
 
     if (req.method === "POST" && backoffOverrideMatch) {
       const provider = decodeURIComponent(backoffOverrideMatch[1]);
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_json" }));
@@ -1016,7 +1046,7 @@ export function createHttpServer(
     }
 
     if (req.method === "POST" && req.url === "/backoff-policy/progressive-level-cap") {
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_json" }));
@@ -1044,7 +1074,7 @@ export function createHttpServer(
     }
 
     if (req.method === "POST" && req.url === "/backoff-policy/exponential-multiplier") {
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_json" }));
@@ -1072,7 +1102,7 @@ export function createHttpServer(
     }
 
     if (req.method === "POST" && req.url === "/backoff-policy/exponential-ceiling-ms") {
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_json" }));
@@ -1105,7 +1135,7 @@ export function createHttpServer(
     }
 
     if (req.method === "POST" && req.url === "/desktop-icon") {
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_json" }));
@@ -1173,7 +1203,7 @@ export function createHttpServer(
     // contract (Auriga/Minerva's existing dispatch shape). GET
     // /available-route is the strategy-driven surface; this is not that.
     if (req.method === "POST" && req.url === "/route") {
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_json" }));
@@ -1207,7 +1237,7 @@ export function createHttpServer(
     const routeOutcomeMatch = req.method === "POST" && req.url?.match(/^\/route\/([^/]+)\/outcome$/);
     if (routeOutcomeMatch) {
       const decisionId = decodeURIComponent(routeOutcomeMatch[1]);
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_json" }));
@@ -1265,7 +1295,7 @@ export function createHttpServer(
     if (modelEnabledMatch) {
       const provider = decodeURIComponent(modelEnabledMatch[1]);
       const modelId = decodeURIComponent(modelEnabledMatch[2]);
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_json" }));
@@ -1324,7 +1354,7 @@ export function createHttpServer(
     const overrideMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/override$/);
     if (overrideMatch) {
       const laneId = decodeURIComponent(overrideMatch[1]);
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_json" }));
@@ -1353,7 +1383,7 @@ export function createHttpServer(
     const resetAtMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/reset-at$/);
     if (resetAtMatch) {
       const laneId = decodeURIComponent(resetAtMatch[1]);
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_json" }));
@@ -1385,7 +1415,7 @@ export function createHttpServer(
     const headroomMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/headroom$/);
     if (headroomMatch) {
       const laneId = decodeURIComponent(headroomMatch[1]);
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_json" }));
@@ -1412,7 +1442,7 @@ export function createHttpServer(
     const costTierMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/cost-tier$/);
     if (costTierMatch) {
       const laneId = decodeURIComponent(costTierMatch[1]);
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_json" }));
@@ -1468,7 +1498,7 @@ export function createHttpServer(
     const laneStatusPushMatch = req.method === "PATCH" && req.url?.match(/^\/lanes\/([^/]+)$/);
     if (laneStatusPushMatch) {
       const laneId = decodeURIComponent(laneStatusPushMatch[1]);
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
           res.writeHead(400, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "invalid_json" }));
@@ -1492,6 +1522,16 @@ export function createHttpServer(
 
     res.writeHead(404, { "content-type": "application/json" });
     res.end(JSON.stringify({ error: "not_found" }));
+  };
+
+  // heimdall#95: a synchronous throw in any route answers that one request
+  // with an error; it never reaches the process as an uncaught exception.
+  return createServer((req, res) => {
+    try {
+      handleRequest(req, res);
+    } catch (err) {
+      sendHandlerError(res, err);
+    }
   });
 }
 

@@ -168,6 +168,11 @@ export function useRouteLedgerPath(path: string): void {
   for (const strategy of ledgerBackedStrategies) strategy.useLedgerPath(path);
 }
 
+/** Points every scored strategy at the routing policy in `path` (undefined = the default path). Tests use it to simulate a missing policy (heimdall#95). */
+export function useRoutePolicyPath(path: string | undefined): void {
+  for (const strategy of ledgerBackedStrategies) strategy.usePolicyPath(path);
+}
+
 export function closeRouteLedgers(): void {
   for (const strategy of ledgerBackedStrategies) strategy.closeLedger();
 }
