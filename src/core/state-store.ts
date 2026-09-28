@@ -12,6 +12,7 @@ import { homedir as osHomedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { LaneCostTier } from "./lane-registry.js";
+import { LaneEvents, type LaneStatusChangeCause } from "./lane-events.js";
 import type { ErrorCode, LaneStatus, LaneStatusValue, SignalSource } from "./status-model.js";
 
 // hdl-ao-01 — same shape as resolveDefaultPolicyPath (routing/policy-loader.ts):
@@ -140,6 +141,9 @@ export class StateStore {
   private readonly db: DatabaseSync;
   private closed = false;
 
+  /** PANT-827 — lane.status_changed, emitted by recordStatus/setManualOverride/setManualResetAt only on a real change. */
+  readonly events = new LaneEvents();
+
   constructor(path: string = ":memory:") {
     // node:sqlite's default for foreign-key enforcement varies by Node
     // version (observed OFF on Node 22.9, ON on the hive's Node build) —
@@ -230,6 +234,8 @@ export class StateStore {
     signal_source: SignalSource;
     observed_at: string;
   }): void {
+    const before = this.hasRecordedStatus(entry.lane_id) ? this.getCurrentStatus(entry.lane_id)?.status ?? null : null;
+
     // Guard the FK to lanes(lane_id) regardless of call order — a no-op via
     // ON CONFLICT DO NOTHING when the caller already upserted the lane (the
     // normal path), but never a foreign-key violation if it didn't.
@@ -255,6 +261,34 @@ export class StateStore {
         entry.signal_source,
         entry.observed_at,
       );
+
+    // Compared against the resolved latest row, not the entry just written —
+    // an out-of-order (older observed_at) entry doesn't change the current
+    // status, so it must not emit either.
+    const after = this.getCurrentStatus(entry.lane_id);
+    if (after && after.status !== before) {
+      this.emitStatusChanged(entry.lane_id, before, "status");
+    }
+  }
+
+  private emitStatusChanged(laneId: string, from: LaneStatusValue | null, cause: LaneStatusChangeCause): void {
+    const current = this.getCurrentStatus(laneId);
+    if (!current) return;
+    this.events.emitStatusChanged({
+      lane_id: laneId,
+      from,
+      to: current.status,
+      error_code: current.error_code,
+      // Same precedence InProcessScheduler applies: an operator's manual reset_at wins over the sensed one.
+      reset_at: this.getManualResetAt(laneId) ?? current.reset_at,
+      observed_at: new Date().toISOString(),
+      cause,
+    });
+  }
+
+  /** The lane's resolved status for a manual-lever event (no status transition — from === to). */
+  private currentStatusValue(laneId: string): LaneStatusValue | null {
+    return this.getCurrentStatus(laneId)?.status ?? null;
   }
 
   listLanes(): LaneRow[] {
@@ -361,10 +395,14 @@ export class StateStore {
          ON CONFLICT(lane_id) DO NOTHING`,
       )
       .run(laneId);
+    const previous = this.getManualOverride(laneId);
     const effectiveReason = value === null ? null : reason;
     this.db
       .prepare(`UPDATE lanes SET manual_override = ?, override_reason = ? WHERE lane_id = ?`)
       .run(value, effectiveReason, laneId);
+    if (value !== previous) {
+      this.emitStatusChanged(laneId, this.currentStatusValue(laneId), "manual_override");
+    }
   }
 
   getManualOverride(laneId: string): ManualOverride {
@@ -396,7 +434,11 @@ export class StateStore {
          ON CONFLICT(lane_id) DO NOTHING`,
       )
       .run(laneId);
+    const previous = this.getManualResetAt(laneId);
     this.db.prepare(`UPDATE lanes SET manual_reset_at = ? WHERE lane_id = ?`).run(value, laneId);
+    if (value !== previous) {
+      this.emitStatusChanged(laneId, this.currentStatusValue(laneId), "manual_reset_at");
+    }
   }
 
   getManualResetAt(laneId: string): string | null {

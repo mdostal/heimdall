@@ -2,12 +2,16 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Lane status is event-driven; the status-watcher poll loop is gone (PANT-827).** `main.ts` used to run a service-wide `setInterval` that called `ControlAdapter.reconcile()` for every lane every 5s whether or not anything had changed. Now `StateStore` emits an in-process `lane.status_changed` event (`{lane_id, from, to, error_code, reset_at, observed_at, cause}`) only when a lane's resolved status actually changes, or when its manual override or manual reset_at changes. `reconcile()` subscribes to that event, so it runs once per transition. The dashboard subscribes to a new `GET /events` Server-Sent Events stream fed by the same emitter and re-fetches `GET /lanes` on each event. It falls back to the old 5s poll only when SSE is unavailable. Known limit: the emitter is in-process, so a status or override written by a separate process against the same DB file (the `heimdall` CLI, `heimdall mcp`) does not emit. Active-probe scheduling (`InProcessScheduler`) is unchanged.
+
 ### Fixed
 
 - **Runtime hardening for the long-running service (PANT-829).** Six ways the process could crash or grow without bound are fixed:
   - Every SQLite connection that `StateStore` and `RouteLedger` open sets `PRAGMA busy_timeout = 5000`. The server, MCP and CLI processes share one WAL file, so colliding writes now wait instead of throwing `SQLITE_BUSY`.
   - Background jobs run through `startBackgroundJob()`, which catches and logs errors. A throwing `restoreExpiredCaps()` no longer kills the process.
-  - `SIGTERM`/`SIGINT` run a graceful `shutdown()`: stop timers, drain the HTTP server (10s grace), close the DB, exit 0.
+  - `SIGTERM`/`SIGINT` run a graceful `shutdown()`: stop timers and event subscriptions, end open `GET /events` streams, drain the other in-flight requests (10s grace), close the DB, exit 0.
   - An HTTP server `'error'` (e.g. `EADDRINUSE`) is logged clearly and exits 1.
   - Request bodies are capped at 1 MiB and return 413 above that.
   - `lane_status_history` and `telemetry_events` rows older than `HEIMDALL_RETENTION_DAYS` (default 30) are pruned at startup and daily. Each lane's latest status row is always kept.

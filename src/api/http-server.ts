@@ -4,7 +4,7 @@
 // lane) — no real signal detection yet; that's lhs-03f.
 // See .pHive/epics/lane-health-status/stories/lhs-02-credential-loading-state-storage.yaml
 
-import { createServer, type Server } from "node:http";
+import { createServer, type Server, type ServerResponse } from "node:http";
 import { EnvCredentialSource, type CredentialSource } from "../core/credential-source.js";
 import { PantheonSecretCredentialSource } from "../core/pantheon-secret-credential-source.js";
 import { loadLaneDeclarations, LaneRegistry, type LaneCostTier } from "../core/lane-registry.js";
@@ -33,6 +33,7 @@ import {
 } from "../core/scheduler/backoff-policies/registry.js";
 import { DEFAULT_INTERVAL_MS as BACKOFF_BASE_INTERVAL_MS } from "../core/scheduler/in-process-scheduler.js";
 import { StateStore, resolveDefaultDbPath, type ManualOverride } from "../core/state-store.js";
+import { LANE_STATUS_CHANGED } from "../core/lane-events.js";
 import type { LaneStatus, LaneStatusValue } from "../core/status-model.js";
 import { LANE_STATUS_VALUES } from "../core/status-model.js";
 import type { LaneAgentResolver } from "../core/actuation/lane-agent-resolver.js";
@@ -664,8 +665,8 @@ export type PushLaneStatusResult =
  * Records an externally-pushed lane status as `signal_source: "passive"`.
  * Used by Pantheon's quota-failure watcher (PANT-185) to push
  * `out_of_credit` the moment a task fails, rather than waiting for the next
- * active probe cycle.  Heimdall's own actuation loop picks it up on the
- * next reconcile tick (≤5 s).
+ * active probe cycle.  A resulting status change emits lane.status_changed
+ * (PANT-827), which reconciles immediately and streams over GET /events.
  */
 export function pushLaneStatus(
   registry: LaneRegistry,
@@ -690,6 +691,16 @@ export function pushLaneStatus(
   return { ok: true, lane_id: laneId, status: rawStatus as LaneStatusValue, signal_source: "passive" };
 }
 
+// PANT-829: open GET /events responses per server, so a graceful shutdown can
+// end them up front instead of waiting out the whole grace period on streams
+// that never finish by themselves.
+const openEventStreams = new WeakMap<Server, Set<ServerResponse>>();
+
+/** Ends every open GET /events (SSE) stream on `server`. Clients reconnect to the next instance. */
+export function endEventStreams(server: Server): void {
+  for (const res of openEventStreams.get(server) ?? []) res.end();
+}
+
 export function createHttpServer(
   registry: LaneRegistry,
   store: StateStore,
@@ -701,7 +712,8 @@ export function createHttpServer(
   // /lanes so a downstream actuator (Pantheon's facade) can act on it.
   laneAgentResolver?: LaneAgentResolver,
 ): Server {
-  return createServer((req, res) => {
+  const eventStreams = new Set<ServerResponse>();
+  const server = createServer((req, res) => {
     // Liveness alias — distinct from /lanes on purpose: a monitor (e.g.
     // Salus) should be able to confirm the process is up and serving HTTP
     // without that check depending on lane declarations or StateStore reads.
@@ -714,6 +726,29 @@ export function createHttpServer(
     // hdl-ot-03: Heimdall's own metrics, entirely local — Prometheus text
     // format so any OTEL/Prometheus-compatible scraper (Argus included) can
     // pull it later without Heimdall depending on any of them being present.
+    // PANT-827: Server-Sent Events stream of lane.status_changed — the
+    // dashboard subscribes here instead of polling GET /lanes every 5s.
+    // Fed by the StateStore's in-process emitter, so it only sends when a
+    // lane's resolved status or manual override/reset_at actually changes.
+    if (req.method === "GET" && req.url === "/events") {
+      res.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+      });
+      // An initial comment flushes the headers so EventSource fires "open" now, not on the first event.
+      res.write(": connected\n\n");
+      const unsubscribe = store.events.onStatusChanged((event) => {
+        res.write(`event: ${LANE_STATUS_CHANGED}\ndata: ${JSON.stringify(event)}\n\n`);
+      });
+      eventStreams.add(res);
+      res.on("close", () => {
+        unsubscribe();
+        eventStreams.delete(res);
+      });
+      return;
+    }
+
     if (req.method === "GET" && req.url === "/metrics") {
       res.writeHead(200, { "content-type": "text/plain; version=0.0.4; charset=utf-8" });
       res.end(renderMetrics(registry, store));
@@ -1316,8 +1351,8 @@ export function createHttpServer(
     // hdl-lo-01: manual lane override — routes through the SAME
     // ControlAdapter.reconcile() decision as automatic status-driven
     // actuation (see MulticaControlAdapter's desiredEnabled computation),
-    // not a separate mechanism. Takes effect on the next reconcile tick
-    // (<=5s, same latency as the existing suspect-lane cadence).
+    // not a separate mechanism. Takes effect immediately: a changed override
+    // emits lane.status_changed (PANT-827), which triggers reconcile().
     const overrideMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/override$/);
     if (overrideMatch) {
       const laneId = decodeURIComponent(overrideMatch[1]);
@@ -1485,6 +1520,8 @@ export function createHttpServer(
     res.writeHead(404, { "content-type": "application/json" });
     res.end(JSON.stringify({ error: "not_found" }));
   });
+  openEventStreams.set(server, eventStreams);
+  return server;
 }
 
 const isMainModule =

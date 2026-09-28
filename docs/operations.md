@@ -67,7 +67,7 @@ Lane status history and telemetry events older than `HEIMDALL_RETENTION_DAYS` (d
 
 ### Shutdown and limits
 
-`SIGTERM` and `SIGINT` trigger a graceful shutdown: timers and background jobs stop, the server stops accepting connections and waits up to 10s for in-flight requests, the DB is closed, and the process exits 0. A second signal during shutdown exits 1 immediately. If the port can't be bound (e.g. `EADDRINUSE`), Heimdall logs the cause and exits 1.
+`SIGTERM` and `SIGINT` trigger a graceful shutdown: timers, background jobs and event subscriptions stop, the server stops accepting connections, open `GET /events` streams are ended (dashboards reconnect to the next instance), and the server waits up to 10s for other in-flight requests, the DB is closed, and the process exits 0. A second signal during shutdown exits 1 immediately. If the port can't be bound (e.g. `EADDRINUSE`), Heimdall logs the cause and exits 1.
 
 Request bodies are capped at 1 MiB. Larger bodies get `413 {"error":"payload_too_large"}`.
 

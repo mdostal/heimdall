@@ -4,6 +4,8 @@ import type { AddressInfo } from "node:net";
 import { EventEmitter } from "node:events";
 import { createServer } from "node:net";
 import { composeService, installShutdownHandlers } from "./main.js";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -442,43 +444,61 @@ test("a lane with a HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS mapping still gets StubC
   service.stopAll();
 });
 
-test("the shared status watcher calls reconcile() for every lane on each tick, not just on transitions", async () => {
+test("reconcile() is event-driven: never called across unchanged ticks, exactly once per transition (PANT-827)", async () => {
   const service = composeService({
     env: testEnv(),
     commandRunner: mockCommandRunner(),
     fetchImpl: mockFetch(),
     skipHttpListen: true,
     port: 0,
-    statusWatcherIntervalMs: 10,
   });
-  // Isolate the status watcher: stop the InProcessSchedulers before their
-  // startup probe (PANT-753) can overwrite the seeded status below.
+  // Isolate from the InProcessSchedulers' startup probe (PANT-753), which
+  // would otherwise record its own statuses underneath the injected ticks.
   for (const s of service.inProcessSchedulers) s.stop();
 
-  service.store.recordStatus({
-    lane_id: "claude@mathew.dostal",
-    status: "down",
-    reset_at: null,
-    reason: "seeded for test",
-    signal_source: "active_probe",
-    observed_at: "2026-07-25T12:00:00.000Z",
-  });
+  const laneId = "claude@mathew.dostal";
+  const tick = (status: "up" | "down", observedAt: string) =>
+    service.store.recordStatus({
+      lane_id: laneId,
+      status,
+      reset_at: null,
+      reason: "injected tick",
+      signal_source: "active_probe",
+      observed_at: observedAt,
+    });
 
-  const adapter = service.controlAdapters.get("claude@mathew.dostal")!;
+  tick("down", "2026-07-25T12:00:00.000Z");
+
+  const adapter = service.controlAdapters.get(laneId)!;
   const reconcileCalls: string[] = [];
-  const originalReconcile = adapter.reconcile.bind(adapter);
-  adapter.reconcile = async (lane, status) => {
+  adapter.reconcile = async (_lane, status) => {
     reconcileCalls.push(status);
-    return originalReconcile(lane, status);
   };
 
-  // Same "down" status held steady across multiple ticks — no transition —
-  // yet reconcile() must still fire every tick (retry-for-free semantics).
-  await new Promise<void>((resolve) => setTimeout(resolve, 55));
+  // Several ticks, same resolved status — no transition, so no reconcile().
+  tick("down", "2026-07-25T12:00:05.000Z");
+  tick("down", "2026-07-25T12:00:10.000Z");
+  tick("down", "2026-07-25T12:00:15.000Z");
+  // Wall-clock time passing must not trigger it either (no timer left).
+  await new Promise<void>((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(reconcileCalls, []);
+
+  // One transition -> exactly one call.
+  tick("up", "2026-07-25T12:00:20.000Z");
+  tick("up", "2026-07-25T12:00:25.000Z");
+  assert.deepEqual(reconcileCalls, ["up"]);
+
+  // A manual override change reconciles too; re-setting the same value doesn't.
+  service.store.setManualOverride(laneId, "disabled");
+  service.store.setManualOverride(laneId, "disabled");
+  assert.deepEqual(reconcileCalls, ["up", "up"]);
 
   service.stopAll();
-  assert.ok(reconcileCalls.length >= 3, `expected several reconcile() calls, got ${reconcileCalls.length}`);
-  assert.ok(reconcileCalls.every((s) => s === "down"));
+});
+
+test("src/main.ts has no setInterval — nothing polls (PANT-827)", () => {
+  const source = readFileSync(fileURLToPath(new URL("./main.ts", import.meta.url)), "utf8");
+  assert.ok(!/setInterval\s*\(/.test(source), "main.ts must not start any setInterval loop");
 });
 
 test("POST /lanes/:laneId/refresh works end-to-end against the composed service", async () => {
@@ -618,10 +638,38 @@ test("PANT-829: shutdown() clears every timer composeService started and closes 
 
   assert.equal(service.httpServer.listening, false);
   assert.deepEqual(timers.live(), [], "every timer composeService started must be cleared by shutdown()");
+  // PANT-827 replaced the status-watcher poll with a lane.status_changed
+  // subscription; shutdown() must release it like it clears the timers.
+  assert.equal(service.store.events.listenerCount(), 0, "the reconcile subscription must be released");
   assert.throws(() => service.store.listLanes(), /not open|closed/i, "the DB must be closed");
   // Idempotent — a second shutdown/stopAll after the first is a no-op.
   await service.shutdown();
   service.stopAll();
+});
+
+test("PANT-829: an open GET /events (SSE) stream is ended by shutdown() instead of holding it for the grace period", async () => {
+  const service = composeService({
+    env: testEnv(),
+    commandRunner: mockCommandRunner(),
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port: 0,
+  });
+  await new Promise<void>((resolve) => service.httpServer.listen(0, resolve));
+  const { port } = service.httpServer.address() as AddressInfo;
+
+  const res = await fetch(`http://localhost:${port}/events`);
+  assert.equal(res.status, 200);
+  const reader = res.body!.getReader();
+  const first = await reader.read();
+  assert.match(new TextDecoder().decode(first.value), /: connected/);
+
+  // A grace period far longer than the 10s timeout below: if the stream held
+  // shutdown() open, it would only finish at the force-close, so this fails.
+  await withTimeout(service.shutdown({ graceMs: 60_000 }), 10_000, "shutdown() waited on the open SSE stream");
+
+  assert.equal(service.httpServer.listening, false);
+  assert.equal((await reader.read()).done, true, "the client sees the stream end");
 });
 
 test("PANT-829: SIGTERM/SIGINT run the graceful shutdown then exit 0; a second signal exits 1 immediately", async () => {
