@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { StateStore, resolveDefaultDbPath } from "./state-store.js";
+import type { LaneStatusChangedEvent } from "./lane-events.js";
 
 test("a declared lane with no recorded status reports down/unconfigured (REQ-07)", () => {
   const store = new StateStore(":memory:");
@@ -803,4 +804,90 @@ test("hdl-ao-01: StateStore enables WAL journal mode on a real database file", (
   assert.equal(row.journal_mode, "wal");
   store.close();
   fs.rmSync(path.dirname(dbPath), { recursive: true, force: true });
+});
+
+// PANT-827 — lane.status_changed emission (replaces main.ts's status-watcher poll).
+
+function recordingStore(): { store: StateStore; events: LaneStatusChangedEvent[] } {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "codex", provider: "codex", credential_ref: "CODEX_TOKEN" });
+  const events: LaneStatusChangedEvent[] = [];
+  store.events.onStatusChanged((event) => events.push(event));
+  return { store, events };
+}
+
+function statusEntry(status: "up" | "down" | "out_of_credit", observed_at: string) {
+  return { lane_id: "codex", status, reset_at: null, reason: null, signal_source: "active_probe" as const, observed_at };
+}
+
+test("recordStatus emits lane.status_changed only when the resolved status changes", () => {
+  const { store, events } = recordingStore();
+
+  store.recordStatus(statusEntry("up", "2026-09-27T10:00:00.000Z"));
+  store.recordStatus(statusEntry("up", "2026-09-27T10:00:05.000Z"));
+  store.recordStatus({
+    ...statusEntry("out_of_credit", "2026-09-27T10:00:10.000Z"),
+    error_code: "quota_exceeded",
+    reset_at: "2026-09-28T00:00:00.000Z",
+  });
+  store.recordStatus(statusEntry("out_of_credit", "2026-09-27T10:00:15.000Z"));
+  // Out of order (older than the latest row) — current status unchanged, no event.
+  store.recordStatus(statusEntry("up", "2026-09-27T09:00:00.000Z"));
+
+  assert.deepEqual(
+    events.map((e) => [e.from, e.to, e.cause]),
+    [
+      [null, "up", "status"],
+      ["up", "out_of_credit", "status"],
+    ],
+  );
+  assert.equal(events[1].error_code, "quota_exceeded");
+  assert.equal(events[1].reset_at, "2026-09-28T00:00:00.000Z");
+  assert.equal(events[1].lane_id, "codex");
+  assert.ok(!Number.isNaN(Date.parse(events[1].observed_at)));
+  store.close();
+});
+
+test("manual override / reset_at changes emit lane.status_changed; unchanged re-sets don't", () => {
+  const { store, events } = recordingStore();
+  store.recordStatus(statusEntry("up", "2026-09-27T10:00:00.000Z"));
+  events.length = 0;
+
+  store.setManualOverride("codex", "disabled", "maintenance");
+  store.setManualOverride("codex", "disabled", "maintenance");
+  store.setManualResetAt("codex", "2026-09-27T12:00:00.000Z");
+  store.setManualResetAt("codex", "2026-09-27T12:00:00.000Z");
+  store.setManualOverride("codex", null);
+
+  assert.deepEqual(
+    events.map((e) => [e.from, e.to, e.cause]),
+    [
+      ["up", "up", "manual_override"],
+      ["up", "up", "manual_reset_at"],
+      ["up", "up", "manual_override"],
+    ],
+  );
+  // Manual reset_at wins over the (null) sensed one in the event payload.
+  assert.equal(events[1].reset_at, "2026-09-27T12:00:00.000Z");
+  store.close();
+});
+
+test("a throwing lane.status_changed listener neither fails the write nor starves other listeners", () => {
+  const { store, events } = recordingStore();
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    store.events.onStatusChanged(() => {
+      throw new Error("boom");
+    });
+    const late: string[] = [];
+    store.events.onStatusChanged((e) => late.push(e.to));
+    store.recordStatus(statusEntry("down", "2026-09-27T10:00:00.000Z"));
+    assert.equal(store.getCurrentStatus("codex")?.status, "down");
+    assert.equal(events.length, 1);
+    assert.deepEqual(late, ["down"]);
+  } finally {
+    console.error = originalError;
+    store.close();
+  }
 });

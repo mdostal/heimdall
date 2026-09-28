@@ -10,6 +10,10 @@
 
 - **`heimdall_actuation_results_total`** could never be non-zero. Every lane has used `StubControlAdapter` since hdl-msh-01, and nothing calls `emitActuationResult()`.
 
+### Changed
+
+- **Lane status is event-driven; the status-watcher poll loop is gone (PANT-827).** `main.ts` used to run a service-wide `setInterval` that called `ControlAdapter.reconcile()` for every lane every 5s whether or not anything had changed. Now `StateStore` emits an in-process `lane.status_changed` event (`{lane_id, from, to, error_code, reset_at, observed_at, cause}`) only when a lane's resolved status actually changes, or when its manual override or manual reset_at changes. `reconcile()` subscribes to that event, so it runs once per transition. The dashboard subscribes to a new `GET /events` Server-Sent Events stream fed by the same emitter and re-fetches `GET /lanes` on each event. It falls back to the old 5s poll only when SSE is unavailable. Known limit: the emitter is in-process, so a status or override written by a separate process against the same DB file (the `heimdall` CLI, `heimdall mcp`) does not emit. Active-probe scheduling (`InProcessScheduler`) is unchanged.
+
 ### Fixed
 
 - **The routing loop is now closed by outcome feedback (PANT-826, heimdall#96).** `POST /route/:decisionId/outcome` used to only write the `routing_outcomes` table, because `composeService()` wired `lastPassiveResponse: () => null`. Now the most recent unconsumed outcome per lane feeds `LanePipeline` as a passive signal, and the lane is refreshed right away. A failure whose error `error-parser` can classify maps to `down` (rate limit, OAuth expiry) or `out_of_credit` (weekly cap), and the existing corroboration policy still applies, so one bad outcome only shows `degraded`. A success outcome is passive evidence of `up`. Statuses decided this way record `signal_source: "passive"`. Outcomes are consume-once, so a refresh can't corroborate an outcome against itself. Limitation: only outcomes reported to the running service's HTTP endpoint affect lane status. Outcomes reported through the CLI or MCP process are still recorded in the ledger.

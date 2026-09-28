@@ -3,9 +3,9 @@
 // running Heimdall: lane registry + state store + Argus telemetry + per-lane
 // InProcessScheduler (probes never-probed lanes at startup, fine ~5s while suspect, periodic
 // while healthy) + an opt-in per-lane MulticaAutopilotScheduler (only when
-// MULTICA_AUTOPILOT_AGENT is set — PANT-753) + a shared status-watcher loop that calls
-// ControlAdapter.reconcile() every tick for every lane — StubControlAdapter
-// for every lane, unconditionally.
+// MULTICA_AUTOPILOT_AGENT is set — PANT-753) + a lane.status_changed
+// subscription (PANT-827) that calls ControlAdapter.reconcile() once per
+// real transition — StubControlAdapter for every lane, unconditionally.
 //
 // hdl-msh-01: Heimdall no longer actuates Multica directly (heimdall#83 —
 // Multica's real API has no working disable lever; see docs/decisions/
@@ -58,7 +58,6 @@ const PROVIDER_ADAPTERS: Record<string, () => ProviderAdapters> = {
 };
 
 const DEFAULT_AUTOPILOT_CRON = "*/1 * * * *";
-const STATUS_WATCHER_INTERVAL_MS = 5_000;
 
 export interface ComposeServiceOptions {
   port?: number;
@@ -68,8 +67,6 @@ export interface ComposeServiceOptions {
   argus?: ArgusEmitter;
   /** Test-only: skip actually binding the HTTP server to a port. */
   skipHttpListen?: boolean;
-  /** Test-only: override the shared status-watcher's tick interval (default 5000ms). */
-  statusWatcherIntervalMs?: number;
 }
 
 export interface ComposedService {
@@ -231,26 +228,23 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     controlAdapters.set(lane.lane_id, sharedStubControlAdapter);
   }
 
-  // Lightweight shared observer — one timer for the whole service (not
-  // per-lane), cheap local StateStore reads only. reconcile() is called
-  // every tick for every lane regardless of whether status changed; every
-  // lane's adapter is StubControlAdapter (hdl-msh-01), so this now only
-  // records/logs the intended action via ActuationStub, never a real call.
-  const statusWatcher = setInterval(() => {
-    for (const lane of registry.list()) {
-      const current = store.getCurrentStatus(lane.lane_id);
-      if (!current) continue;
-      const adapter = controlAdapters.get(lane.lane_id);
-      if (!adapter) continue;
-      const manualOverride = store.getManualOverride(lane.lane_id);
-      adapter
-        .reconcile(lane, current.status, { reason: current.reason, reset_at: current.reset_at, manualOverride })
-        .catch((err) => {
-          console.error(`[main] reconcile() failed for lane ${lane.lane_id}:`, err);
-        });
-    }
-  }, options.statusWatcherIntervalMs ?? STATUS_WATCHER_INTERVAL_MS);
-  statusWatcher.unref?.();
+  // PANT-827 ("nothing polls"): reconcile() runs once per lane.status_changed
+  // event — a resolved-status transition, or a manual override/reset_at
+  // change — instead of every tick for every lane. Every lane's adapter is
+  // StubControlAdapter (hdl-msh-01), so this only records/logs the intended
+  // action via ActuationStub, never a real call.
+  const stopReconcileSubscription = store.events.onStatusChanged((event) => {
+    const lane = registry.get(event.lane_id);
+    const adapter = controlAdapters.get(event.lane_id);
+    const current = store.getCurrentStatus(event.lane_id);
+    if (!lane || !adapter || !current) return;
+    const manualOverride = store.getManualOverride(event.lane_id);
+    adapter
+      .reconcile(lane, current.status, { reason: current.reason, reset_at: current.reset_at, manualOverride })
+      .catch((err) => {
+        console.error(`[main] reconcile() failed for lane ${lane.lane_id}:`, err);
+      });
+  });
 
   const refreshLane: RefreshLaneFn = async (laneId: string): Promise<void> => {
     const lane = registry.get(laneId);
@@ -306,12 +300,15 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     rotationControllers,
     sensing,
     stopAll: () => {
-      clearInterval(statusWatcher);
+      stopReconcileSubscription();
       for (const s of multicaSchedulers) s.stop();
       for (const s of inProcessSchedulers) s.stop();
       for (const job of rotationJobs) job.stop();
       unsubscribeRouteOutcomes();
       httpServer.close();
+      // Open GET /events (SSE) streams never end on their own — without this
+      // close() would wait on them forever.
+      httpServer.closeAllConnections();
       closeRouteLedgers();
       store.close();
     },
