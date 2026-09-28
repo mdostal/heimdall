@@ -2,7 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { runRouteCommand, runRouteOutcomeCommand } from "./route-command.js";
 import { LaneRegistry } from "../core/lane-registry.js";
+import { useRouteLedgerPath } from "../core/route-selector.js";
 import { StateStore } from "../core/state-store.js";
+
+// The scored strategy's ledger defaults to the real Heimdall DB under $HOME
+// (heimdall#96); keep every decision these tests make in memory instead.
+useRouteLedgerPath(":memory:");
 
 class ExitCalled extends Error {
   constructor(readonly code: number | undefined) {

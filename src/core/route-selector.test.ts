@@ -7,10 +7,15 @@ import {
   getScoredRoute,
   reportRouteOutcome,
   ROUTING_STRATEGY_SETTING_KEY,
+  useRouteLedgerPath,
 } from "./route-selector.js";
 import { LaneRegistry, type LaneDeclaration } from "./lane-registry.js";
 import { StateStore } from "./state-store.js";
 import type { LaneStatusValue } from "./status-model.js";
+
+// The scored strategy's ledger defaults to the real Heimdall DB under $HOME
+// (heimdall#96); keep every decision these tests make in memory instead.
+useRouteLedgerPath(":memory:");
 
 const OBSERVED_AT = "2026-09-27T12:00:00.000Z";
 
