@@ -157,6 +157,7 @@ export class RouteLedger {
     // writer's lock instead of throwing SQLITE_BUSY. Only on connections we
     // open; a borrowed connection is configured by its owner.
     if (this.ownsDatabase) this.db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
+    // heimdall#96 also relies on this: the ledger now shares StateStore's DB file.
     this.now = normalized.now ?? (() => new Date());
     this.db.exec(SCHEMA);
   }

@@ -12,7 +12,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { Lane } from "../lane-registry.js";
-import type { StateStore } from "../state-store.js";
+import { resolveDefaultDbPath, type StateStore } from "../state-store.js";
 import { assignExperimentArm } from "../routing/experiment-assigner.js";
 import { PolicyLoader, type CostPreference, type Policy } from "../routing/policy-loader.js";
 import { generateRationale } from "../routing/rationale-generator.js";
@@ -75,11 +75,31 @@ export class ScoredStrategy implements RoutingStrategy {
     return this.policy;
   }
 
+  // heimdall#96: the same file StateStore opens (resolveDefaultDbPath), so
+  // decisions and outcomes survive a restart and the CLI, MCP and dashboard
+  // processes all read one ledger. It used to fall back to ":memory:".
   private getLedger(): RouteLedger {
     if (!this.ledger) {
-      this.ledger = new RouteLedger(this.options.ledgerPath ?? process.env.HEIMDALL_DB_PATH ?? ":memory:");
+      this.ledger = new RouteLedger(this.options.ledgerPath ?? resolveDefaultDbPath());
     }
     return this.ledger;
+  }
+
+  /** Re-points the ledger at `path` (closing any open connection); composeService() uses it to share its StateStore's DB file. */
+  useLedgerPath(path: string): void {
+    this.closeLedger();
+    this.options.ledgerPath = path;
+  }
+
+  /** Closes the ledger connection; the next call reopens it lazily at the same path. */
+  closeLedger(): void {
+    this.ledger?.close();
+    this.ledger = null;
+  }
+
+  /** The lane a recorded decision routed to, or null for an unknown or no_route decision. */
+  getChosenLane(decisionId: string): string | null {
+    return this.getLedger().getDecision(decisionId)?.chosenLane ?? null;
   }
 
   /** hdl-ot-03: exposes the same ledger connection selectRoute() already writes to — GET /metrics reads through this, no second connection opened. */
