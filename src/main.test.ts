@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import { EventEmitter } from "node:events";
 import { createServer } from "node:net";
+import { spawn, type ChildProcess } from "node:child_process";
 import { composeService, installShutdownHandlers } from "./main.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -954,5 +955,85 @@ test("PANT-824: a lane whose provider has no adapters is recorded as an in_proce
     assert.equal(failures[0].scheduler, "in_process");
   } finally {
     service.stopAll();
+  }
+});
+
+// PANT-932 (heimdall#116): after a host reboot Docker restarts every container
+// at once, so Heimdall can start before Pantheon core-api is listening. The
+// lanes must recover on their own once core-api comes up — no restart.
+test("PANT-932: started with core-api unreachable, lanes report credential_unavailable and recover without a restart once core-api is up", async () => {
+  const sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), "heimdall-pant932-"));
+  // Reserve a free port, then release it: nothing listens there yet.
+  const probe = createServer();
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const coreApiPort = (probe.address() as AddressInfo).port;
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+
+  const env: NodeJS.ProcessEnv = {
+    HEIMDALL_LANE_1_ID: "claude@ffevents",
+    HEIMDALL_LANE_1_PROVIDER: "claude",
+    HEIMDALL_LANE_1_CREDENTIAL_REF: "CLAUDE_FFEVENTS_TOKEN",
+    HEIMDALL_CREDENTIAL_SOURCE: "pantheon",
+    PANTHEON_API_URL: `http://127.0.0.1:${coreApiPort}`,
+    PANTHEON_SECRETS_SHARED_DIR: sharedDir,
+    HEIMDALL_DB_PATH: ":memory:",
+  };
+  const service = composeService({ env, fetchImpl: mockFetch(), port: 0, commandRunner: mockCommandRunner() });
+  let coreApi: ChildProcess | null = null;
+  try {
+    await new Promise<void>((resolve) => service.httpServer.once("listening", resolve));
+    const heimdallUrl = `http://127.0.0.1:${(service.httpServer.address() as AddressInfo).port}`;
+    const laneId = "claude@ffevents";
+
+    const waitFor = async (predicate: () => boolean, what: string): Promise<void> => {
+      const deadline = Date.now() + 10_000;
+      while (!predicate()) {
+        if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}; last status: ${JSON.stringify(service.store.getCurrentStatus(laneId))}`);
+        await new Promise((r) => setTimeout(r, 25));
+      }
+    };
+
+    await waitFor(() => service.store.hasRecordedStatus(laneId), "the startup probe");
+    const before = service.store.getCurrentStatus(laneId);
+    assert.equal(before?.status, "down");
+    assert.match(before?.reason ?? "", /^credential_unavailable/);
+    const lanesBefore = (await (await fetch(`${heimdallUrl}/lanes`)).json()) as Array<Record<string, unknown>>;
+    assert.equal(lanesBefore[0].credential_state, "credential_unavailable", "a reboot must not read as 'no credential configured'");
+    assert.equal(lanesBefore[0].credential_configured, false);
+
+    // core-api comes up: a stand-in for pantheon-v2's POST /api/secrets/inject
+    // (file target, env format), writing into the shared volume. A separate
+    // process, like the real one — the credential fetch is a blocking curl,
+    // so an in-process fake could never answer it.
+    const fakeCoreApi = `
+      const http = require("node:http");
+      const fs = require("node:fs");
+      http.createServer((req, res) => {
+        let body = "";
+        req.on("data", (c) => (body += c));
+        req.on("end", () => {
+          const p = JSON.parse(body);
+          if (req.url !== "/api/secrets/inject" || p.tags !== "CLAUDE_FFEVENTS_TOKEN") return res.writeHead(404).end();
+          fs.writeFileSync(p.path, p.key + "=sk-ant-ffevents\\n");
+          res.writeHead(200, { "content-type": "application/json" }).end("{}");
+        });
+      }).listen(${coreApiPort}, "127.0.0.1", () => console.log("ready"));
+    `;
+    const child = spawn(process.execPath, ["-e", fakeCoreApi], { stdio: ["ignore", "pipe", "inherit"] });
+    coreApi = child;
+    await new Promise<void>((resolve) => child.stdout!.once("data", () => resolve()));
+
+    // No restart: the scheduler's own probe ticks (5s interval, 1s-then-2s
+    // credential backoff) re-resolve the credential and probe the lane.
+    await waitFor(() => service.store.getCurrentStatus(laneId)?.status === "up", "the lane to recover to up");
+    const lanesAfter = (await (await fetch(`${heimdallUrl}/lanes`)).json()) as Array<Record<string, unknown>>;
+    assert.equal(lanesAfter[0].credential_state, "resolved");
+    assert.equal(lanesAfter[0].credential_configured, true);
+    assert.equal(lanesAfter[0].status, "up");
+    assert.deepEqual(fs.readdirSync(sharedDir), [], "the shared secret file is deleted after use");
+  } finally {
+    service.stopAll();
+    coreApi?.kill();
+    fs.rmSync(sharedDir, { recursive: true, force: true });
   }
 });

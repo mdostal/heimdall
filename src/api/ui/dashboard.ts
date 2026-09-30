@@ -657,6 +657,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
 
   function tokenChip(lane) {
     if (lane.credential_configured) return "<span class=\\"chip\\">configured</span>";
+    if (lane.credential_state === "credential_unavailable") return "<span class=\\"chip chip-missing\\">credential source unreachable</span>";
     return "<span class=\\"chip chip-missing\\">token missing</span>";
   }
 

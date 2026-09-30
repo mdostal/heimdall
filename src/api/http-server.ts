@@ -7,7 +7,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { EnvCredentialSource, type CredentialSource } from "../core/credential-source.js";
 import { PantheonSecretCredentialSource } from "../core/pantheon-secret-credential-source.js";
-import { loadLaneDeclarations, LaneRegistry, type LaneCostTier } from "../core/lane-registry.js";
+import { loadLaneDeclarations, LaneRegistry, type CredentialState, type LaneCostTier } from "../core/lane-registry.js";
 import {
   getAvailableRoute,
   getScoredRoute,
@@ -191,6 +191,11 @@ export interface LaneStatusWithOverride extends LaneStatus {
   manual_override: ManualOverride;
   override_reason: string | null;
   credential_configured: boolean;
+  /** PANT-932 — why credential_configured is what it is: `unconfigured` (no
+   * credential registered under credential_ref) vs `credential_unavailable`
+   * (the credential source is unreachable right now; Heimdall keeps retrying).
+   * A host reboot must not read as "no accounts configured". */
+  credential_state: CredentialState;
   manual_reset_at: string | null;
   model: string;
   credential_ref: string;
@@ -665,6 +670,10 @@ export function getLaneStatuses(
       provider: lane.provider,
       credential_ref: lane.credential_ref,
     });
+    // PANT-932: the MCP server and CLI build their own registry and never run
+    // the probe tick, so re-check a transiently unavailable credential here
+    // (throttled by the registry's backoff) rather than report it forever.
+    if (lane.credential_state === "credential_unavailable") registry.retryCredential(lane.lane_id);
   }
   return store.getAllCurrentStatuses().map((status) => {
     const declared = registry.get(status.lane_id);
@@ -673,6 +682,7 @@ export function getLaneStatuses(
       manual_override: store.getManualOverride(status.lane_id),
       override_reason: store.getOverrideReason(status.lane_id),
       credential_configured: declared?.credential != null,
+      credential_state: declared?.credential_state ?? "unconfigured",
       manual_reset_at: store.getManualResetAt(status.lane_id),
       model: declared?.model ?? status.provider,
       credential_ref: declared?.credential_ref ?? "",

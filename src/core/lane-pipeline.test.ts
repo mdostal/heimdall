@@ -298,3 +298,60 @@ test("Codex end-to-end: recent public-status is used without escalating to a pro
   const status = store.getCurrentStatus(CODEX_LANE.lane_id);
   assert.equal(status?.signal_source, "public_status");
 });
+
+// PANT-932 (heimdall#116): a lane whose credential source was unreachable is
+// reported as credential_unavailable and re-resolved on the probe tick.
+
+test("PANT-932: an unreachable credential source reports down/credential_unavailable, not unconfigured", async () => {
+  const store = new StateStore(":memory:");
+  const lane: Lane = {
+    ...UNCONFIGURED_LANE,
+    credential_state: "credential_unavailable",
+    credential_detail: "curl: (7) Failed to connect to core-api:3012",
+  };
+  store.upsertLane({ lane_id: lane.lane_id, provider: lane.provider, credential_ref: lane.credential_ref });
+  let retries = 0;
+  const pipeline = new LanePipeline(store, baseDeps({ retryCredential: () => (retries++, false) }), claudeAdapters());
+
+  await pipeline.refresh(lane);
+
+  assert.equal(retries, 1, "the probe tick retried credential resolution");
+  const status = store.getCurrentStatus(lane.lane_id);
+  assert.equal(status?.status, "down");
+  assert.match(status?.reason ?? "", /^credential_unavailable — credential source unreachable, retrying \(curl: \(7\)/);
+});
+
+test("PANT-932: once the credential source recovers, the next tick resolves the credential and probes the lane up", async () => {
+  const store = new StateStore(":memory:");
+  const lane: Lane = { ...UNCONFIGURED_LANE, credential_state: "credential_unavailable", credential_detail: "down" };
+  store.upsertLane({ lane_id: lane.lane_id, provider: lane.provider, credential_ref: lane.credential_ref });
+  const pipeline = new LanePipeline(
+    store,
+    baseDeps({
+      fetchImpl: fetchReturning(200),
+      retryCredential: () => {
+        lane.credential = "sk-ant-recovered";
+        lane.credential_state = "resolved";
+        return true;
+      },
+    }),
+    claudeAdapters(),
+  );
+
+  await pipeline.refresh(lane);
+
+  assert.equal(store.getCurrentStatus(lane.lane_id)?.status, "up");
+});
+
+test("PANT-932: a genuinely unconfigured lane is never retried", async () => {
+  const store = new StateStore(":memory:");
+  const lane: Lane = { ...UNCONFIGURED_LANE, credential_state: "unconfigured", credential_detail: null };
+  store.upsertLane({ lane_id: lane.lane_id, provider: lane.provider, credential_ref: lane.credential_ref });
+  let retries = 0;
+  const pipeline = new LanePipeline(store, baseDeps({ retryCredential: () => (retries++, false) }), claudeAdapters());
+
+  await pipeline.refresh(lane);
+
+  assert.equal(retries, 0);
+  assert.match(store.getCurrentStatus(lane.lane_id)?.reason ?? "", /^unconfigured/);
+});
