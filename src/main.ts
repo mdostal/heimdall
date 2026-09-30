@@ -102,11 +102,14 @@ export interface ComposedService {
 // mechanism, never a silent no-op" precedent from hdl-actuation — but
 // rotation only makes sense with 2+ credentialed lanes on the SAME
 // provider to rotate between, so a single-lane provider correctly gets
-// none rather than a controller with nowhere to rotate to.
+// none rather than a controller with nowhere to rotate to. PANT-932: a lane
+// whose credential is only temporarily unavailable (credential source down at
+// startup) still counts — it gains its credential in place once the source
+// recovers, and the controller skips credential-less lanes until then.
 function buildRotationControllers(registry: LaneRegistry, store: StateStore): Map<string, RotationController> {
   const credentialedByProvider = new Map<string, number>();
   for (const lane of registry.list()) {
-    if (lane.credential === null) continue;
+    if (lane.credential_state === "unconfigured") continue;
     credentialedByProvider.set(lane.provider, (credentialedByProvider.get(lane.provider) ?? 0) + 1);
   }
 
@@ -186,6 +189,7 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
         now: () => new Date().toISOString(),
         lastPassiveResponse: (laneId) => routeOutcomes.take(laneId),
         fetchImpl: options.fetchImpl,
+        retryCredential: (laneId) => registry.retryCredential(laneId),
       },
       buildAdapters(),
       sensing,

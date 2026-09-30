@@ -38,9 +38,13 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, unlinkSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import type { CredentialSource } from "./credential-source.js";
+import type { CredentialResolution, CredentialSource } from "./credential-source.js";
 
 const DEFAULT_TIMEOUT_SECONDS = 10;
+// PANT-932: resolution is a blocking call and is now retried while core-api is
+// down, so an unreachable host must fail fast rather than hold the event loop
+// for the full request timeout.
+const CONNECT_TIMEOUT_SECONDS = 3;
 
 export interface PantheonSecretCredentialSourceOptions {
   /** Pantheon Core's real address. Defaults to PANTHEON_API_URL (matching this program's
@@ -80,36 +84,68 @@ export class PantheonSecretCredentialSource implements CredentialSource {
   }
 
   resolve(credentialRef: string): string | null {
+    const resolution = this.resolveDetailed(credentialRef);
+    return resolution.state === "resolved" ? resolution.value : null;
+  }
+
+  /**
+   * PANT-932 (heimdall#116): classifies a failed fetch so callers can retry
+   * the transient cases. After a host reboot Docker restarts every container
+   * at once (restart policies ignore depends_on), so this first call can run
+   * before core-api is listening.
+   *
+   *   - curl couldn't reach core-api at all (throws, or http_code 000):
+   *     `unavailable`.
+   *   - 5xx: `unavailable`. core-api's secrets facade answers 502 when its
+   *     upstream (Portunus) call fails, which is what a still-booting
+   *     Portunus looks like.
+   *   - 4xx, or a 2xx whose file holds no value: `unconfigured`. core-api
+   *     answered and no credential exists under this ref.
+   */
+  resolveDetailed(credentialRef: string): CredentialResolution {
     const filePath = path.join(this.sharedDir, `${this.generateId()}.secret`);
     try {
-      const out = this.exec(
-        "curl",
-        [
-          "-sS",
-          "--max-time",
-          String(DEFAULT_TIMEOUT_SECONDS),
-          "-X",
-          "POST",
-          `${this.baseUrl}/api/secrets/inject`,
-          "-H",
-          "content-type: application/json",
-          "-d",
-          // Portunus's real FileAdapter (adapters.py) requires format in
-          // {"env","json","yaml"} and a non-empty key -- there is no bare
-          // "raw value" format (confirmed by reading the adapter directly,
-          // not assumed). "env" + key "VALUE" produces a single real line,
-          // `VALUE=<secret>\n`, parsed back out below.
-          JSON.stringify({ tags: credentialRef, target: "file", path: filePath, format: "env", key: "VALUE" }),
-          "-w",
-          "\n%{http_code}",
-        ],
-        { encoding: "utf8" },
-      );
+      let out: string;
+      try {
+        out = this.exec(
+          "curl",
+          [
+            "-sS",
+            "--connect-timeout",
+            String(CONNECT_TIMEOUT_SECONDS),
+            "--max-time",
+            String(DEFAULT_TIMEOUT_SECONDS),
+            "-X",
+            "POST",
+            `${this.baseUrl}/api/secrets/inject`,
+            "-H",
+            "content-type: application/json",
+            "-d",
+            // Portunus's real FileAdapter (adapters.py) requires format in
+            // {"env","json","yaml"} and a non-empty key -- there is no bare
+            // "raw value" format (confirmed by reading the adapter directly,
+            // not assumed). "env" + key "VALUE" produces a single real line,
+            // `VALUE=<secret>\n`, parsed back out below.
+            JSON.stringify({ tags: credentialRef, target: "file", path: filePath, format: "env", key: "VALUE" }),
+            "-w",
+            "\n%{http_code}",
+          ],
+          { encoding: "utf8" },
+        );
+      } catch (err) {
+        return { state: "unavailable", detail: `core-api unreachable at ${this.baseUrl}: ${transportErrorDetail(err)}` };
+      }
 
       const splitIdx = out.lastIndexOf("\n");
       const status = Number(splitIdx === -1 ? out : out.slice(splitIdx + 1));
+      if (!Number.isFinite(status) || status === 0) {
+        return { state: "unavailable", detail: `core-api unreachable at ${this.baseUrl}` };
+      }
+      if (status >= 500) {
+        return { state: "unavailable", detail: `core-api secrets facade returned HTTP ${status}` };
+      }
       if (!(status >= 200 && status < 300)) {
-        return null;
+        return { state: "unconfigured" };
       }
 
       // Real, confirmed FileAdapter "env" format: `VALUE=<secret>\n` (see
@@ -118,11 +154,12 @@ export class PantheonSecretCredentialSource implements CredentialSource {
       const content = this.readFile(filePath).trim();
       const eqIdx = content.indexOf("=");
       const value = eqIdx === -1 ? "" : content.slice(eqIdx + 1);
-      return value.length > 0 ? value : null;
+      return value.length > 0 ? { state: "resolved", value } : { state: "unconfigured" };
     } catch {
-      // Matches EnvCredentialSource's own REQ-07 contract: resolve() never throws, a missing/
-      // unreachable/failed resolution is a real, valid "null" outcome, not a crash.
-      return null;
+      // Matches EnvCredentialSource's own REQ-07 contract: never throws. A
+      // 2xx whose file can't be read means core-api answered but nothing
+      // usable was written -- treated as unconfigured, not retried.
+      return { state: "unconfigured" };
     } finally {
       try {
         this.deleteFile(filePath);
@@ -132,4 +169,14 @@ export class PantheonSecretCredentialSource implements CredentialSource {
       }
     }
   }
+}
+
+/** curl's own stderr line (e.g. "curl: (7) Failed to connect to core-api:3012 ...") when
+ * execFileSync attached it, else the error message. Never contains the secret: the request
+ * body only carries the credential_ref and a file path. */
+function transportErrorDetail(err: unknown): string {
+  const stderr = (err as { stderr?: unknown })?.stderr;
+  const text = stderr != null ? String(stderr).trim() : "";
+  if (text) return text.split("\n")[0];
+  return err instanceof Error ? err.message : String(err);
 }

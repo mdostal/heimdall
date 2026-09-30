@@ -61,6 +61,8 @@ All request/response bodies are JSON. Errors return `{"error":"<message>"}` with
     "manual_headroom": null,
     "manual_cost_tier": null,
     "multica_agent_ids": ["abc123"],
+    "credential_configured": true,
+    "credential_state": "resolved",
     "signal_state": "fresh",
     "last_probed_at": "2026-09-27T00:00:00.000Z"
   }
@@ -72,6 +74,10 @@ All request/response bodies are JSON. Errors return `{"error":"<message>"}` with
 `signal_source` values: `"passive"` | `"public_status"` | `"active_probe"`
 
 `error_code` values: `"rate_limit"` | `"quota_exceeded"` | `"billing_error"` | `"auth_failed"` | `"server_error"` | `"network_error"` | `"unknown"` | `null`
+
+`credential_state` values: `"resolved"` | `"unconfigured"` | `"credential_unavailable"` (PANT-932)
+
+`credential_state` says why `credential_configured` is what it is. `unconfigured` means no credential exists under the lane's `credential_ref`. `credential_unavailable` means the credential source couldn't be reached. With `HEIMDALL_CREDENTIAL_SOURCE=pantheon` that is Pantheon core-api being down or answering 5xx, typically right after a host reboot, when every container restarts at once. Heimdall retries these lanes on its probe ticks (backoff 1s, 2s, 4s … capped at 30s, no deadline), and the lane recovers without a restart once core-api answers. Until then the lane reads `down` with a reason starting `credential_unavailable —`. A lane that is `unconfigured` is not retried.
 
 `signal_state` values: `"never_probed"` | `"fresh"` | `"stale"` (PANT-823)
 

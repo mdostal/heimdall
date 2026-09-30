@@ -28,6 +28,7 @@ Returns an array of lane status objects, one per declared lane, each shaped like
   "model": "claude-opus-4-6",
   "credential_ref": "HEIMDALL_LANE_1_TOKEN",
   "credential_configured": true,
+  "credential_state": "resolved",
   "manual_override": null,
   "override_reason": null,
   "manual_reset_at": null,
@@ -35,7 +36,9 @@ Returns an array of lane status objects, one per declared lane, each shaped like
 }
 ```
 
-`status` is one of `up`, `down`, `out_of_credit`, `degraded`. `manual_override` is `null`
+`status` is one of `up`, `down`, `out_of_credit`, `degraded`. `credential_state` is `resolved`,
+`unconfigured` (no credential registered) or `credential_unavailable` (the credential source is
+unreachable, e.g. core-api down after a reboot; Heimdall retries and the lane recovers on its own). `manual_override` is `null`
 unless an operator or agent has forced it with `heimdall.lanes.override`.
 
 ## `heimdall.lanes.override` — force a lane enabled/disabled, or clear the override

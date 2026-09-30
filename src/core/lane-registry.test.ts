@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadLaneDeclarations, LaneRegistry } from "./lane-registry.js";
-import { EnvCredentialSource } from "./credential-source.js";
+import { EnvCredentialSource, type CredentialResolution, type CredentialSource } from "./credential-source.js";
 
 function captureWarnings<T>(fn: () => T): { result: T; warnings: string[] } {
   const originalWarn = console.warn;
@@ -179,4 +179,95 @@ test("hdl-or-04: a lane with no HEIMDALL_LANE_N_PRIORITY declared has no priorit
     HEIMDALL_LANE_1_CREDENTIAL_REF: "CLAUDE_TOKEN",
   });
   assert.equal("priority" in declarations[0], false);
+});
+
+// PANT-932 (heimdall#116): a credential source that's unreachable at startup
+// must not leave a lane unconfigured for the life of the process.
+
+function flakySource(): { source: CredentialSource; setUp: (up: boolean) => void; calls: () => number } {
+  let up = false;
+  let calls = 0;
+  return {
+    source: {
+      resolve: () => null,
+      resolveDetailed: (ref: string): CredentialResolution => {
+        calls++;
+        if (!up) return { state: "unavailable", detail: "core-api unreachable" };
+        return ref === "CLAUDE_TOKEN" ? { state: "resolved", value: "sk-ant-x" } : { state: "unconfigured" };
+      },
+    },
+    setUp: (value) => {
+      up = value;
+    },
+    calls: () => calls,
+  };
+}
+
+const TWO_LANES = [
+  { lane_id: "claude", provider: "claude", credential_ref: "CLAUDE_TOKEN" },
+  { lane_id: "codex", provider: "codex", credential_ref: "CODEX_TOKEN" },
+];
+
+test("PANT-932: an unreachable credential source marks lanes credential_unavailable, not unconfigured", () => {
+  const { source } = flakySource();
+  const registry = new LaneRegistry(TWO_LANES, source);
+  for (const lane of registry.list()) {
+    assert.equal(lane.credential, null);
+    assert.equal(lane.credential_state, "credential_unavailable");
+    assert.equal(lane.credential_detail, "core-api unreachable");
+  }
+});
+
+test("PANT-932: retryCredential() recovers the lane IN PLACE once the source is back, and marks a missing credential unconfigured", () => {
+  let now = 0;
+  const flaky = flakySource();
+  const registry = new LaneRegistry(TWO_LANES, flaky.source, { nowMs: () => now });
+  const claude = registry.get("claude")!;
+
+  flaky.setUp(true);
+  now = 1_000;
+  assert.equal(registry.retryCredential("claude"), true);
+  assert.equal(claude.credential, "sk-ant-x", "the same Lane object schedulers hold gains the credential");
+  assert.equal(claude.credential_state, "resolved");
+  assert.equal(claude.credential_detail, null);
+
+  assert.equal(registry.retryCredential("codex"), false);
+  assert.equal(registry.get("codex")!.credential_state, "unconfigured");
+
+  const callsBefore = flaky.calls();
+  registry.retryCredential("codex");
+  registry.retryCredential("claude");
+  assert.equal(flaky.calls(), callsBefore, "resolved and unconfigured lanes are never re-fetched");
+});
+
+test("PANT-932: retryCredential() backs off exponentially (1s, 2s, 4s ... capped at 30s) and never gives up", () => {
+  let now = 0;
+  const flaky = flakySource();
+  const registry = new LaneRegistry([TWO_LANES[0]], flaky.source, { nowMs: () => now });
+  assert.equal(flaky.calls(), 1);
+
+  now = 999;
+  registry.retryCredential("claude");
+  assert.equal(flaky.calls(), 1, "still inside the first 1s backoff");
+
+  const expectedDelays = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000];
+  now = 0;
+  for (const [i, delay] of expectedDelays.entries()) {
+    now += delay - 1;
+    registry.retryCredential("claude");
+    assert.equal(flaky.calls(), i + 1, `no attempt before the ${delay}ms backoff elapses`);
+    now += 1;
+    registry.retryCredential("claude");
+    assert.equal(flaky.calls(), i + 2, `attempt once the ${delay}ms backoff elapses`);
+  }
+
+  flaky.setUp(true);
+  now += 30_000;
+  assert.equal(registry.retryCredential("claude"), true);
+});
+
+test("PANT-932: a source without resolveDetailed() keeps the old resolved/unconfigured behavior", () => {
+  const registry = new LaneRegistry(TWO_LANES, new EnvCredentialSource({ CLAUDE_TOKEN: "sk-ant-x" }));
+  assert.equal(registry.get("claude")!.credential_state, "resolved");
+  assert.equal(registry.get("codex")!.credential_state, "unconfigured");
 });

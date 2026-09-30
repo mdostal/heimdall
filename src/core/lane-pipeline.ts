@@ -54,6 +54,11 @@ export interface RefreshDeps {
   fetchImpl?: typeof fetch;
   /** PANT-824: monotonic milliseconds, for heimdall_probe_duration_seconds only. Defaults to performance.now(). */
   monotonicNowMs?: () => number;
+  /** PANT-932: re-resolve a credential_unavailable lane's credential in place
+   * (LaneRegistry.retryCredential, which throttles itself). Called on the
+   * probe tick so a lane recovers once the credential source is back,
+   * without a restart. Omitted: such a lane just stays credential_unavailable. */
+  retryCredential?: (laneId: string) => boolean;
 }
 
 /** What one sensing cycle concluded, before corroboration — the
@@ -229,8 +234,26 @@ export class LanePipeline {
   }
 
   private async refreshViaProbe(lane: Lane, now: string, attempt: { source: SenseSource }): Promise<SenseOutcome> {
+    if (!lane.credential && lane.credential_state === "credential_unavailable") {
+      this.deps.retryCredential?.(lane.lane_id);
+    }
+
     if (!lane.credential) {
       attempt.source = "unconfigured";
+      if (lane.credential_state === "credential_unavailable") {
+        // PANT-932: the credential source is unreachable (e.g. core-api still
+        // booting after a reboot) — transient, retried on later ticks, and
+        // must not read as "no credential registered".
+        this.recordStatus({
+          lane_id: lane.lane_id,
+          status: "down",
+          reset_at: null,
+          reason: `credential_unavailable — credential source unreachable, retrying${lane.credential_detail ? ` (${lane.credential_detail})` : ""}`,
+          signal_source: "active_probe",
+          observed_at: now,
+        });
+        return { result: "down", errorCode: "credential_unavailable" };
+      }
       // REQ-07: missing/invalid credential — report down/unconfigured, never crash.
       this.recordStatus({
         lane_id: lane.lane_id,
