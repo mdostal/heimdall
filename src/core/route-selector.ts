@@ -155,6 +155,45 @@ export function getRoutingDecisionCounts(): ReturnType<ScoredStrategy["getDecisi
   return scoredStrategyForRouteEndpoint.getDecisionCounts();
 }
 
+// heimdall#96: the routing strategies that write decisions to a ledger.
+// Both go through one path so every routing surface in a process shares the
+// file composeService() binds.
+const ledgerBackedStrategies: ScoredStrategy[] = [
+  scoredStrategyForRouteEndpoint,
+  ...Object.values(routingStrategies).filter((strategy): strategy is ScoredStrategy => strategy instanceof ScoredStrategy),
+];
+
+/** Points every ledger-backed strategy at `path` — composeService() passes its StateStore's DB path. */
+export function useRouteLedgerPath(path: string): void {
+  for (const strategy of ledgerBackedStrategies) strategy.useLedgerPath(path);
+}
+
+/** Points every scored strategy at the routing policy in `path` (undefined = the default path). Tests use it to simulate a missing policy (heimdall#95). */
+export function useRoutePolicyPath(path: string | undefined): void {
+  for (const strategy of ledgerBackedStrategies) strategy.usePolicyPath(path);
+}
+
+export function closeRouteLedgers(): void {
+  for (const strategy of ledgerBackedStrategies) strategy.closeLedger();
+}
+
+export interface RouteOutcomeEvent {
+  decisionId: string;
+  laneId: string;
+  outcome: string | null;
+  metadata: Record<string, JsonValue> | null;
+}
+
+export type RouteOutcomeListener = (event: RouteOutcomeEvent) => void;
+
+const routeOutcomeListeners = new Set<RouteOutcomeListener>();
+
+/** heimdall#96: composeService() listens here to feed outcomes to lane status. Returns an unsubscribe function. */
+export function onRouteOutcome(listener: RouteOutcomeListener): () => void {
+  routeOutcomeListeners.add(listener);
+  return () => routeOutcomeListeners.delete(listener);
+}
+
 export interface RouteOutcomeInput {
   decisionId: string;
   outcome?: string;
@@ -175,7 +214,27 @@ export function reportRouteOutcome(input: RouteOutcomeInput): ReportRouteOutcome
     actualCost: input.actualCost ?? null,
     metadata: input.metadata ?? null,
   });
-  return recorded ? { ok: true } : { ok: false, error: "unknown_decision" };
+  if (!recorded) return { ok: false, error: "unknown_decision" };
+
+  const laneId = routeOutcomeListeners.size > 0 ? scoredStrategyForRouteEndpoint.getChosenLane(input.decisionId) : null;
+  if (laneId) {
+    const event: RouteOutcomeEvent = {
+      decisionId: input.decisionId,
+      laneId,
+      outcome: input.outcome ?? null,
+      metadata: input.metadata ?? null,
+    };
+    for (const listener of routeOutcomeListeners) {
+      try {
+        listener(event);
+      } catch (error) {
+        // The outcome is already in the ledger; a listener failure must not
+        // turn a recorded outcome into an error response.
+        console.error(`reportRouteOutcome: outcome listener failed for decision ${input.decisionId}`, error);
+      }
+    }
+  }
+  return { ok: true };
 }
 
 export function getScoredRoute(request: RouteRequest, registry: LaneRegistry, store: StateStore): RouteResult {

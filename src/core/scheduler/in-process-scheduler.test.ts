@@ -69,17 +69,40 @@ test("engages (calls refresh) when the lane is suspect", async () => {
   store.close();
 });
 
-test("does NOT engage (does not call refresh) when the lane is healthy", async () => {
-  const store = seedStore("up");
+test("does NOT engage (does not call refresh) when the lane is healthy and was probed recently", async () => {
+  const store = seedStore("up"); // observed_at: "2026-07-25T12:00:00.000Z"
   let refreshCalled = false;
   const pipeline = fakePipeline(async () => {
     refreshCalled = true;
   });
-  const scheduler = new InProcessScheduler({ lane: LANE, pipeline, store, argus: fakeArgus() });
+  // nowImpl is at the same instant as the seed — 0 ms elapsed, well under
+  // HEALTHY_PROBE_INTERVAL_MS (5 min), so no re-probe should fire.
+  const scheduler = new InProcessScheduler({
+    lane: LANE, pipeline, store, argus: fakeArgus(),
+    nowImpl: () => "2026-07-25T12:00:00.000Z",
+  });
 
   await scheduler.poll();
 
   assert.equal(refreshCalled, false);
+  store.close();
+});
+
+test("re-probes a healthy lane after HEALTHY_PROBE_INTERVAL_MS has elapsed since last_updated", async () => {
+  const store = seedStore("up"); // observed_at: "2026-07-25T12:00:00.000Z"
+  let refreshCalled = false;
+  const pipeline = fakePipeline(async () => {
+    refreshCalled = true;
+  });
+  // 10 minutes later — exceeds the 5-minute healthy probe interval.
+  const scheduler = new InProcessScheduler({
+    lane: LANE, pipeline, store, argus: fakeArgus(),
+    nowImpl: () => "2026-07-25T12:10:00.000Z",
+  });
+
+  await scheduler.poll();
+
+  assert.equal(refreshCalled, true, "healthy lane should be re-probed once its probe interval has elapsed");
   store.close();
 });
 

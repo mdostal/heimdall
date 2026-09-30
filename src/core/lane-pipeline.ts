@@ -29,6 +29,7 @@ import { probeGeminiLane } from "./signal-sources/active-probe/gemini.js";
 import { checkKimiPublicStatus } from "./signal-sources/public-status/kimi.js";
 import { probeKimiLane } from "./signal-sources/active-probe/kimi.js";
 import { probeOpenRouterLane } from "./signal-sources/active-probe/openrouter.js";
+import { probeGrokLane } from "./signal-sources/active-probe/grok.js";
 import { probeOllamaLane } from "./signal-sources/active-probe/ollama.js";
 import {
   decideSignalSource,
@@ -39,18 +40,45 @@ import {
 import { resolveStatus, type ErrorCode, type LaneStatusValue, type SignalSource } from "./status-model.js";
 import type { StateStore } from "./state-store.js";
 import type { Lane } from "./lane-registry.js";
+import type { SensingMetrics } from "./telemetry/sensing-metrics.js";
 
 export interface RefreshDeps {
   /** Injected clock — an ISO-8601 timestamp for "now". Never Date.now() internally. */
   now: () => string;
   /** Surfaces the last real agent response/error observed on this lane, or
-   * null if nothing recent — the REQ-01 passive-observation input. No live
-   * agent traffic routes through Heimdall yet, so real callers wire this up
-   * once that integration exists; until then, returning null is honest and
-   * correctly falls through to public-status/active-probe. */
+   * null if nothing recent — the REQ-01 passive-observation input. Read once
+   * per refresh; composeService() feeds it reported route outcomes
+   * (heimdall#96) through a consume-once RouteOutcomeTracker. Returning null
+   * falls through to public-status/active-probe. */
   lastPassiveResponse: (laneId: string) => ResponseLike | null;
   fetchImpl?: typeof fetch;
+  /** PANT-824: monotonic milliseconds, for heimdall_probe_duration_seconds only. Defaults to performance.now(). */
+  monotonicNowMs?: () => number;
+  /** PANT-932: re-resolve a credential_unavailable lane's credential in place
+   * (LaneRegistry.retryCredential, which throttles itself). Called on the
+   * probe tick so a lane recovers once the credential source is back,
+   * without a restart. Omitted: such a lane just stays credential_unavailable. */
+  retryCredential?: (laneId: string) => boolean;
 }
+
+/** What one sensing cycle concluded, before corroboration — the
+ * heimdall_probes_total `source`/`result`/`error_code` labels. */
+interface SenseOutcome {
+  result: string;
+  errorCode: string;
+}
+
+/** Which signal source a sensing cycle used, set BEFORE any adapter call so
+ * the throw path still knows it. `unconfigured` = a lane with no credential,
+ * resolved locally without an active probe. */
+type SenseSource = SignalSource | "unconfigured";
+
+// PANT-824: only cycles that make a network call to the provider (or its
+// status page) are timed in heimdall_probe_duration_seconds. A passive read
+// (a reported route outcome — heimdall#96) and an unconfigured lane resolve
+// in-process in microseconds; timing them would drag the histogram toward
+// zero and hide real probe latency.
+const TIMED_SOURCES: ReadonlySet<SenseSource> = new Set<SenseSource>(["public_status", "active_probe"]);
 
 /** The two provider-specific functions every ProviderSignalAdapter pair must
  * supply — everything else in LanePipeline is provider-agnostic. */
@@ -96,6 +124,17 @@ export function openrouterAdapters(): ProviderAdapters {
   return { checkPublicStatus: alwaysUpOpenRouterPublicStatus, probe: probeOpenRouterLane };
 }
 
+// No public-status/grok.ts — no confirmed machine-readable status feed found
+// for xAI/Grok Code (see hdl-grok-signals's research-brief.md). Same honest
+// always-up stub pattern as openrouterAdapters() and ollamaAdapters().
+async function alwaysUpGrokPublicStatus(): Promise<{ status: "up"; reason: null }> {
+  return { status: "up", reason: null };
+}
+
+export function grokAdapters(): ProviderAdapters {
+  return { checkPublicStatus: alwaysUpGrokPublicStatus, probe: probeGrokLane };
+}
+
 // No public-status/ollama.ts — it's local infra, not a hosted service, so no
 // status page exists to check. Same honest always-up stub pattern as
 // openrouterAdapters().
@@ -129,10 +168,47 @@ export class LanePipeline {
     private readonly store: StateStore,
     private readonly deps: RefreshDeps,
     private readonly adapters: ProviderAdapters,
+    /** PANT-824: optional so existing callers/tests keep working; main.ts always passes the service-wide instance. */
+    private readonly sensing?: SensingMetrics,
   ) {}
 
   async refresh(lane: Lane): Promise<void> {
+    const monotonicNowMs = this.deps.monotonicNowMs ?? (() => performance.now());
+    const startedMs = monotonicNowMs();
+    const attempt: { source: SenseSource } = { source: "active_probe" };
+    let outcome: SenseOutcome = { result: "error", errorCode: "exception" };
+    try {
+      outcome = await this.sense(lane, attempt);
+    } finally {
+      // Recorded on the throw path too — an adapter that throws is exactly
+      // the "sensing silently broken" case these counters exist to expose.
+      this.sensing?.recordProbe({
+        lane: lane.lane_id,
+        provider: lane.provider,
+        source: attempt.source,
+        result: outcome.result,
+        errorCode: outcome.errorCode,
+        durationSeconds: TIMED_SOURCES.has(attempt.source)
+          ? Math.max(0, (monotonicNowMs() - startedMs) / 1000)
+          : null,
+      });
+    }
+  }
+
+  private async sense(lane: Lane, attempt: { source: SenseSource }): Promise<SenseOutcome> {
     const now = this.deps.now();
+
+    // heimdall#96: a passive observation waiting to be read (e.g. a reported
+    // route outcome) is the freshest evidence about this lane there is, so it
+    // decides the status ahead of the staleness-based choice below. Its
+    // recorded "passive" row then makes the next refresh see a fresh passive
+    // signal; with nothing new pending, that path falls back to a probe.
+    const pending = observePassiveSignal(this.deps.lastPassiveResponse(lane.lane_id));
+    if (pending) {
+      attempt.source = "passive";
+      return this.persistResolved(lane.lane_id, resolveStatus(pending), "passive", now);
+    }
+
     const decision = decideSignalSource({
       now,
       passiveSignalAt: this.store.getLastObservedAt(lane.lane_id, "passive"),
@@ -142,30 +218,44 @@ export class LanePipeline {
     });
 
     if (decision.action === "use-passive") {
-      const signal = observePassiveSignal(this.deps.lastPassiveResponse(lane.lane_id));
-      if (!signal) {
-        // Thought passive was fresh but there's nothing to observe —
-        // defensive fallback rather than trusting a null read.
-        await this.refreshViaProbe(lane, now);
-        return;
-      }
-      this.persistResolved(lane.lane_id, resolveStatus(signal), "passive", now);
-      return;
+      // Thought passive was fresh but there's nothing to observe (the
+      // lastPassiveResponse read above came back empty) — defensive fallback
+      // rather than trusting a null read.
+      return this.refreshViaProbe(lane, now, attempt);
     }
 
     if (decision.action === "use-public-status") {
+      attempt.source = "public_status";
       const signal = await this.adapters.checkPublicStatus(this.deps.fetchImpl);
-      this.persistResolved(lane.lane_id, resolveStatus(signal), "public_status", now);
-      return;
+      return this.persistResolved(lane.lane_id, resolveStatus(signal), "public_status", now);
     }
 
-    await this.refreshViaProbe(lane, now);
+    return this.refreshViaProbe(lane, now, attempt);
   }
 
-  private async refreshViaProbe(lane: Lane, now: string): Promise<void> {
+  private async refreshViaProbe(lane: Lane, now: string, attempt: { source: SenseSource }): Promise<SenseOutcome> {
+    if (!lane.credential && lane.credential_state === "credential_unavailable") {
+      this.deps.retryCredential?.(lane.lane_id);
+    }
+
     if (!lane.credential) {
+      attempt.source = "unconfigured";
+      if (lane.credential_state === "credential_unavailable") {
+        // PANT-932: the credential source is unreachable (e.g. core-api still
+        // booting after a reboot) — transient, retried on later ticks, and
+        // must not read as "no credential registered".
+        this.recordStatus({
+          lane_id: lane.lane_id,
+          status: "down",
+          reset_at: null,
+          reason: `credential_unavailable — credential source unreachable, retrying${lane.credential_detail ? ` (${lane.credential_detail})` : ""}`,
+          signal_source: "active_probe",
+          observed_at: now,
+        });
+        return { result: "down", errorCode: "credential_unavailable" };
+      }
       // REQ-07: missing/invalid credential — report down/unconfigured, never crash.
-      this.store.recordStatus({
+      this.recordStatus({
         lane_id: lane.lane_id,
         status: "down",
         reset_at: null,
@@ -173,11 +263,26 @@ export class LanePipeline {
         signal_source: "active_probe",
         observed_at: now,
       });
-      return;
+      return { result: "down", errorCode: "unconfigured" };
     }
 
+    attempt.source = "active_probe";
     const probe = await this.adapters.probe(lane.credential, this.deps.fetchImpl);
-    this.persistResolved(lane.lane_id, resolveStatus(probe), "active_probe", now);
+    return this.persistResolved(lane.lane_id, resolveStatus(probe), "active_probe", now);
+  }
+
+  /** store.recordStatus plus heimdall_lane_status_transitions_total — the
+   * one place this pipeline writes status, so every change it makes is
+   * counted, whichever scheduler (or manual refresh) triggered it. A lane's
+   * first-ever status counts as a transition from "none". */
+  private recordStatus(entry: Parameters<StateStore["recordStatus"]>[0]): void {
+    const from = this.store.hasRecordedStatus(entry.lane_id)
+      ? (this.store.getCurrentStatus(entry.lane_id)?.status ?? "none")
+      : "none";
+    this.store.recordStatus(entry);
+    if (from !== entry.status) {
+      this.sensing?.recordStatusTransition(entry.lane_id, from, entry.status);
+    }
   }
 
   private persistResolved(
@@ -190,7 +295,7 @@ export class LanePipeline {
     },
     source: SignalSource,
     now: string,
-  ): void {
+  ): SenseOutcome {
     const priorRawVerdict = this.lastRawVerdictByLane.get(laneId) ?? null;
     const corroboration = resolveWithCorroboration({
       latestVerdict: resolved.status,
@@ -205,7 +310,7 @@ export class LanePipeline {
     // the STATUS stays conservative (downgraded to `degraded` until
     // corroborated) — "OUR state could be one of the 3 [suspect states] ...
     // but then with full details underneath" (operator, 2026-08-16).
-    this.store.recordStatus({
+    this.recordStatus({
       lane_id: laneId,
       status: corroboration.verdict,
       reset_at: resolved.reset_at,
@@ -216,5 +321,6 @@ export class LanePipeline {
       signal_source: source,
       observed_at: now,
     });
+    return { result: resolved.status, errorCode: resolved.error_code ?? "none" };
   }
 }
