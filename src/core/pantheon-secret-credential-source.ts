@@ -61,6 +61,8 @@ export interface PantheonSecretCredentialSourceOptions {
   deleteFile?: (path: string) => void;
   /** Injected for testability -- avoids a real random id in tests. */
   generateId?: () => string;
+  /** Where a failed cleanup of the shared-volume file is reported. Defaults to console.warn. */
+  warn?: (message: string) => void;
 }
 
 export class PantheonSecretCredentialSource implements CredentialSource {
@@ -70,6 +72,7 @@ export class PantheonSecretCredentialSource implements CredentialSource {
   private readonly readFile: (path: string) => string;
   private readonly deleteFile: (path: string) => void;
   private readonly generateId: () => string;
+  private readonly warn: (message: string) => void;
 
   constructor(options: PantheonSecretCredentialSourceOptions = {}) {
     this.baseUrl = (options.pantheonApiUrl ?? process.env.PANTHEON_API_URL ?? "http://core-api:3012").replace(
@@ -81,6 +84,7 @@ export class PantheonSecretCredentialSource implements CredentialSource {
     this.readFile = options.readFile ?? ((p) => readFileSync(p, "utf8"));
     this.deleteFile = options.deleteFile ?? ((p) => unlinkSync(p));
     this.generateId = options.generateId ?? randomUUID;
+    this.warn = options.warn ?? ((message) => console.warn(message));
   }
 
   resolve(credentialRef: string): string | null {
@@ -163,9 +167,13 @@ export class PantheonSecretCredentialSource implements CredentialSource {
     } finally {
       try {
         this.deleteFile(filePath);
-      } catch {
-        // Best-effort cleanup -- a delete failure (e.g. file was never written because the
-        // request failed before Portunus wrote it) must never mask the real resolve() outcome.
+      } catch (err) {
+        // Best-effort cleanup -- a delete failure must never mask the real resolve() outcome.
+        // ENOENT is expected (the request failed before Portunus wrote the file); anything
+        // else leaves a resolved secret on the shared volume, so say so (PANT-1003).
+        if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+          this.warn(`PantheonSecretCredentialSource: failed to delete ${filePath}: ${(err as Error)?.message ?? String(err)}`);
+        }
       }
     }
   }
