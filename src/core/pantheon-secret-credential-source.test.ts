@@ -164,3 +164,28 @@ test("PANT-932: resolveDetailed() reports unconfigured when core-api answers but
 test("PANT-932: resolveDetailed() returns the value on success", () => {
   assert.deepEqual(sourceWith(() => "\n200", () => "VALUE=sk-ant-x\n").resolveDetailed("X"), { state: "resolved", value: "sk-ant-x" });
 });
+
+test("PANT-1003: a delete failure other than ENOENT is logged, never the value; ENOENT stays quiet", () => {
+  const warnings: string[] = [];
+  let code = "EPERM";
+  const source = new PantheonSecretCredentialSource({
+    pantheonApiUrl: BASE_URL,
+    sharedSecretsDir: SHARED_DIR,
+    generateId: () => "fixed-id",
+    exec: () => "\n200",
+    readFile: () => "VALUE=sk-ant-x\n",
+    deleteFile: () => {
+      throw Object.assign(new Error("delete failed"), { code });
+    },
+    warn: (m) => warnings.push(m),
+  });
+
+  assert.deepEqual(source.resolveDetailed("X"), { state: "resolved", value: "sk-ant-x" });
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /\/fake-shared\/fixed-id\.secret/);
+  assert.doesNotMatch(warnings[0], /sk-ant-x/);
+
+  code = "ENOENT";
+  source.resolveDetailed("X");
+  assert.equal(warnings.length, 1);
+});
