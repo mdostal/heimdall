@@ -3,7 +3,22 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SCENARIOS, measureTransition, runAllScenarios, renderReport, SLA_MS } from "./index.js";
+import {
+  BACKUP_LANE_ID,
+  HARNESS_LANE_ID,
+  SCENARIOS,
+  SLA_MS,
+  SLOW_PROBE_DELAY_MS,
+  measureTransition,
+  renderReport,
+  runAllScenarios,
+} from "./index.js";
+
+function scenario(name: string) {
+  const found = SCENARIOS.find((s) => s.name === name);
+  assert.ok(found, `no SLA scenario named ${name}`);
+  return found;
+}
 
 test("every scenario resolves to its expected final status", async () => {
   for (const scenario of SCENARIOS) {
@@ -13,7 +28,61 @@ test("every scenario resolves to its expected final status", async () => {
       result.expectedFinalStatus,
       `${scenario.name}: expected ${result.expectedFinalStatus}, got ${result.finalStatus}`,
     );
+    if (scenario.expectedFinalErrorCode !== undefined) {
+      assert.equal(result.finalErrorCode, scenario.expectedFinalErrorCode, `${scenario.name}: error_code`);
+    }
   }
+});
+
+// PANT-1000: the routing outcome, not just the status row — after every tick
+// the default priority strategy must pick the lane the scenario expects.
+test("every scenario routes to the expected lane after every tick", async () => {
+  for (const scenario of SCENARIOS) {
+    const result = await measureTransition(scenario);
+    assert.deepEqual(result.routes, result.expectedRoutes, `${scenario.name}: routes per tick`);
+  }
+});
+
+test("quota exhaustion: a weekly-capped lane fails over and is labelled out_of_credit / quota_exceeded", async () => {
+  const result = await measureTransition(scenario("quota_exhausted_fails_over"));
+  assert.deepEqual(result.routes, [HARNESS_LANE_ID, BACKUP_LANE_ID, BACKUP_LANE_ID]);
+  assert.equal(result.finalStatus, "out_of_credit");
+  assert.equal(result.finalErrorCode, "quota_exceeded");
+  assert.equal(result.metSla, true);
+});
+
+test("auth failure mid-run: a failed route outcome alone moves traffic off the lane before any probe", async () => {
+  const s = scenario("auth_failure_mid_run_fails_over");
+  // The tick carrying the outcome probes 200, so only the passive outcome can explain the failover.
+  const outcomeTick = await measureTransition({ ...s, ticks: s.ticks.slice(0, 2), expectedFinalStatus: "degraded" });
+  assert.deepEqual(outcomeTick.routes, [HARNESS_LANE_ID, BACKUP_LANE_ID]);
+  assert.equal(outcomeTick.finalStatus, "degraded");
+  assert.equal(outcomeTick.finalErrorCode, "auth_failed");
+
+  const result = await measureTransition(s);
+  assert.equal(result.finalStatus, "down");
+  assert.equal(result.finalErrorCode, "auth_failed");
+  assert.equal(result.routes.at(-1), BACKUP_LANE_ID);
+});
+
+test("slow lane: the injected probe latency is measured, and a slow-but-healthy lane keeps the route", async () => {
+  const s = scenario("slow_lane_stays_routed");
+  const result = await measureTransition(s);
+  assert.ok(
+    result.elapsedMs >= SLOW_PROBE_DELAY_MS * s.ticks.length - 5,
+    `elapsed ${result.elapsedMs}ms should include ${s.ticks.length} x ${SLOW_PROBE_DELAY_MS}ms of probe latency`,
+  );
+  assert.deepEqual(result.routes, [HARNESS_LANE_ID, HARNESS_LANE_ID]);
+  assert.equal(result.finalStatus, "up");
+  assert.equal(result.metSla, true);
+});
+
+test("slow lane: a probe that times out fails over and corroborates down / network_error", async () => {
+  const result = await measureTransition(scenario("slow_lane_times_out_fails_over"));
+  assert.deepEqual(result.routes, [BACKUP_LANE_ID, BACKUP_LANE_ID]);
+  assert.equal(result.finalStatus, "down");
+  assert.equal(result.finalErrorCode, "network_error");
+  assert.equal(result.metSla, true);
 });
 
 test("every scenario meets the 10-second SLA (REQ-06) — measured, not asserted", async () => {
@@ -34,7 +103,7 @@ test("a single down probe (no second corroborating tick) does NOT resolve to dow
   const oneTickScenario = {
     name: "single-down-tick-uncorroborated",
     description: "test-only: confirms one failure alone isn't trusted as down",
-    ticks: SCENARIOS.find((s) => s.name === "up_to_down_requires_two_ticks")!.ticks.slice(0, 1),
+    ticks: scenario("up_to_down_requires_two_ticks").ticks.slice(0, 1),
     expectedFinalStatus: "down" as const,
   };
   const result = await measureTransition(oneTickScenario);
@@ -49,6 +118,9 @@ test("generates and writes the results report", async (t) => {
   const report = renderReport(results);
   assert.match(report, /SLA Verification Harness/);
   assert.match(report, /up_to_down_requires_two_ticks/);
+  for (const name of ["quota_exhausted_fails_over", "auth_failure_mid_run_fails_over", "slow_lane_stays_routed"]) {
+    assert.match(report, new RegExp(name));
+  }
 
   const dir = mkdtempSync(join(tmpdir(), "heimdall-sla-report-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
