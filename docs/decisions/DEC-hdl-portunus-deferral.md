@@ -130,11 +130,15 @@ anticipated has already been built against it:
   `CredentialSource` interface, calling only `core/api/secrets.ts` — never
   Portunus directly, exactly the shape this decision's Consequences section
   named. Opt-in only via `HEIMDALL_CREDENTIAL_SOURCE=pantheon`;
-  standalone mode's `EnvCredentialSource` default is unchanged. The real
-  shared-volume wiring between Portunus's container and wherever this
-  credential source runs is tracked separately (pantheon-v2's
-  `pantheon-secret-resolution-facade` epic, story C) as a known follow-up,
-  not assumed complete by this record.
+  standalone mode's `EnvCredentialSource` default is unchanged.
+- **Shared-volume wiring** (pantheon-v2 808b8c0, 2026-08-30): the
+  `pantheon-secrets` named volume is mounted at `/pantheon-secrets` in
+  `portunus`, `core-api` and `heimdall`. pantheon-v2#196 (2026-09-17) set
+  `HEIMDALL_CREDENTIAL_SOURCE=pantheon` on the `heimdall` service.
+  Live-verified on hive 2026-10-11 (PANT-1001): `GET /lanes` reports
+  `credential_state: "resolved"` for all five lanes, including the separate
+  `claude@mathew.dostal` (`provider=anthropic,project=pantheon`) and
+  `claude@ffevents` (`provider=anthropic,project=ffevents`) accounts.
 
 Both halves of the original deferral — the Pantheon Core mechanism, and
 Heimdall's own consumer of it — are real and shipped. Nothing further is
