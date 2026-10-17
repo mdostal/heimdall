@@ -209,3 +209,59 @@ test("hdl-csl-02/PANT-729: a genuine auth failure (not weekly limit) still resol
   assert.equal(result.status, "down");
   assert.equal(result.error_code, "auth_failed");
 });
+
+// PANT-1156: a real execFile rejection. `claude -p` prints its error to
+// STDOUT and execFile's message is only "Command failed: ..." -- the shape
+// NodeCommandRunner really throws, captured live against Claude Code 2.1.301
+// (stdout "Failed to authenticate. API Error: 401 ...", stderr empty). The
+// fakes above put the CLI text in err.message, which never happens for real.
+function execFileFailure(stdout: string, stderr = ""): CommandRunner {
+  return {
+    run: async () => {
+      throw Object.assign(new Error("Command failed: claude -p reply with the single word OK --max-turns 1\n"), {
+        code: 1,
+        stdout,
+        stderr,
+      });
+    },
+  };
+}
+
+test("PANT-1156: a session limit printed on stdout resolves to out_of_credit, not auth_failed", async () => {
+  const result = await probeClaudeSubscriptionLane(
+    "sk-ant-oat01-fake",
+    execFileFailure("You've hit your session limit · resets 2:20am (UTC)\n"),
+  );
+  assert.equal(result.status, "out_of_credit");
+  assert.equal(result.error_code, "quota_exceeded");
+  assert.ok(result.reset_at !== null && Date.parse(result.reset_at) > Date.now(), "reset_at must be a future time");
+});
+
+test("PANT-1156: a weekly limit printed on stdout resolves to out_of_credit", async () => {
+  const result = await probeClaudeSubscriptionLane(
+    "sk-ant-oat01-fake",
+    execFileFailure("You've hit your weekly limit · resets 7pm (America/Chicago)\n"),
+  );
+  assert.equal(result.status, "out_of_credit");
+  assert.equal(result.error_code, "quota_exceeded");
+});
+
+test("PANT-1156: a real 401 on stdout is still auth_failed, and the reason carries the CLI's words", async () => {
+  const result = await probeClaudeSubscriptionLane(
+    "sk-ant-oat01-fake",
+    execFileFailure("Failed to authenticate. API Error: 401 OAuth access token is invalid.\n"),
+  );
+  assert.equal(result.status, "down");
+  assert.equal(result.error_code, "auth_failed");
+  assert.match(result.reason ?? "", /401 OAuth access token is invalid/);
+});
+
+test("PANT-1156: a spawn failure with no CLI output falls back to err.message", async () => {
+  const result = await probeClaudeSubscriptionLane("sk-ant-oat01-fake", {
+    run: async () => {
+      throw Object.assign(new Error("spawn claude ENOENT"), { code: "ENOENT" });
+    },
+  });
+  assert.equal(result.status, "down");
+  assert.match(result.reason ?? "", /ENOENT/);
+});
