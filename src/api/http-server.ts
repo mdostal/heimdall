@@ -4,10 +4,10 @@
 // lane) — no real signal detection yet; that's lhs-03f.
 // See .pHive/epics/lane-health-status/stories/lhs-02-credential-loading-state-storage.yaml
 
-import { createServer, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { EnvCredentialSource, type CredentialSource } from "../core/credential-source.js";
 import { PantheonSecretCredentialSource } from "../core/pantheon-secret-credential-source.js";
-import { loadLaneDeclarations, LaneRegistry, type LaneCostTier } from "../core/lane-registry.js";
+import { loadLaneDeclarations, LaneRegistry, type CredentialState, type LaneCostTier } from "../core/lane-registry.js";
 import {
   getAvailableRoute,
   getScoredRoute,
@@ -33,8 +33,11 @@ import {
 } from "../core/scheduler/backoff-policies/registry.js";
 import { DEFAULT_INTERVAL_MS as BACKOFF_BASE_INTERVAL_MS } from "../core/scheduler/in-process-scheduler.js";
 import { StateStore, resolveDefaultDbPath, type ManualOverride } from "../core/state-store.js";
-import type { LaneStatus } from "../core/status-model.js";
+import { LANE_STATUS_CHANGED } from "../core/lane-events.js";
+import type { LaneStatus, LaneStatusValue } from "../core/status-model.js";
+import { LANE_STATUS_VALUES } from "../core/status-model.js";
 import type { LaneAgentResolver } from "../core/actuation/lane-agent-resolver.js";
+import { getLaneSignal, type SignalState } from "../core/signal-state.js";
 import { renderDashboardHtml } from "./ui/dashboard.js";
 import { DOC_ENTRIES, getDocBySlug, renderDocMarkdown, renderDocsIndexHtml, renderDocPageHtml } from "./ui/docs-viewer.js";
 import { createRequire } from "node:module";
@@ -44,8 +47,10 @@ import { appendLane, deriveCredentialRef, laneIdAlreadyDeclared } from "../core/
 import { refreshModelCatalog, getModelCatalog, setModelEnabled } from "../core/model-catalog.js";
 import { NoHealthyAccountsAvailableError, type RotationController } from "../core/rotation-controller.js";
 import { renderMetrics } from "./metrics.js";
+import { evaluateReadiness, resolveReadinessStalenessMs } from "./readiness.js";
+import type { SensingMetrics } from "../core/telemetry/sensing-metrics.js";
 import type { JsonValue } from "../core/routing/route-ledger.js";
-import { PolicyLoader } from "../core/routing/policy-loader.js";
+import { PolicyLoader, PolicyValidationError } from "../core/routing/policy-loader.js";
 
 const DEFAULT_ENV_FILE_PATH = ".env";
 
@@ -71,21 +76,102 @@ const mermaidBundlePath = createRequire(import.meta.url).resolve("mermaid/dist/m
 const iconSetsRoot =
   process.env.HEIMDALL_ICON_SETS_ROOT ?? join(process.cwd(), "app", "src-tauri", "resources", "icon-sets");
 
-/** Collects and JSON-parses a request body. Shared by every mutation route (override, reset-at, add-lane). */
-function readJsonBody(req: import("node:http").IncomingMessage): Promise<{ ok: true; data: unknown } | { ok: false }> {
+/** PANT-829: request bodies above this are rejected with 413 instead of buffered. */
+export const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
+
+type ReadJsonBodyResult = { ok: true; data: unknown } | { ok: false; error: "invalid_json" | "payload_too_large" };
+
+/**
+ * Collects and JSON-parses a request body. Shared by every mutation route (override, reset-at, add-lane).
+ * Stops buffering once the body passes maxBytes (declared Content-Length or
+ * actual bytes, whichever trips first) so one oversized request can't grow
+ * memory without bound; the rest of the upload is drained and discarded.
+ */
+function readJsonBody(
+  req: IncomingMessage,
+  maxBytes: number = MAX_REQUEST_BODY_BYTES,
+): Promise<ReadJsonBodyResult> {
   return new Promise((resolve) => {
-    let rawBody = "";
-    req.on("data", (chunk) => {
-      rawBody += chunk;
+    let settled = false;
+    const settle = (result: ReadJsonBodyResult): void => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
+    const declaredLength = Number(req.headers["content-length"]);
+    if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+      req.resume();
+      settle({ ok: false, error: "payload_too_large" });
+      return;
+    }
+
+    const chunks: Buffer[] = [];
+    let receivedBytes = 0;
+    req.on("data", (chunk: Buffer) => {
+      if (settled) return;
+      receivedBytes += chunk.length;
+      if (receivedBytes > maxBytes) {
+        chunks.length = 0;
+        settle({ ok: false, error: "payload_too_large" });
+        return;
+      }
+      chunks.push(chunk);
     });
     req.on("end", () => {
       try {
-        resolve({ ok: true, data: JSON.parse(rawBody || "{}") });
+        const rawBody = Buffer.concat(chunks).toString("utf8");
+        settle({ ok: true, data: JSON.parse(rawBody || "{}") });
       } catch {
-        resolve({ ok: false });
+        settle({ ok: false, error: "invalid_json" });
       }
     });
+    req.on("error", () => settle({ ok: false, error: "invalid_json" }));
   });
+}
+
+/** The response for a body readJsonBody rejected: 413 when too large, 400 when not valid JSON. */
+function writeBodyError(
+  res: ServerResponse,
+  body: Extract<ReadJsonBodyResult, { ok: false }>,
+): void {
+  if (body.error === "payload_too_large") {
+    // The client may still be uploading; close rather than keep the socket.
+    res.writeHead(413, { "content-type": "application/json", connection: "close" });
+    res.end(JSON.stringify({ error: "payload_too_large", max_bytes: MAX_REQUEST_BODY_BYTES }));
+    return;
+  }
+  res.writeHead(400, { "content-type": "application/json" });
+  res.end(JSON.stringify({ error: "invalid_json" }));
+}
+
+/**
+ * heimdall#95: the one error response for a handler that threw. A missing or
+ * invalid routing policy is the operator's config problem, not a bug, so it
+ * gets its own 503 (see docs/routing.md); anything else is a 500. Either way
+ * the process keeps serving every other lane.
+ */
+function sendHandlerError(res: ServerResponse, err: unknown): void {
+  const detail = err instanceof Error ? err.message : String(err);
+  const policyUnavailable = err instanceof PolicyValidationError;
+  if (!policyUnavailable) console.error("[http] request handler failed:", err);
+  if (res.headersSent) {
+    res.destroy();
+    return;
+  }
+  res.writeHead(policyUnavailable ? 503 : 500, { "content-type": "application/json" });
+  res.end(JSON.stringify({ error: policyUnavailable ? "routing_policy_unavailable" : "internal_error", detail }));
+}
+
+/** readJsonBody + the handler, with any throw or rejection turned into sendHandlerError() instead of an unhandled rejection (heimdall#95). */
+function handleJsonBody(
+  req: IncomingMessage,
+  res: ServerResponse,
+  handler: (body: ReadJsonBodyResult) => void | Promise<void>,
+): void {
+  readJsonBody(req)
+    .then(handler)
+    .catch((err) => sendHandlerError(res, err));
 }
 
 /**
@@ -105,6 +191,11 @@ export interface LaneStatusWithOverride extends LaneStatus {
   manual_override: ManualOverride;
   override_reason: string | null;
   credential_configured: boolean;
+  /** PANT-932 — why credential_configured is what it is: `unconfigured` (no
+   * credential registered under credential_ref) vs `credential_unavailable`
+   * (the credential source is unreachable right now; Heimdall keeps retrying).
+   * A host reboot must not read as "no accounts configured". */
+  credential_state: CredentialState;
   manual_reset_at: string | null;
   model: string;
   credential_ref: string;
@@ -119,6 +210,11 @@ export interface LaneStatusWithOverride extends LaneStatus {
    * mapping is configured — never omitted. Heimdall itself no longer acts
    * on this mapping (see docs/decisions/DEC-hdl-multica-disable-contract.md). */
   multica_agent_ids: string[];
+  /** PANT-823 — whether `status` rests on a recent observation. never_probed
+   * and stale lanes keep their `status` (REQ-07) but carry no live signal —
+   * a consumer must not treat their "down" as a sensed outage. */
+  signal_state: SignalState;
+  last_probed_at: string | null;
 }
 
 const VALID_OVERRIDE_STATES = new Set(["enabled", "disabled", "auto"]);
@@ -563,6 +659,7 @@ export function getLaneStatuses(
   registry: LaneRegistry,
   store: StateStore,
   resolver?: LaneAgentResolver,
+  now: Date = new Date(),
 ): LaneStatusWithOverride[] {
   // Ensure every declared lane is present in the store (REQ-07: a lane with a
   // missing/invalid credential is still known — it just resolves to
@@ -573,6 +670,10 @@ export function getLaneStatuses(
       provider: lane.provider,
       credential_ref: lane.credential_ref,
     });
+    // PANT-932: the MCP server and CLI build their own registry and never run
+    // the probe tick, so re-check a transiently unavailable credential here
+    // (throttled by the registry's backoff) rather than report it forever.
+    if (lane.credential_state === "credential_unavailable") registry.retryCredential(lane.lane_id);
   }
   return store.getAllCurrentStatuses().map((status) => {
     const declared = registry.get(status.lane_id);
@@ -581,6 +682,7 @@ export function getLaneStatuses(
       manual_override: store.getManualOverride(status.lane_id),
       override_reason: store.getOverrideReason(status.lane_id),
       credential_configured: declared?.credential != null,
+      credential_state: declared?.credential_state ?? "unconfigured",
       manual_reset_at: store.getManualResetAt(status.lane_id),
       model: declared?.model ?? status.provider,
       credential_ref: declared?.credential_ref ?? "",
@@ -588,6 +690,7 @@ export function getLaneStatuses(
       manual_headroom: store.getManualHeadroom(status.lane_id),
       manual_cost_tier: store.getManualCostTier(status.lane_id),
       multica_agent_ids: resolver?.resolve(status.lane_id) ?? [],
+      ...getLaneSignal(store, status.lane_id, { now }),
     };
   });
 }
@@ -602,6 +705,51 @@ export function getLaneStatuses(
  */
 export type RefreshLaneFn = (laneId: string) => Promise<void>;
 
+export type PushLaneStatusResult =
+  | { ok: true; lane_id: string; status: LaneStatusValue; signal_source: "passive" }
+  | { ok: false; error: "unknown_lane"; lane_id: string }
+  | { ok: false; error: "invalid_status"; allowed_statuses: readonly LaneStatusValue[] };
+
+/**
+ * Records an externally-pushed lane status as `signal_source: "passive"`.
+ * Used by Pantheon's quota-failure watcher (PANT-185) to push
+ * `out_of_credit` the moment a task fails, rather than waiting for the next
+ * active probe cycle.  A resulting status change emits lane.status_changed
+ * (PANT-827), which reconciles immediately and streams over GET /events.
+ */
+export function pushLaneStatus(
+  registry: LaneRegistry,
+  store: StateStore,
+  laneId: string,
+  rawStatus: unknown,
+): PushLaneStatusResult {
+  if (!registry.get(laneId)) {
+    return { ok: false, error: "unknown_lane", lane_id: laneId };
+  }
+  if (typeof rawStatus !== "string" || !(LANE_STATUS_VALUES as readonly string[]).includes(rawStatus)) {
+    return { ok: false, error: "invalid_status", allowed_statuses: LANE_STATUS_VALUES };
+  }
+  store.recordStatus({
+    lane_id: laneId,
+    status: rawStatus as LaneStatusValue,
+    reset_at: null,
+    reason: "pushed by external observer",
+    signal_source: "passive",
+    observed_at: new Date().toISOString(),
+  });
+  return { ok: true, lane_id: laneId, status: rawStatus as LaneStatusValue, signal_source: "passive" };
+}
+
+// PANT-829: open GET /events responses per server, so a graceful shutdown can
+// end them up front instead of waiting out the whole grace period on streams
+// that never finish by themselves.
+const openEventStreams = new WeakMap<Server, Set<ServerResponse>>();
+
+/** Ends every open GET /events (SSE) stream on `server`. Clients reconnect to the next instance. */
+export function endEventStreams(server: Server): void {
+  for (const res of openEventStreams.get(server) ?? []) res.end();
+}
+
 export function createHttpServer(
   registry: LaneRegistry,
   store: StateStore,
@@ -612,8 +760,13 @@ export function createHttpServer(
   // hdl-msh-02: which Multica agent(s) a lane maps to, surfaced on GET
   // /lanes so a downstream actuator (Pantheon's facade) can act on it.
   laneAgentResolver?: LaneAgentResolver,
+  // PANT-824: the service-wide sensing counters (probes, transitions,
+  // scheduler start failures) — feeds GET /metrics and GET /readyz.
+  sensing?: SensingMetrics,
+  readinessStalenessMs: number = resolveReadinessStalenessMs(),
 ): Server {
-  return createServer((req, res) => {
+  const eventStreams = new Set<ServerResponse>();
+  const handleRequest = (req: IncomingMessage, res: ServerResponse): void => {
     // Liveness alias — distinct from /lanes on purpose: a monitor (e.g.
     // Salus) should be able to confirm the process is up and serving HTTP
     // without that check depending on lane declarations or StateStore reads.
@@ -623,12 +776,51 @@ export function createHttpServer(
       return;
     }
 
+    // PANT-824: readiness — is Heimdall actually sensing? 200 "ready" or
+    // 503 "degraded" with reasons; see readiness.ts for the checks.
+    if (req.method === "GET" && req.url === "/readyz") {
+      let report;
+      try {
+        report = evaluateReadiness({ registry, store, sensing, stalenessMs: readinessStalenessMs });
+      } catch (err) {
+        res.writeHead(503, { "content-type": "application/json" });
+        res.end(JSON.stringify({ status: "degraded", reasons: [`readiness check failed — ${err instanceof Error ? err.message : String(err)}`] }));
+        return;
+      }
+      res.writeHead(report.status === "ready" ? 200 : 503, { "content-type": "application/json" });
+      res.end(JSON.stringify(report));
+      return;
+    }
+
     // hdl-ot-03: Heimdall's own metrics, entirely local — Prometheus text
     // format so any OTEL/Prometheus-compatible scraper (Argus included) can
     // pull it later without Heimdall depending on any of them being present.
+    // PANT-827: Server-Sent Events stream of lane.status_changed — the
+    // dashboard subscribes here instead of polling GET /lanes every 5s.
+    // Fed by the StateStore's in-process emitter, so it only sends when a
+    // lane's resolved status or manual override/reset_at actually changes.
+    if (req.method === "GET" && req.url === "/events") {
+      res.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+      });
+      // An initial comment flushes the headers so EventSource fires "open" now, not on the first event.
+      res.write(": connected\n\n");
+      const unsubscribe = store.events.onStatusChanged((event) => {
+        res.write(`event: ${LANE_STATUS_CHANGED}\ndata: ${JSON.stringify(event)}\n\n`);
+      });
+      eventStreams.add(res);
+      res.on("close", () => {
+        unsubscribe();
+        eventStreams.delete(res);
+      });
+      return;
+    }
+
     if (req.method === "GET" && req.url === "/metrics") {
       res.writeHead(200, { "content-type": "text/plain; version=0.0.4; charset=utf-8" });
-      res.end(renderMetrics(registry, store));
+      res.end(renderMetrics(registry, store, sensing));
       return;
     }
 
@@ -650,10 +842,9 @@ export function createHttpServer(
     }
 
     if (req.method === "POST" && req.url === "/theme") {
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const result = setTheme(store, (body.data as { theme?: unknown }).theme);
@@ -679,10 +870,9 @@ export function createHttpServer(
     }
 
     if (req.method === "POST" && req.url === "/agent-onboarding-dismissed") {
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const result = setAgentOnboardingDismissed(store, (body.data as { dismissed?: unknown }).dismissed);
@@ -753,10 +943,9 @@ export function createHttpServer(
     // loadLaneDeclarations() only runs at boot, so the new lane is inert
     // until the operator restarts (see the response's restart_command).
     if (req.method === "POST" && req.url === "/lanes") {
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const result = addLane(registry, envFilePath, body.data as AddLaneInput);
@@ -822,10 +1011,9 @@ export function createHttpServer(
     }
 
     if (req.method === "POST" && req.url === "/routing-strategy") {
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const result = setRoutingStrategy(store, (body.data as { strategy?: unknown }).strategy);
@@ -860,10 +1048,9 @@ export function createHttpServer(
     }
 
     if (req.method === "POST" && req.url === "/backoff-policy") {
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const result = setBackoffPolicy(store, (body.data as { policy?: unknown }).policy);
@@ -908,10 +1095,9 @@ export function createHttpServer(
 
     if (req.method === "POST" && backoffOverrideMatch) {
       const provider = decodeURIComponent(backoffOverrideMatch[1]);
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const result = setBackoffPolicyOverride(store, provider, (body.data as { policy?: unknown }).policy);
@@ -938,10 +1124,9 @@ export function createHttpServer(
     }
 
     if (req.method === "POST" && req.url === "/backoff-policy/progressive-level-cap") {
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const result = setBackoffProgressiveLevelCap(store, (body.data as { value?: unknown }).value);
@@ -966,10 +1151,9 @@ export function createHttpServer(
     }
 
     if (req.method === "POST" && req.url === "/backoff-policy/exponential-multiplier") {
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const result = setBackoffExponentialMultiplier(store, (body.data as { value?: unknown }).value);
@@ -994,10 +1178,9 @@ export function createHttpServer(
     }
 
     if (req.method === "POST" && req.url === "/backoff-policy/exponential-ceiling-ms") {
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const result = setBackoffExponentialCeilingMs(store, (body.data as { value?: unknown }).value);
@@ -1027,10 +1210,9 @@ export function createHttpServer(
     }
 
     if (req.method === "POST" && req.url === "/desktop-icon") {
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const result = setIcon(store, (body.data as { icon?: unknown }).icon);
@@ -1095,10 +1277,9 @@ export function createHttpServer(
     // contract (Auriga/Minerva's existing dispatch shape). GET
     // /available-route is the strategy-driven surface; this is not that.
     if (req.method === "POST" && req.url === "/route") {
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const data = body.data as { task_id?: unknown; task_type?: unknown; estimated_cost?: unknown };
@@ -1129,10 +1310,9 @@ export function createHttpServer(
     const routeOutcomeMatch = req.method === "POST" && req.url?.match(/^\/route\/([^/]+)\/outcome$/);
     if (routeOutcomeMatch) {
       const decisionId = decodeURIComponent(routeOutcomeMatch[1]);
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const data = body.data as { outcome?: unknown; actual_cost?: unknown; metadata?: unknown };
@@ -1187,10 +1367,9 @@ export function createHttpServer(
     if (modelEnabledMatch) {
       const provider = decodeURIComponent(modelEnabledMatch[1]);
       const modelId = decodeURIComponent(modelEnabledMatch[2]);
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const enabled = (body.data as { enabled?: unknown }).enabled;
@@ -1241,15 +1420,14 @@ export function createHttpServer(
     // hdl-lo-01: manual lane override — routes through the SAME
     // ControlAdapter.reconcile() decision as automatic status-driven
     // actuation (see MulticaControlAdapter's desiredEnabled computation),
-    // not a separate mechanism. Takes effect on the next reconcile tick
-    // (<=5s, same latency as the existing suspect-lane cadence).
+    // not a separate mechanism. Takes effect immediately: a changed override
+    // emits lane.status_changed (PANT-827), which triggers reconcile().
     const overrideMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/override$/);
     if (overrideMatch) {
       const laneId = decodeURIComponent(overrideMatch[1]);
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const { state, reason } = body.data as { state?: unknown; reason?: unknown };
@@ -1275,10 +1453,9 @@ export function createHttpServer(
     const resetAtMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/reset-at$/);
     if (resetAtMatch) {
       const laneId = decodeURIComponent(resetAtMatch[1]);
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const resetAt = (body.data as { reset_at?: unknown }).reset_at;
@@ -1307,10 +1484,9 @@ export function createHttpServer(
     const headroomMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/headroom$/);
     if (headroomMatch) {
       const laneId = decodeURIComponent(headroomMatch[1]);
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const headroom = (body.data as { headroom?: unknown }).headroom;
@@ -1334,10 +1510,9 @@ export function createHttpServer(
     const costTierMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/cost-tier$/);
     if (costTierMatch) {
       const laneId = decodeURIComponent(costTierMatch[1]);
-      readJsonBody(req).then((body) => {
+      handleJsonBody(req, res, (body) => {
         if (!body.ok) {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "invalid_json" }));
+          writeBodyError(res, body);
           return;
         }
         const costTier = (body.data as { cost_tier?: unknown }).cost_tier;
@@ -1382,9 +1557,50 @@ export function createHttpServer(
       return;
     }
 
+    // PANT-185: passive lane-status push — external observers (Pantheon's
+    // quota-failure watcher) send PATCH /lanes/:id with { status: "..." }
+    // to update Heimdall's StateStore immediately, without waiting for the
+    // next active probe cycle.  signal_source is fixed to "passive" so the
+    // dashboard / CLI can distinguish pushed updates from probed ones.
+    const laneStatusPushMatch = req.method === "PATCH" && req.url?.match(/^\/lanes\/([^/]+)$/);
+    if (laneStatusPushMatch) {
+      const laneId = decodeURIComponent(laneStatusPushMatch[1]);
+      handleJsonBody(req, res, (body) => {
+        if (!body.ok) {
+          writeBodyError(res, body);
+          return;
+        }
+        const { status } = body.data as { status?: unknown };
+        const result = pushLaneStatus(registry, store, laneId, status);
+        if (!result.ok) {
+          const httpStatus = result.error === "unknown_lane" ? 404 : 400;
+          const { ok: _ok, ...wire } = result;
+          res.writeHead(httpStatus, { "content-type": "application/json" });
+          res.end(JSON.stringify(wire));
+          return;
+        }
+        const { ok: _ok, ...wire } = result;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(wire));
+      });
+      return;
+    }
+
     res.writeHead(404, { "content-type": "application/json" });
     res.end(JSON.stringify({ error: "not_found" }));
+  };
+
+  // heimdall#95: a synchronous throw in any route answers that one request
+  // with an error; it never reaches the process as an uncaught exception.
+  const server = createServer((req, res) => {
+    try {
+      handleRequest(req, res);
+    } catch (err) {
+      sendHandlerError(res, err);
+    }
   });
+  openEventStreams.set(server, eventStreams);
+  return server;
 }
 
 const isMainModule =

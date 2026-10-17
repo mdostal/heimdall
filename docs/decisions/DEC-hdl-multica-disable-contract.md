@@ -1,3 +1,9 @@
+---
+title: DEC-hdl-multica-disable-contract
+parent: Decision Records
+nav_order: 1
+---
+
 # DEC-hdl-multica-disable-contract
 
 **Status:** Accepted (2026-08-27)

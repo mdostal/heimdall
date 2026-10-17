@@ -129,3 +129,63 @@ test("resolve() defaults pantheonApiUrl from PANTHEON_API_URL env var, matching 
     else process.env.PANTHEON_API_URL = originalEnv;
   }
 });
+
+// PANT-932 (heimdall#116): resolveDetailed() tells a transient credential
+// source outage apart from a credential that genuinely doesn't exist.
+
+function sourceWith(exec: (cmd: string, args: string[], opts: object) => string, readFile: (p: string) => string = () => "") {
+  return new PantheonSecretCredentialSource({ pantheonApiUrl: BASE_URL, sharedSecretsDir: SHARED_DIR, exec, readFile, deleteFile: () => {} });
+}
+
+test("PANT-932: resolveDetailed() reports unavailable (with curl's own error) when core-api can't be reached", () => {
+  const source = sourceWith(() => {
+    const err = new Error("Command failed: curl") as Error & { stderr: string };
+    err.stderr = "curl: (7) Failed to connect to core-api:3012 after 0 ms: Could not connect to server\n";
+    throw err;
+  });
+  const result = source.resolveDetailed("CLAUDE_TOKEN");
+  assert.equal(result.state, "unavailable");
+  assert.match(result.state === "unavailable" ? result.detail : "", /curl: \(7\) Failed to connect to core-api:3012/);
+  assert.equal(source.resolve("CLAUDE_TOKEN"), null, "resolve() keeps its null contract");
+});
+
+test("PANT-932: resolveDetailed() reports unavailable for http_code 000 and for a 5xx from the secrets facade", () => {
+  assert.equal(sourceWith(() => "\n000").resolveDetailed("X").state, "unavailable");
+  assert.equal(sourceWith(() => "\n502").resolveDetailed("X").state, "unavailable");
+  assert.equal(sourceWith(() => "\n503").resolveDetailed("X").state, "unavailable");
+});
+
+test("PANT-932: resolveDetailed() reports unconfigured when core-api answers but no credential exists", () => {
+  assert.deepEqual(sourceWith(() => "\n404").resolveDetailed("X"), { state: "unconfigured" });
+  assert.deepEqual(sourceWith(() => "\n400").resolveDetailed("X"), { state: "unconfigured" });
+  assert.deepEqual(sourceWith(() => "\n200", () => "").resolveDetailed("X"), { state: "unconfigured" });
+});
+
+test("PANT-932: resolveDetailed() returns the value on success", () => {
+  assert.deepEqual(sourceWith(() => "\n200", () => "VALUE=sk-ant-x\n").resolveDetailed("X"), { state: "resolved", value: "sk-ant-x" });
+});
+
+test("PANT-1003: a delete failure other than ENOENT is logged, never the value; ENOENT stays quiet", () => {
+  const warnings: string[] = [];
+  let code = "EPERM";
+  const source = new PantheonSecretCredentialSource({
+    pantheonApiUrl: BASE_URL,
+    sharedSecretsDir: SHARED_DIR,
+    generateId: () => "fixed-id",
+    exec: () => "\n200",
+    readFile: () => "VALUE=sk-ant-x\n",
+    deleteFile: () => {
+      throw Object.assign(new Error("delete failed"), { code });
+    },
+    warn: (m) => warnings.push(m),
+  });
+
+  assert.deepEqual(source.resolveDetailed("X"), { state: "resolved", value: "sk-ant-x" });
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /\/fake-shared\/fixed-id\.secret/);
+  assert.doesNotMatch(warnings[0], /sk-ant-x/);
+
+  code = "ENOENT";
+  source.resolveDetailed("X");
+  assert.equal(warnings.length, 1);
+});

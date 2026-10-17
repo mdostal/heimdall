@@ -1,3 +1,9 @@
+---
+title: DEC-hdl-local-build-verification
+parent: Decision Records
+nav_order: 1
+---
+
 # DEC-hdl-local-build-verification
 
 **Status:** Accepted (2026-08-12)

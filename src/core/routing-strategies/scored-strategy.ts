@@ -12,7 +12,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { Lane } from "../lane-registry.js";
-import type { StateStore } from "../state-store.js";
+import { resolveDefaultDbPath, type StateStore } from "../state-store.js";
 import { assignExperimentArm } from "../routing/experiment-assigner.js";
 import { PolicyLoader, type CostPreference, type Policy } from "../routing/policy-loader.js";
 import { generateRationale } from "../routing/rationale-generator.js";
@@ -75,11 +75,37 @@ export class ScoredStrategy implements RoutingStrategy {
     return this.policy;
   }
 
+  // heimdall#96: the same file StateStore opens (resolveDefaultDbPath), so
+  // decisions and outcomes survive a restart and the CLI, MCP and dashboard
+  // processes all read one ledger. It used to fall back to ":memory:".
   private getLedger(): RouteLedger {
     if (!this.ledger) {
-      this.ledger = new RouteLedger(this.options.ledgerPath ?? process.env.HEIMDALL_DB_PATH ?? ":memory:");
+      this.ledger = new RouteLedger(this.options.ledgerPath ?? resolveDefaultDbPath());
     }
     return this.ledger;
+  }
+
+  /** Re-points the ledger at `path` (closing any open connection); composeService() uses it to share its StateStore's DB file. */
+  useLedgerPath(path: string): void {
+    this.closeLedger();
+    this.options.ledgerPath = path;
+  }
+
+  /** Re-points the routing policy at `path` (undefined = the default path); the next selectRoute() reloads it. */
+  usePolicyPath(path: string | undefined): void {
+    this.options.policyPath = path;
+    this.policy = null;
+  }
+
+  /** Closes the ledger connection; the next call reopens it lazily at the same path. */
+  closeLedger(): void {
+    this.ledger?.close();
+    this.ledger = null;
+  }
+
+  /** The lane a recorded decision routed to, or null for an unknown or no_route decision. */
+  getChosenLane(decisionId: string): string | null {
+    return this.getLedger().getDecision(decisionId)?.chosenLane ?? null;
   }
 
   /** hdl-ot-03: exposes the same ledger connection selectRoute() already writes to — GET /metrics reads through this, no second connection opened. */
@@ -92,7 +118,7 @@ export class ScoredStrategy implements RoutingStrategy {
     return this.getLedger().reportOutcome(input);
   }
 
-  selectRoute({ taskType, candidates, taskId, store }: RouteSelectionContext): RouteSelectionResult {
+  selectRoute({ taskType, candidates, taskId, store, excludedLanes = [] }: RouteSelectionContext): RouteSelectionResult {
     const policy = this.getPolicy();
     const now = this.options.now ?? (() => new Date());
     const generateDecisionId = this.options.generateDecisionId ?? randomUUID;
@@ -122,14 +148,21 @@ export class ScoredStrategy implements RoutingStrategy {
       ) ?? null;
     const chosenLane = chosenScore ? (lanesById.get(chosenScore.lane_id) ?? null) : null;
 
-    const rationale = chosenScore
-      ? generateRationale(chosenScore, ranked)
-      : `No candidate lane meets the headroom floor (${policy.headroom_floor}); no route chosen.`;
+    // heimdall#123: a withheld lane never reaches `ranked`, so without this
+    // the rationale would read as if it had simply not been registered.
+    const withheldText = excludedLanes.length > 0 ? ` Withheld by policy excluded_lanes: ${excludedLanes.join(", ")}.` : "";
+    const rationale =
+      (chosenScore
+        ? generateRationale(chosenScore, ranked)
+        : `No candidate lane meets the headroom floor (${policy.headroom_floor}); no route chosen.`) + withheldText;
 
     try {
       this.getLedger().recordDecision({
         decisionId,
-        requestSummary: { task_type: taskType },
+        requestSummary: {
+          task_type: taskType,
+          ...(excludedLanes.length > 0 ? { constraints: { excluded_lanes: [...excludedLanes] } } : {}),
+        },
         candidateScores: ranked,
         result: chosenScore ? "lane" : "no_route",
         chosenLane: chosenScore?.lane_id ?? null,
@@ -153,6 +186,7 @@ export class ScoredStrategy implements RoutingStrategy {
         experimentArm: experimentArm ?? undefined,
         rankedCandidates: ranked.map((candidate) => ({ laneId: candidate.lane_id, score: candidate.score })),
         policyVersion: policy.version,
+        excludedLanes,
       },
     };
   }

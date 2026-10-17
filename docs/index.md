@@ -1,79 +1,33 @@
-# Heimdall
+---
+title: Home
+nav_order: 1
+---
 
-**The health-aware lane gateway and router for [Pantheon](https://github.com/mdostal/pantheon-v2).**
+# Heimdall Docs
 
-Heimdall watches every LLM/runtime *lane* — a `provider × account × runtime` triple — reports whether each one is **up, down, out of credit, or degraded**, routes tasks to the best healthy one via a pluggable strategy (including a scored, A/B-testable strategy with outcome feedback), and actuates on that signal by disabling or re-enabling a lane's mapped Multica agents.
+**Heimdall** is the health-aware lane gateway and router for [Pantheon](https://github.com/mdostal/pantheon-v2). It watches every LLM/runtime *lane*, reports whether each one is `up`, `down`, `out_of_credit`, or `degraded`, and routes tasks to the best healthy lane via a pluggable strategy.
 
-## What & Why
+## Quick links
 
-Agent fleets stall for boring reasons: one account hits its weekly cap while others sit idle, or a runtime silently breaks and keeps accepting work it can't finish. Heimdall exists as its own service so that this sensing-and-actuation loop lives in **one** place with **one** contract.
+| Where to start | What you need |
+|---|---|
+| [Getting Started](getting-started.md) | Install, configure, and run Heimdall |
+| [Configuration Reference](configuration.md) | Every env var and config key |
+| [Lane Management](lane-management.md) | Declare lanes, health states, overrides |
+| [Routing Strategies](routing.md) | Pluggable strategies, A/B testing |
+| [API Reference](api-reference.md) | HTTP, MCP, and CLI surfaces |
+| [Operations Guide](operations.md) | Production, logging, metrics, autopilot |
+| [Troubleshooting](troubleshooting.md) | Common failures, diagnostics |
 
-## Role in Pantheon
+## Background reading
 
-Heimdall is one god in **Pantheon**, the host of your agent ecosystem. It reads and actuates the orchestration substrate — **Multica** — and schedules its own health probes as **Multica autopilots**.
+- [Architecture](architecture.md) — component diagram and internal flow
+- [Vision](vision.md) — trajectory and roadmap
+- [Role & Actuation](heimdall-role-and-actuation.md) — exactly what Heimdall controls
+- [Decision records](decisions/) — ADRs for key design choices
 
-Sibling gods: **Auriga** (router/orchestrator, consumes `GET /available-route`/`POST /route`), **Vesta** (config), **Portunus** (secrets — future). Heimdall keeps its own local metrics (`GET /metrics`); **Argus** is one optional OTEL consumer of them, not the source of truth.
+## What is a lane?
 
-## Architecture
+A *lane* is a `provider × account × runtime` triple — `claude@mathew.dostal`, `codex`, `gemini-2-pro`, `openrouter/grok`, `ollama-local` — each backed by its own long-lived credential. Heimdall's job is to know which lanes are healthy and to act on that knowledge.
 
-```mermaid
-flowchart TB
-    subgraph Pantheon
-        Auriga["Auriga (router / orchestrator)"]
-        Vesta["Vesta (config)"]
-        Portunus["Portunus (secrets — future)"]
-        Argus["Argus (OTEL observability)"]
-    end
-
-    subgraph Heimdall["Heimdall service (:4870)"]
-        direction TB
-        Reg["Lane Registry\n(env-declared lanes)"]
-        Sched["Schedulers\nMulticaAutopilot (coarse cron)"]
-        Pipe["Lane Pipeline\n(per-lane sense loop)"]
-        Model["status-model\n(4-state resolve +\ncorroboration)"]
-        Store["State Store\n(node:sqlite)"]
-        Ctrl["ControlAdapter\nMulticaControlAdapter"]
-        API["Query surfaces\nHTTP · CLI · MCP"]
-    end
-
-    Multica["Multica REST API\n(agents / runtimes)"]
-
-    Vesta -. config .-> Reg
-    Sched --> Pipe
-    Pipe --> Model
-    Model --> Store
-    Store --> API
-    Store --> Ctrl
-    Ctrl -->|max_concurrent_tasks 0/N| Multica
-```
-
-See the full [Architecture & Internal Flow](architecture.md) for more details.
-
-## Quickstart
-
-Requires **Node.js >= 22.5.0**.
-
-```bash
-git clone https://github.com/mdostal/heimdall.git
-cd heimdall
-npm install
-cp .env.example .env        # declare lanes + fill in tokens (never commit .env)
-npm run dev                 # full composed service on http://localhost:4870
-```
-
-## Support & OSS
-
-Heimdall is open-source (MIT). We welcome contributions!
-
-- **Vision:** [vision.md](vision.md)
-- **Contribute:** See [CONTRIBUTING.md](../CONTRIBUTING.md)
-
-### Support this project
-
-Heimdall is free and built in the open by [Mathew Dostal](https://github.com/mdostal). If it's useful to you, here's how to help out:
-
-- **Use it** — run Heimdall, open issues, send PRs.
-- **Hire me to consult** — multi-agent orchestration, LLM infra, or anything adjacent: [mathew.dostal@gmail.com](mailto:mathew.dostal@gmail.com).
-- **Work with me** — open to collaborating on Pantheon or related projects, same email.
-- **Buy a coffee** — if you just like the tools or the content, that's appreciated too: [Buy Me a Coffee](https://www.buymeacoffee.com/mdostal).
-- **Sponsor** — [GitHub Sponsors](https://github.com/sponsors/mdostal).
+Heimdall runs as a headless Node.js service on **`http://localhost:4870`** (override with `PORT`). Sibling gods: **Auriga** (router/orchestrator, consumes `GET /available-route` / `POST /route`), **Vesta** (config), **Portunus** (secrets — future).

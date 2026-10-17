@@ -1,3 +1,9 @@
+---
+title: Token Rotation Setup
+parent: Operations Guide
+nav_order: 1
+---
+
 # Token Rotation Setup
 
 This document describes the operational procedure to initialize the multi-account token registry for Heimdall.

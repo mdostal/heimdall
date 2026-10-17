@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import type { Lane, LaneRegistry } from "./lane-registry.js";
 import type { StateStore } from "./state-store.js";
 import { createRoutingStrategyRegistry, DEFAULT_ROUTING_STRATEGY_NAME } from "./routing-strategies/registry.js";
@@ -5,6 +6,7 @@ import { ScoredStrategy } from "./routing-strategies/scored-strategy.js";
 import { resolveEffectiveModel } from "./model-catalog.js";
 import { TASK_TYPES, type TaskType, parseTaskType } from "./task-type.js";
 import type { JsonValue } from "./routing/route-ledger.js";
+import { DEFAULT_POLICY_PATH, PolicyLoader } from "./routing/policy-loader.js";
 
 export { TASK_TYPES, type TaskType, parseTaskType };
 
@@ -29,6 +31,9 @@ export interface AvailableRoute {
   experiment_arm?: string;
   ranked_candidates?: ReadonlyArray<{ laneId: string; score: number }>;
   policy_version?: string;
+  /** heimdall#123 — lanes the policy's excluded_lanes withheld from this
+   * decision; present only when at least one was withheld. */
+  excluded_lanes?: readonly string[];
 }
 
 // hdl-rs-02: one module-level registry, created once for the process
@@ -54,11 +59,39 @@ export function getActiveRoutingStrategyName(store: StateStore): string {
   return stored && routingStrategies[stored] ? stored : DEFAULT_ROUTING_STRATEGY_NAME;
 }
 
+// heimdall#123: the policy file is also where lane exclusions live, and they
+// apply under every strategy, not only "scored". Held here rather than read
+// through a ScoredStrategy so priority/round-robin routing needs no scored
+// instance. Cached after the first good load, like ScoredStrategy's own
+// policy; useRoutePolicyPath() resets it.
+let routePolicyPath: string | undefined;
+let cachedExcludedLanes: ReadonlySet<string> | null = null;
+
+// No policy file means no exclusions were configured, so routing proceeds
+// exactly as before this existed (priority/round-robin never needed the
+// file). A file that exists but doesn't validate throws
+// PolicyValidationError: the operator's exclusions can't be read, so every
+// strategy fails closed (503) instead of possibly routing to an excluded
+// lane.
+function getExcludedLanes(): ReadonlySet<string> {
+  if (cachedExcludedLanes) return cachedExcludedLanes;
+  const path = routePolicyPath ?? DEFAULT_POLICY_PATH;
+  if (!existsSync(path)) return new Set();
+  cachedExcludedLanes = new Set(PolicyLoader.load(path).excluded_lanes);
+  return cachedExcludedLanes;
+}
+
+interface RoutingCandidates {
+  candidates: Lane[];
+  /** Lanes that passed every other filter but are in the policy's excluded_lanes. */
+  excludedLanes: string[];
+}
+
 // hdl-rr-03: shared candidacy filtering — used by both getAvailableRoute
 // (active-strategy-driven) and getScoredRoute (always-scored, bypasses the
 // active-strategy setting). One definition of "which lanes are even
 // eligible to be routed to" for every routing surface.
-function getRoutingCandidates(registry: LaneRegistry, store: StateStore): Lane[] {
+function getRoutingCandidates(registry: LaneRegistry, store: StateStore): RoutingCandidates {
   for (const lane of registry.list()) {
     store.upsertLane({
       lane_id: lane.lane_id,
@@ -68,7 +101,7 @@ function getRoutingCandidates(registry: LaneRegistry, store: StateStore): Lane[]
   }
 
   const statuses = new Map(store.getAllCurrentStatuses().map((status) => [status.lane_id, status]));
-  return registry
+  const eligible = registry
     .list()
     .filter((lane) => lane.credential !== null)
     .filter((lane) => {
@@ -82,6 +115,15 @@ function getRoutingCandidates(registry: LaneRegistry, store: StateStore): Lane[]
       if (override === "enabled") return true;
       return statuses.get(lane.lane_id)?.status === "up";
     });
+
+  // heimdall#123: applied last, so it wins over a manual "enabled" override
+  // too — an excluded lane is never a candidate, and a decision with no
+  // other candidate is "no route", never a fallback to the excluded lane.
+  const excluded = getExcludedLanes();
+  return {
+    candidates: eligible.filter((lane) => !excluded.has(lane.lane_id)),
+    excludedLanes: eligible.filter((lane) => excluded.has(lane.lane_id)).map((lane) => lane.lane_id),
+  };
 }
 
 export function getAvailableRoute(
@@ -89,10 +131,10 @@ export function getAvailableRoute(
   registry: LaneRegistry,
   store: StateStore,
 ): AvailableRoute | null {
-  const candidates = getRoutingCandidates(registry, store);
+  const { candidates, excludedLanes } = getRoutingCandidates(registry, store);
 
   const strategy = routingStrategies[getActiveRoutingStrategyName(store)];
-  const { lane, detail } = strategy.selectRoute({ taskType, candidates, store });
+  const { lane, detail } = strategy.selectRoute({ taskType, candidates, store, excludedLanes });
   if (!lane) return null;
 
   const { model, substituted } = resolveEffectiveModel(store, lane.provider, lane.model);
@@ -121,6 +163,7 @@ export function getAvailableRoute(
     ...(detail?.experimentArm !== undefined ? { experiment_arm: detail.experimentArm } : {}),
     ...(detail?.rankedCandidates !== undefined ? { ranked_candidates: detail.rankedCandidates } : {}),
     ...(detail?.policyVersion !== undefined ? { policy_version: detail.policyVersion } : {}),
+    ...(excludedLanes.length > 0 ? { excluded_lanes: excludedLanes } : {}),
   };
 }
 
@@ -141,6 +184,8 @@ export interface RouteResult {
   rationale: string;
   experiment_arm: string | null;
   policy_version: string | null;
+  /** heimdall#123 — lanes withheld by the policy's excluded_lanes ([] when none). */
+  excluded_lanes: readonly string[];
 }
 
 // hdl-rr-03: one module-level ScoredStrategy instance — mirrors
@@ -153,6 +198,47 @@ const scoredStrategyForRouteEndpoint = new ScoredStrategy();
 /** hdl-ot-03: reuses the exact same module-level ledger connection getScoredRoute() writes to — GET /metrics reads through this, no second connection opened. */
 export function getRoutingDecisionCounts(): ReturnType<ScoredStrategy["getDecisionCounts"]> {
   return scoredStrategyForRouteEndpoint.getDecisionCounts();
+}
+
+// heimdall#96: the routing strategies that write decisions to a ledger.
+// Both go through one path so every routing surface in a process shares the
+// file composeService() binds.
+const ledgerBackedStrategies: ScoredStrategy[] = [
+  scoredStrategyForRouteEndpoint,
+  ...Object.values(routingStrategies).filter((strategy): strategy is ScoredStrategy => strategy instanceof ScoredStrategy),
+];
+
+/** Points every ledger-backed strategy at `path` — composeService() passes its StateStore's DB path. */
+export function useRouteLedgerPath(path: string): void {
+  for (const strategy of ledgerBackedStrategies) strategy.useLedgerPath(path);
+}
+
+/** Points every scored strategy, and the excluded_lanes filter, at the routing policy in `path` (undefined = the default path). Tests use it to simulate a missing policy (heimdall#95). */
+export function useRoutePolicyPath(path: string | undefined): void {
+  routePolicyPath = path;
+  cachedExcludedLanes = null;
+  for (const strategy of ledgerBackedStrategies) strategy.usePolicyPath(path);
+}
+
+export function closeRouteLedgers(): void {
+  for (const strategy of ledgerBackedStrategies) strategy.closeLedger();
+}
+
+export interface RouteOutcomeEvent {
+  decisionId: string;
+  laneId: string;
+  outcome: string | null;
+  metadata: Record<string, JsonValue> | null;
+}
+
+export type RouteOutcomeListener = (event: RouteOutcomeEvent) => void;
+
+const routeOutcomeListeners = new Set<RouteOutcomeListener>();
+
+/** heimdall#96: composeService() listens here to feed outcomes to lane status. Returns an unsubscribe function. */
+export function onRouteOutcome(listener: RouteOutcomeListener): () => void {
+  routeOutcomeListeners.add(listener);
+  return () => routeOutcomeListeners.delete(listener);
 }
 
 export interface RouteOutcomeInput {
@@ -175,16 +261,37 @@ export function reportRouteOutcome(input: RouteOutcomeInput): ReportRouteOutcome
     actualCost: input.actualCost ?? null,
     metadata: input.metadata ?? null,
   });
-  return recorded ? { ok: true } : { ok: false, error: "unknown_decision" };
+  if (!recorded) return { ok: false, error: "unknown_decision" };
+
+  const laneId = routeOutcomeListeners.size > 0 ? scoredStrategyForRouteEndpoint.getChosenLane(input.decisionId) : null;
+  if (laneId) {
+    const event: RouteOutcomeEvent = {
+      decisionId: input.decisionId,
+      laneId,
+      outcome: input.outcome ?? null,
+      metadata: input.metadata ?? null,
+    };
+    for (const listener of routeOutcomeListeners) {
+      try {
+        listener(event);
+      } catch (error) {
+        // The outcome is already in the ledger; a listener failure must not
+        // turn a recorded outcome into an error response.
+        console.error(`reportRouteOutcome: outcome listener failed for decision ${input.decisionId}`, error);
+      }
+    }
+  }
+  return { ok: true };
 }
 
 export function getScoredRoute(request: RouteRequest, registry: LaneRegistry, store: StateStore): RouteResult {
-  const candidates = getRoutingCandidates(registry, store);
+  const { candidates, excludedLanes } = getRoutingCandidates(registry, store);
   const { lane, detail } = scoredStrategyForRouteEndpoint.selectRoute({
     taskType: request.task_type,
     candidates,
     store,
     taskId: request.task_id,
+    excludedLanes,
   });
 
   return {
@@ -194,5 +301,6 @@ export function getScoredRoute(request: RouteRequest, registry: LaneRegistry, st
     rationale: detail?.rationale ?? "",
     experiment_arm: detail?.experimentArm ?? null,
     policy_version: detail?.policyVersion ?? null,
+    excluded_lanes: excludedLanes,
   };
 }

@@ -1,3 +1,8 @@
+---
+title: Vision
+nav_order: 11
+---
+
 # Heimdall — Vision
 
 Heimdall is the **health-aware lane gateway and router** for [Pantheon](https://github.com/mdostal/pantheon-v2).
@@ -153,11 +158,11 @@ error handling for the curl-to-bash path.
   Portunus now has a real path: `PantheonSecretCredentialSource` (opt-in via
   `HEIMDALL_CREDENTIAL_SOURCE=pantheon`) calls Pantheon Core's own secrets
   facade, never Portunus directly. `DEC-hdl-portunus-deferral.md`'s
-  prerequisite is fully met; the real shared-volume wiring between
-  Portunus's container and wherever this credential source runs is the
-  remaining, separately-tracked follow-up (`pantheon-v2`'s
-  `pantheon-secret-resolution-facade` epic, story C) — not assumed complete
-  by this class existing alone.
+  prerequisite is fully met, and the shared `pantheon-secrets` volume is
+  wired between Portunus, core-api and Heimdall in `pantheon-v2`'s
+  `docker-compose.yml` (808b8c0, activated in pantheon-v2#196). Live-verified
+  on hive 2026-10-11 (PANT-1001): every lane, including the two separate
+  Claude accounts, reads `credential_state: "resolved"`.
 
 ---
 
@@ -199,18 +204,21 @@ outcome feedback.
   continuously proving that routing decisions honor per-lane correctness and
   latency guarantees.
 - **Per-account long-lived tokens via Portunus** — the prerequisite that makes
-  cross-account sharing real. Minting and storing them harness-side is blocking
-  for cross-account routing and is tracked as a dependency, not owned here.
+  cross-account sharing real. Delivery is done: each lane's `credential_ref`
+  is a Portunus tag filter (e.g. `provider=anthropic,project=ffevents`),
+  resolved through core-api's `/api/secrets/inject` into the shared
+  `pantheon-secrets` volume. Live on hive since pantheon-v2#196, verified
+  2026-10-11 (PANT-1001). Minting new account tokens and storing them in
+  Portunus stays harness-side, not owned here.
 - **Two distribution modes, always.** Like every Pantheon god, Heimdall is
   open-source and ships **standalone** — now a real installable desktop app
   (`app/`), carrying its own dashboard/docs UI, usable from any harness that
   can spin up multiple agents — *and* as a **Pantheon plugin** (config through
   Vesta/Multica). Same core, two front doors — the descriptor is registered,
   the standalone side is real and dogfoodable, and plugin-side credential
-  resolution has a real path now (`PantheonSecretCredentialSource`,
-  `DEC-hdl-portunus-deferral.md`); the remaining blocker is the real
-  shared-volume wiring between Portunus's container and wherever this
-  credential source runs, tracked in `pantheon-v2`.
+  resolution is live (`PantheonSecretCredentialSource` over the shared
+  `pantheon-secrets` volume, `DEC-hdl-portunus-deferral.md`), per account,
+  on hive.
 
 Platform-wide, this rides Pantheon's core principle: **everything is swappable.**
 Any language, model, plugin, or god can be toggled on/off and compared on metrics

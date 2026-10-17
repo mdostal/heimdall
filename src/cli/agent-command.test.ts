@@ -180,6 +180,18 @@ function tmpDir(label: string): string {
   return dir;
 }
 
+// Every runAgentInitCommand call installs skills, so tests that only care
+// about harness registration still pass a throwaway home — otherwise the
+// skill install falls through to the operator's real ~/.claude/skills.
+function withTmpHome(fn: (homedir: string) => void): void {
+  const homedir = tmpDir("home");
+  try {
+    fn(homedir);
+  } finally {
+    fs.rmSync(homedir, { recursive: true, force: true });
+  }
+}
+
 function writeSourceSkills(sourceDir: string, content: (name: string) => string = (name) => `# ${name}\nreal content v1\n`): void {
   for (const name of SKILL_NAMES) {
     const dir = path.join(sourceDir, name);
@@ -374,7 +386,7 @@ test("runAgentInitCommand registers each installed harness and is silent about t
   const logs: string[] = [];
   console.log = (msg: string) => logs.push(msg);
   try {
-    runAgentInitCommand([], runner);
+    withTmpHome((homedir) => runAgentInitCommand([], runner, homedir));
   } finally {
     console.log = originalLog;
   }
@@ -398,7 +410,7 @@ test("runAgentInitCommand run twice is idempotent: second run issues no `mcp add
   const originalLog = console.log;
   console.log = () => {};
   try {
-    runAgentInitCommand([], firstRunner);
+    withTmpHome((homedir) => runAgentInitCommand([], firstRunner, homedir));
   } finally {
     console.log = originalLog;
   }
@@ -413,7 +425,7 @@ test("runAgentInitCommand run twice is idempotent: second run issues no `mcp add
 
   console.log = () => {};
   try {
-    runAgentInitCommand([], secondRunner);
+    withTmpHome((homedir) => runAgentInitCommand([], secondRunner, homedir));
   } finally {
     console.log = originalLog;
   }
@@ -431,7 +443,7 @@ test("runAgentInitCommand respects repeatable --harness to narrow scope", () => 
   const originalLog = console.log;
   console.log = () => {};
   try {
-    runAgentInitCommand(["--harness", "claude"], runner);
+    withTmpHome((homedir) => runAgentInitCommand(["--harness", "claude"], runner, homedir));
   } finally {
     console.log = originalLog;
   }

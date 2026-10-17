@@ -1,3 +1,9 @@
+---
+title: DEC-hdl-429-corroboration
+parent: Decision Records
+nav_order: 1
+---
+
 # DEC-hdl-429-corroboration
 
 **Status:** Superseded by [`DEC-hdl-reason-aware-recovery.md`](DEC-hdl-reason-aware-recovery.md) (2026-08-12) — narrowly scoped to Claude 429 handling in isolation; the operator's follow-up feedback reframed this as one instance of a general "status is not the only lever, use reason + reset_at everywhere" gap. Kept for the provenance/CBA analysis below, which the broader doc builds on rather than repeats.

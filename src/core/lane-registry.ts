@@ -8,9 +8,18 @@
 // what REQ-07 requires: report down/unconfigured, don't crash, don't
 // silently drop the lane.
 
-import type { CredentialSource } from "./credential-source.js";
+import { resolveCredential, type CredentialSource } from "./credential-source.js";
 
 export type LaneCostTier = "low" | "medium" | "high";
+
+/**
+ * PANT-932 (heimdall#116): why a lane does or doesn't hold a credential.
+ * `unconfigured` = no credential registered under credential_ref (final
+ * until the operator adds one). `credential_unavailable` = the credential
+ * source couldn't be reached (transient, e.g. core-api still booting after a
+ * host reboot) — the registry keeps retrying these, see retryCredential().
+ */
+export type CredentialState = "resolved" | "unconfigured" | "credential_unavailable";
 
 export interface LaneDeclaration {
   lane_id: string;
@@ -30,7 +39,16 @@ export interface Lane extends LaneDeclaration {
   cost_tier: LaneCostTier;
   /** Resolved secret, or null when the credential_ref didn't resolve (REQ-07: down/unconfigured). */
   credential: string | null;
+  credential_state: CredentialState;
+  /** Last credential_unavailable detail (never the secret), null otherwise. */
+  credential_detail: string | null;
 }
+
+/** Re-resolution backoff for credential_unavailable lanes: 1s, 2s, 4s ... capped at 30s,
+ * and never given up on — a reboot can leave core-api down far longer than any fixed
+ * deadline (heimdall#116: 34 minutes between host boot and Colima start). */
+export const CREDENTIAL_RETRY_BASE_MS = 1_000;
+export const CREDENTIAL_RETRY_MAX_MS = 30_000;
 
 const DEFAULT_HEADROOM = 10000;
 const DEFAULT_COST_TIER: LaneCostTier = "medium";
@@ -93,17 +111,35 @@ export function loadLaneDeclarations(
   return declarations;
 }
 
+export interface LaneRegistryOptions {
+  /** Injected clock (epoch ms) for the credential retry backoff. Defaults to Date.now. */
+  nowMs?: () => number;
+}
+
 export class LaneRegistry {
   private readonly lanes: Lane[];
+  private readonly nowMs: () => number;
+  private readonly retryState = new Map<string, { attempts: number; nextAttemptAtMs: number }>();
 
-  constructor(declarations: LaneDeclaration[], credentialSource: CredentialSource) {
-    this.lanes = declarations.map((decl) => ({
-      ...decl,
-      model: decl.model ?? decl.provider,
-      headroom: decl.headroom ?? DEFAULT_HEADROOM,
-      cost_tier: decl.cost_tier ?? DEFAULT_COST_TIER,
-      credential: credentialSource.resolve(decl.credential_ref),
-    }));
+  constructor(
+    declarations: LaneDeclaration[],
+    private readonly credentialSource: CredentialSource,
+    options: LaneRegistryOptions = {},
+  ) {
+    this.nowMs = options.nowMs ?? Date.now;
+    this.lanes = declarations.map((decl) => {
+      const lane: Lane = {
+        ...decl,
+        model: decl.model ?? decl.provider,
+        headroom: decl.headroom ?? DEFAULT_HEADROOM,
+        cost_tier: decl.cost_tier ?? DEFAULT_COST_TIER,
+        credential: null,
+        credential_state: "unconfigured",
+        credential_detail: null,
+      };
+      this.applyResolution(lane);
+      return lane;
+    });
   }
 
   list(): Lane[] {
@@ -112,5 +148,52 @@ export class LaneRegistry {
 
   get(laneId: string): Lane | null {
     return this.lanes.find((lane) => lane.lane_id === laneId) ?? null;
+  }
+
+  /**
+   * PANT-932: re-resolve a credential_unavailable lane's credential, updating
+   * the Lane object IN PLACE (schedulers, pipelines and rotation views hold
+   * references to it). Throttled by an exponential backoff per lane, so a
+   * probe tick every few seconds doesn't turn into a blocking curl every few
+   * seconds. No-op for resolved and unconfigured lanes. Returns true when the
+   * lane now holds a credential.
+   */
+  retryCredential(laneId: string): boolean {
+    const lane = this.get(laneId);
+    if (!lane) return false;
+    if (lane.credential_state !== "credential_unavailable") return lane.credential !== null;
+    const retry = this.retryState.get(laneId);
+    if (retry && this.nowMs() < retry.nextAttemptAtMs) return false;
+    if (this.applyResolution(lane) === "resolved") {
+      console.log(`[lane-registry] credential for lane ${lane.lane_id} resolved after credential source recovered.`);
+    }
+    return lane.credential !== null;
+  }
+
+  private applyResolution(lane: Lane): CredentialState {
+    const resolution = resolveCredential(this.credentialSource, lane.credential_ref);
+    switch (resolution.state) {
+      case "resolved":
+        lane.credential = resolution.value;
+        lane.credential_state = "resolved";
+        lane.credential_detail = null;
+        this.retryState.delete(lane.lane_id);
+        return lane.credential_state;
+      case "unconfigured":
+        lane.credential = null;
+        lane.credential_state = "unconfigured";
+        lane.credential_detail = null;
+        this.retryState.delete(lane.lane_id);
+        return lane.credential_state;
+      case "unavailable": {
+        lane.credential = null;
+        lane.credential_state = "credential_unavailable";
+        lane.credential_detail = resolution.detail;
+        const attempts = (this.retryState.get(lane.lane_id)?.attempts ?? 0) + 1;
+        const delayMs = Math.min(CREDENTIAL_RETRY_MAX_MS, CREDENTIAL_RETRY_BASE_MS * 2 ** (attempts - 1));
+        this.retryState.set(lane.lane_id, { attempts, nextAttemptAtMs: this.nowMs() + delayMs });
+        return lane.credential_state;
+      }
+    }
   }
 }

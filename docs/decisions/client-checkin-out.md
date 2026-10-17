@@ -1,3 +1,9 @@
+---
+title: client-checkin-out
+parent: Decision Records
+nav_order: 1
+---
+
 # Decision: Client Check-ins - Out of Hive
 
 **Path:** client-checkin

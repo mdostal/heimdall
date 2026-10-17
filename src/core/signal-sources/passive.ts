@@ -7,6 +7,8 @@
 // are responsible for normalizing a raw provider response/error into
 // ResponseLike before calling observePassiveSignal.
 
+import type { ErrorCode } from "../status-model.js";
+
 export interface ResponseLike {
   ok: boolean;
   statusCode?: number;
@@ -15,6 +17,11 @@ export interface ResponseLike {
   /** An absolute ISO-8601 reset timestamp, if the response exposed one. */
   resetAt?: string | null;
   message?: string;
+  /** A verdict the caller already classified (e.g. a reported route outcome
+   * run through error-parser). When set it wins over the errorType /
+   * statusCode heuristics below, which only see a thin normalized shape. */
+  classifiedStatus?: PassiveSignalValue;
+  errorCode?: ErrorCode | null;
 }
 
 export type PassiveSignalValue = "up" | "degraded" | "down" | "out_of_credit";
@@ -23,6 +30,7 @@ export interface PassiveSignal {
   status: PassiveSignalValue;
   reset_at: string | null;
   reason: string | null;
+  error_code?: ErrorCode | null;
 }
 
 /**
@@ -32,6 +40,15 @@ export interface PassiveSignal {
  */
 export function observePassiveSignal(response: ResponseLike | null): PassiveSignal | null {
   if (!response) return null;
+
+  if (response.classifiedStatus) {
+    return {
+      status: response.classifiedStatus,
+      reset_at: response.resetAt ?? null,
+      reason: response.message ?? null,
+      error_code: response.errorCode ?? null,
+    };
+  }
 
   if (response.errorType === "billing_error") {
     return {

@@ -22,7 +22,7 @@
 // subcommand actually validates the token vs. which one merely inspects it.
 
 import { NodeCommandRunner, type CommandRunner } from "../../scheduler/command-runner.js";
-import { parseClaudeCapSignal } from "../../error-parser.js";
+import { parseClaudeCapSignal, type ClaudeCapSignal } from "../../error-parser.js";
 import type { ErrorCode } from "../../status-model.js";
 
 export type ProbeStatusValue = "up" | "down" | "out_of_credit" | "degraded";
@@ -71,6 +71,12 @@ export async function probeClaudeLane(
 // probe-frequency tuning for subscription lanes specifically.
 const SUBSCRIPTION_PROBE_PROMPT = "reply with the single word OK";
 
+// A weekly cap or a 5-hour session limit leaves the lane unusable until its
+// reset time, so both read as out_of_credit rather than a transient 429.
+function isQuotaCap(signal: ClaudeCapSignal | null): signal is ClaudeCapSignal {
+  return signal?.kind === "weekly_limit" || signal?.kind === "session_limit";
+}
+
 // execFile (via CommandRunner) rejects on a non-zero exit code — the CLI's
 // own exit code IS the liveness signal here; no stdout parsing needed for
 // either outcome.
@@ -83,15 +89,47 @@ export async function probeClaudeSubscriptionLane(
       env: { CLAUDE_CODE_OAUTH_TOKEN: credential },
     });
   } catch (err) {
+    // A non-zero exit from the Claude CLI can mean two different things:
+    // - Real auth failure (invalid/expired token) → auth_failed, down
+    // - Weekly or 5-hour session cap hit → quota_exceeded, out_of_credit
+    // parseClaudeCapSignal inspects the error message and distinguishes them.
+    // PANT-1156: `claude -p` prints its error -- the session-limit text
+    // included -- to STDOUT, and execFile's err.message is only
+    // "Command failed: claude -p ...". Confirmed live against the real CLI
+    // (2.1.301): stdout "Failed to authenticate. API Error: 401 ...", stderr
+    // empty. Reading err.message alone filed every session limit as
+    // auth_failed, so the CLI's own output is what gets classified.
+    const output = cliOutput(err);
+    const capSignal = parseClaudeCapSignal(new Error(output));
+    if (isQuotaCap(capSignal)) {
+      return {
+        status: "out_of_credit",
+        reset_at: capSignal.reset_at,
+        reason: capSignal.reason,
+        error_code: "quota_exceeded",
+      };
+    }
     return {
       status: "down",
       reset_at: null,
-      reason: `claude CLI auth check failed: ${err instanceof Error ? err.message : String(err)}`,
+      reason: `claude CLI auth check failed: ${output}`,
       error_code: "auth_failed",
     };
   }
 
   return { status: "up", reset_at: null, reason: null, error_code: null };
+}
+
+// The CLI's own words from a failed run: stdout and stderr (where execFile
+// puts them on its error), then err.message as a fallback for a spawn
+// failure such as ENOENT or a timeout kill, which has no CLI output.
+function cliOutput(err: unknown): string {
+  const streams = [(err as { stdout?: unknown })?.stdout, (err as { stderr?: unknown })?.stderr]
+    .filter((s): s is string => typeof s === "string")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (streams.length > 0) return streams.join(" ");
+  return err instanceof Error ? err.message : String(err);
 }
 
 async function probeClaudeApiKeyLane(
@@ -164,7 +202,7 @@ async function interpretRateLimitResponse(response: Response): Promise<ProbeResu
   }
 
   const signal = parseClaudeCapSignal({ status: response.status, headers: response.headers, body });
-  const status: ProbeStatusValue = signal?.kind === "weekly_limit" ? "out_of_credit" : "degraded";
+  const status: ProbeStatusValue = isQuotaCap(signal) ? "out_of_credit" : "degraded";
   // The specific Anthropic header first (proven-correct, already shipped
   // behavior); parseClaudeCapSignal's own reset_at (retry-after-based, per
   // research) as a fallback when that specific header is absent.
@@ -174,6 +212,6 @@ async function interpretRateLimitResponse(response: Response): Promise<ProbeResu
     status,
     reset_at: resetAt,
     reason: signal?.reason ?? "rate limited (429)",
-    error_code: signal?.kind === "weekly_limit" ? "quota_exceeded" : "rate_limit",
+    error_code: isQuotaCap(signal) ? "quota_exceeded" : "rate_limit",
   };
 }
