@@ -118,7 +118,7 @@ export class ScoredStrategy implements RoutingStrategy {
     return this.getLedger().reportOutcome(input);
   }
 
-  selectRoute({ taskType, candidates, taskId, store }: RouteSelectionContext): RouteSelectionResult {
+  selectRoute({ taskType, candidates, taskId, store, excludedLanes = [] }: RouteSelectionContext): RouteSelectionResult {
     const policy = this.getPolicy();
     const now = this.options.now ?? (() => new Date());
     const generateDecisionId = this.options.generateDecisionId ?? randomUUID;
@@ -148,14 +148,21 @@ export class ScoredStrategy implements RoutingStrategy {
       ) ?? null;
     const chosenLane = chosenScore ? (lanesById.get(chosenScore.lane_id) ?? null) : null;
 
-    const rationale = chosenScore
-      ? generateRationale(chosenScore, ranked)
-      : `No candidate lane meets the headroom floor (${policy.headroom_floor}); no route chosen.`;
+    // heimdall#123: a withheld lane never reaches `ranked`, so without this
+    // the rationale would read as if it had simply not been registered.
+    const withheldText = excludedLanes.length > 0 ? ` Withheld by policy excluded_lanes: ${excludedLanes.join(", ")}.` : "";
+    const rationale =
+      (chosenScore
+        ? generateRationale(chosenScore, ranked)
+        : `No candidate lane meets the headroom floor (${policy.headroom_floor}); no route chosen.`) + withheldText;
 
     try {
       this.getLedger().recordDecision({
         decisionId,
-        requestSummary: { task_type: taskType },
+        requestSummary: {
+          task_type: taskType,
+          ...(excludedLanes.length > 0 ? { constraints: { excluded_lanes: [...excludedLanes] } } : {}),
+        },
         candidateScores: ranked,
         result: chosenScore ? "lane" : "no_route",
         chosenLane: chosenScore?.lane_id ?? null,
@@ -179,6 +186,7 @@ export class ScoredStrategy implements RoutingStrategy {
         experimentArm: experimentArm ?? undefined,
         rankedCandidates: ranked.map((candidate) => ({ laneId: candidate.lane_id, score: candidate.score })),
         policyVersion: policy.version,
+        excludedLanes,
       },
     };
   }

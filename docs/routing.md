@@ -65,6 +65,36 @@ curl http://localhost:4870/routing-policy
 
 By default, only `up` lanes are candidates. When no `up` lanes exist, `degraded` lanes are used as fallback.
 
+### Excluding a lane
+
+`task_type_weights` are keyed by provider family, so two lanes of the same
+provider (for example two Claude accounts) always score the same. To keep a
+lane out of routing entirely, list its id under `excluded_lanes` in
+`config/routing-policy.yaml`:
+
+```yaml
+excluded_lanes:
+  - claude@mathew.dostal
+```
+
+- The exclusion is applied to the candidate list before any strategy runs:
+  `priority`, `round-robin` and `scored` all see the lane as absent. It wins
+  over a manual `enabled` override.
+- If the only healthy lane is excluded, the answer is "no route"
+  (`chosen_lane: null`, or `404 no_available_route`). Heimdall never falls back
+  to the excluded lane.
+- Withheld lanes are reported, so an operator can tell "withheld" apart from
+  "outscored". `POST /route` returns `excluded_lanes` (always a list), and
+  `GET /available-route` includes it when it's non-empty. The scored rationale
+  ends with `Withheld by policy excluded_lanes: <ids>.`, and the ledger row
+  records them in `request_summary.constraints.excluded_lanes`.
+- The field is optional. When the policy file is missing, nothing is excluded
+  and `priority`/`round-robin` route as before. When the file exists but fails
+  validation, every strategy answers `503 routing_policy_unavailable` rather
+  than routing without the exclusions.
+- The list is read once per process, like the rest of the policy, so restart
+  Heimdall after you change it.
+
 ## Requesting a route
 
 ```bash

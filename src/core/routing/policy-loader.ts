@@ -60,6 +60,8 @@ export interface Policy {
   headroom_floor: number;
   cost_preference: CostPreference;
   experiments: PolicyExperiments;
+  /** heimdall#123: lane ids that must never be routed to, under any strategy. Optional in the file; [] when absent. */
+  excluded_lanes: string[];
 }
 
 export class PolicyLoader {
@@ -102,6 +104,7 @@ function validatePolicy(value: unknown): Policy {
     headroom_floor: requireNonNegativeNumber(policy, "headroom_floor"),
     cost_preference: validateCostPreference(requireString(policy, "cost_preference")),
     experiments: validateExperiments(requireRecord(policy.experiments, "experiments")),
+    excluded_lanes: validateExcludedLanes(policy.excluded_lanes),
   };
 }
 
@@ -122,6 +125,23 @@ function validateTaskTypeWeights(value: Record<string, unknown>): Policy["task_t
   }
 
   return weights;
+}
+
+// heimdall#123: optional so every existing policy file stays valid. Lane
+// ids are not checked against the registry here -- the policy is loaded
+// without one, and an id for a lane this deployment doesn't declare simply
+// never matches a candidate.
+function validateExcludedLanes(value: unknown): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new PolicyValidationError(`Invalid field "excluded_lanes": expected list of lane ids`);
+  }
+  return value.map((laneId, index) => {
+    if (typeof laneId !== "string" || laneId.trim() === "") {
+      throw new PolicyValidationError(`Invalid field "excluded_lanes.${index}": expected non-empty lane id`);
+    }
+    return laneId;
+  });
 }
 
 function validateCostPreference(value: string): CostPreference {

@@ -8,7 +8,12 @@ import {
   reportRouteOutcome,
   ROUTING_STRATEGY_SETTING_KEY,
   useRouteLedgerPath,
+  useRoutePolicyPath,
 } from "./route-selector.js";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { DEFAULT_POLICY_PATH, PolicyValidationError } from "./routing/policy-loader.js";
 import { LaneRegistry, type LaneDeclaration } from "./lane-registry.js";
 import { StateStore } from "./state-store.js";
 import type { LaneStatusValue } from "./status-model.js";
@@ -250,4 +255,111 @@ test("route-selector: getScoredRoute with no candidates chooses nothing", () => 
 
 test("route-selector: reportRouteOutcome rejects an unknown decision id", () => {
   assert.deepEqual(reportRouteOutcome({ decisionId: "does-not-exist" }), { ok: false, error: "unknown_decision" });
+});
+
+// --- heimdall#123: policy excluded_lanes ----------------------------------------
+
+// The repo policy plus an excluded_lanes list. Two lanes of one provider
+// family score identically (weights are per family), so only the exclusion
+// can tell them apart.
+const EXCLUDED = "claude@mathew.dostal";
+const ALLOWED = "claude@ffevents";
+
+function withExcludedPolicy(fn: () => void, extra = `excluded_lanes:\n  - ${EXCLUDED}\n`): void {
+  const path = join(mkdtempSync(join(tmpdir(), "heimdall-excluded-policy-")), "routing-policy.yaml");
+  writeFileSync(path, readFileSync(DEFAULT_POLICY_PATH, "utf8") + extra, "utf8");
+  useRoutePolicyPath(path);
+  try {
+    fn();
+  } finally {
+    useRoutePolicyPath(undefined);
+    rmSync(dirname(path), { recursive: true, force: true });
+  }
+}
+
+// Repo policy headroom_floor is 1000; DEFAULT_HEADROOM clears it.
+function claudeLanes(allowedHeadroom?: number): LaneRegistry {
+  return registryOf([
+    { ...decl(ALLOWED, "claude"), ...(allowedHeadroom !== undefined ? { headroom: allowedHeadroom } : {}) },
+    // priority 0 would win the priority strategy outright if it were a candidate.
+    { ...decl(EXCLUDED, "claude"), priority: 0 },
+  ]);
+}
+
+test("heimdall#123: getScoredRoute never chooses or ranks an excluded lane of the same provider family, and reports it withheld", () => {
+  withExcludedPolicy(() =>
+    withStore((store) => {
+      setStatus(store, ALLOWED, "up");
+      setStatus(store, EXCLUDED, "up");
+
+      const result = getScoredRoute({ task_id: "excluded-1", task_type: "build" }, claudeLanes(), store);
+      assert.equal(result.chosen_lane, ALLOWED);
+      assert.deepEqual(result.ranked_candidates.map((c) => c.laneId), [ALLOWED]);
+      assert.deepEqual(result.excluded_lanes, [EXCLUDED]);
+      assert.match(result.rationale, new RegExp(`Withheld by policy excluded_lanes: ${EXCLUDED.replace(".", "\\.")}\\.$`));
+    }),
+  );
+});
+
+test("heimdall#123: when the allowed lane is below headroom_floor, getScoredRoute answers no route instead of falling back to the excluded lane", () => {
+  withExcludedPolicy(() =>
+    withStore((store) => {
+      setStatus(store, ALLOWED, "up");
+      setStatus(store, EXCLUDED, "up");
+
+      const result = getScoredRoute({ task_id: "excluded-2", task_type: "build" }, claudeLanes(500), store);
+      assert.equal(result.chosen_lane, null);
+      assert.deepEqual(result.excluded_lanes, [EXCLUDED]);
+      assert.match(result.rationale, /^No candidate lane meets the headroom floor \(1000\); no route chosen\. Withheld by policy/);
+    }),
+  );
+});
+
+test("heimdall#123: every strategy behind getAvailableRoute skips an excluded lane, even one forced enabled", () => {
+  withExcludedPolicy(() => {
+    for (const strategy of ["priority", "round-robin", "scored"]) {
+      withStore((store) => {
+        useStrategy(store, strategy);
+        setStatus(store, ALLOWED, "up");
+        setStatus(store, EXCLUDED, "up");
+        store.setManualOverride(EXCLUDED, "enabled");
+
+        for (let call = 0; call < 3; call++) {
+          const route = getAvailableRoute("build", claudeLanes(), store);
+          assert.equal(route?.lane_id, ALLOWED, `${strategy} call ${call}`);
+          assert.deepEqual(route?.excluded_lanes, [EXCLUDED], strategy);
+        }
+
+        // Only the excluded lane is left healthy: no route, not a fallback.
+        setStatus(store, ALLOWED, "down");
+        assert.equal(getAvailableRoute("build", claudeLanes(), store), null, strategy);
+      });
+    }
+  });
+});
+
+test("heimdall#123: a policy file that fails validation blocks routing under every strategy instead of ignoring the exclusions", () => {
+  withExcludedPolicy(() => {
+    withStore((store) => {
+      setStatus(store, ALLOWED, "up");
+      assert.throws(() => getAvailableRoute("build", claudeLanes(), store), PolicyValidationError);
+    });
+  }, `excluded_lanes: ${EXCLUDED}\n`);
+});
+
+test("heimdall#123: with no policy file at all, the non-scored strategies route exactly as before", () => {
+  const missing = join(mkdtempSync(join(tmpdir(), "heimdall-no-policy-")), "routing-policy.yaml");
+  useRoutePolicyPath(missing);
+  try {
+    withStore((store) => {
+      setStatus(store, ALLOWED, "up");
+      setStatus(store, EXCLUDED, "up");
+      const route = getAvailableRoute("build", claudeLanes(), store);
+      assert.equal(route?.lane_id, EXCLUDED);
+      assert.equal(route?.excluded_lanes, undefined);
+    });
+  } finally {
+    useRoutePolicyPath(undefined);
+    rmSync(dirname(missing), { recursive: true, force: true });
+  }
 });
