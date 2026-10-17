@@ -93,7 +93,14 @@ export async function probeClaudeSubscriptionLane(
     // - Real auth failure (invalid/expired token) → auth_failed, down
     // - Weekly or 5-hour session cap hit → quota_exceeded, out_of_credit
     // parseClaudeCapSignal inspects the error message and distinguishes them.
-    const capSignal = parseClaudeCapSignal(err);
+    // PANT-1156: `claude -p` prints its error -- the session-limit text
+    // included -- to STDOUT, and execFile's err.message is only
+    // "Command failed: claude -p ...". Confirmed live against the real CLI
+    // (2.1.301): stdout "Failed to authenticate. API Error: 401 ...", stderr
+    // empty. Reading err.message alone filed every session limit as
+    // auth_failed, so the CLI's own output is what gets classified.
+    const output = cliOutput(err);
+    const capSignal = parseClaudeCapSignal(new Error(output));
     if (isQuotaCap(capSignal)) {
       return {
         status: "out_of_credit",
@@ -105,12 +112,24 @@ export async function probeClaudeSubscriptionLane(
     return {
       status: "down",
       reset_at: null,
-      reason: `claude CLI auth check failed: ${err instanceof Error ? err.message : String(err)}`,
+      reason: `claude CLI auth check failed: ${output}`,
       error_code: "auth_failed",
     };
   }
 
   return { status: "up", reset_at: null, reason: null, error_code: null };
+}
+
+// The CLI's own words from a failed run: stdout and stderr (where execFile
+// puts them on its error), then err.message as a fallback for a spawn
+// failure such as ENOENT or a timeout kill, which has no CLI output.
+function cliOutput(err: unknown): string {
+  const streams = [(err as { stdout?: unknown })?.stdout, (err as { stderr?: unknown })?.stderr]
+    .filter((s): s is string => typeof s === "string")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (streams.length > 0) return streams.join(" ");
+  return err instanceof Error ? err.message : String(err);
 }
 
 async function probeClaudeApiKeyLane(
