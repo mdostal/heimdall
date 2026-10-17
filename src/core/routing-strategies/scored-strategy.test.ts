@@ -13,6 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { ScoredStrategy } from "./scored-strategy.js";
 import { StateStore } from "../state-store.js";
+import { RouteLedger } from "../routing/route-ledger.js";
 import type { Lane, LaneCostTier } from "../lane-registry.js";
 import type { TaskType } from "../route-selector.js";
 
@@ -142,5 +143,36 @@ experiments:
   } finally {
     store.close();
     fs.rmSync(policyPath, { force: true });
+  }
+});
+
+test("heimdall#123: lanes withheld upstream by excluded_lanes are named in the rationale, the result detail and the ledger row", () => {
+  const ledgerPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "heimdall-scored-excluded-")), "ledger.db");
+  const strategy = new ScoredStrategy({ ledgerPath, generateDecisionId: () => "dec-excluded" });
+  const store = new StateStore(":memory:");
+  try {
+    const result = strategy.selectRoute({
+      taskType: "build",
+      candidates: [lane("claude@ffevents", "claude", 500)],
+      store,
+      excludedLanes: ["claude@mathew.dostal"],
+    });
+    assert.equal(result.lane, null);
+    assert.deepEqual(result.detail?.excludedLanes, ["claude@mathew.dostal"]);
+    assert.match(result.detail?.rationale ?? "", /no route chosen\. Withheld by policy excluded_lanes: claude@mathew\.dostal\.$/);
+    strategy.closeLedger();
+
+    const ledger = new RouteLedger(ledgerPath);
+    try {
+      const decision = ledger.getDecision("dec-excluded");
+      assert.equal(decision?.result, "no_route");
+      assert.deepEqual(decision?.requestSummary, { task_type: "build", constraints: { excluded_lanes: ["claude@mathew.dostal"] } });
+      assert.deepEqual(decision?.candidateScores.map((c) => c.lane_id), ["claude@ffevents"]);
+    } finally {
+      ledger.close();
+    }
+  } finally {
+    store.close();
+    fs.rmSync(path.dirname(ledgerPath), { recursive: true, force: true });
   }
 });
