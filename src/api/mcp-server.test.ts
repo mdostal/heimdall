@@ -195,6 +195,7 @@ test("hdl-mcp-02: callLaneOverrideTool returns setLaneOverride's result wrapped 
       lane_id: "claude@mathew.dostal",
       manual_override: "disabled",
       override_reason: null,
+      override_until: null,
     });
   } finally {
     store.close();

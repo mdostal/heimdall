@@ -1215,6 +1215,7 @@ test("hdl-mcp-01: setLaneOverride is independently callable without an HTTP serv
       lane_id: "claude@mathew.dostal",
       manual_override: "disabled",
       override_reason: null,
+      override_until: null,
     });
     assert.equal(store.getManualOverride("claude@mathew.dostal"), "disabled");
   } finally {
@@ -2232,7 +2233,7 @@ test("hdl-override-reason: GET / (dashboard) renders a reason input next to the 
     assert.match(body, /override-reason-input/, "must render a reason input the operator can type into before overriding");
     assert.match(
       body,
-      /body: JSON\.stringify\(\{ state: state, reason: reason \}\)/,
+      /body: JSON\.stringify\(\{ state: state, reason: reason, until: until \}\)/,
       "the click handler must send the reason input's current value alongside state",
     );
     assert.match(body, /override-reason-note/, "must render the persisted reason as a distinct, scoped element (not the shared .reason class also used for status text and the routing-policy panel)");
@@ -3614,4 +3615,34 @@ test("heimdall#95: a synchronous throw in a route returns a JSON 500 and the ser
     server.close();
     store.close();
   }
+});
+
+test("time-boxed override API validates deadlines and exposes effective policy", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore();
+  const server = createHttpServer(registry, store);
+  await new Promise<void>(resolve => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  const url = `http://localhost:${port}`;
+  const post = (body: object) => fetch(url + "/lanes/claude@mathew.dostal/override", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  try {
+    for (const until of ["garbage", 123, "2020-01-01T00:00:00Z", "2099-01-01T00:00:00"]) {
+      assert.equal((await post({ state: "enabled", until })).status, 400);
+    }
+    const until = new Date(Date.now() + 60000).toISOString();
+    assert.equal((await post({ state: "enabled", until })).status, 200);
+    let lane = (await (await fetch(url + "/lanes")).json())[0];
+    assert.equal(lane.override_until, until);
+    assert.equal(lane.effective_enabled, true);
+    store.expireOverrides(new Date(Date.now() + 120000));
+    lane = (await (await fetch(url + "/lanes")).json())[0];
+    assert.equal(lane.manual_override, null);
+    assert.equal(lane.override_until, null);
+    assert.equal(lane.effective_enabled, false);
+    const html = await (await fetch(url + "/")).text();
+    assert.match(html, /override-until-input/);
+    assert.match(html, /Reverts to Auto at/);
+  } finally { server.close(); store.close(); }
 });

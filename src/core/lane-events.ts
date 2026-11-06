@@ -18,7 +18,7 @@ import type { ErrorCode, LaneStatusValue } from "./status-model.js";
 export const LANE_STATUS_CHANGED = "lane.status_changed";
 
 /** What changed: the sensed status itself, or an operator's manual lever. */
-export type LaneStatusChangeCause = "status" | "manual_override" | "manual_reset_at";
+export type LaneStatusChangeCause = "status" | "manual_override" | "manual_reset_at" | "override_expired";
 
 export interface LaneStatusChangedEvent {
   lane_id: string;
