@@ -6,7 +6,7 @@ nav_order: 3
 # Configuration Reference
 {: .no_toc }
 
-All configuration is via environment variables loaded from `.env` at startup. No config files are parsed; no flags are required beyond what the env provides.
+Startup configuration is supplied through environment variables (optionally loaded from `.env`). API-created lanes are also loaded from the state DB.
 
 <details open markdown="block">
   <summary>Table of contents</summary>
@@ -29,6 +29,23 @@ Lanes are declared as **contiguous numbered triples** starting at 1. Loading sto
 | `HEIMDALL_LANE_<N>_COST_TIER` | No | `low` \| `medium` \| `high`. Used by the scored strategy. Default: `medium`. |
 | `HEIMDALL_LANE_<N>_PRIORITY` | No | Integer rank for the priority strategy. Lower = higher priority. Unset = treated as last. |
 | `HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS` | No | Comma-separated Multica agent IDs bound to this lane. Reported on `GET /lanes` for downstream actuators. |
+
+### Unbounded JSON declarations
+
+`HEIMDALL_LANES_JSON` accepts an array with `lane_id`, `provider`,
+`credential_ref`, and optional `model`, `priority`, `headroom`, `cost_tier`.
+It removes the need for a numbered compose slot per lane:
+
+```dotenv
+HEIMDALL_LANES_JSON='[{"lane_id":"sixth","provider":"gemini","model":"gemini-pro","credential_ref":"GEMINI_TOKEN"}]'
+```
+
+JSON declarations override numbered env declarations with the same ID (the last
+JSON occurrence wins). Both override persisted API declarations with the same ID.
+Malformed JSON or invalid JSON lane fields fail startup with a configuration error.
+API declarations and tokens are stored in SQLite and loaded after a restart; keep
+`HEIMDALL_DB_PATH` on persistent storage. See [Lane Management](lane-management.md).
+The `HEIMDALL_API_LANE_` credential-ref prefix is reserved for API credentials.
 
 ### Example
 
@@ -117,7 +134,7 @@ The `codex` CLI must be on `PATH` (`npm install -g @openai/codex`).
 
 ## Credential security
 
-- Credentials are stored in `.env` on disk, never returned by any Heimdall API.
+- Env lanes resolve credentials through the configured credential backend. API-created lane tokens are stored in the state DB, never returned by any Heimdall API. Restrict access to the DB and its backups.
 - The `credential_ref` indirection means lane IDs (logged, reported) never contain the secret itself.
 - `HEIMDALL_TOKEN_REGISTRY_PATH` is chmod 600 by `scripts/setup-token-registry.sh`.
 - Never commit `.env` — it is in `.gitignore`.

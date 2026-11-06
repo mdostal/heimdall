@@ -1395,8 +1395,9 @@ test("hdl-mcp-01: setLaneResetAt rejects a past timestamp with {ok: false, error
 test("hdl-mcp-01: addLane is independently callable without an HTTP server — unchanged response shape (restart_required, restart_command, no automatic restart)", () => {
   const registry = registryWithOneConfiguredLane();
   const envPath = tmpEnvPath();
+  const addStore = new StateStore(":memory:");
   try {
-    const result = addLane(registry, envPath, {
+    const result = addLane(registry, addStore, {
       lane_id: "gemini@ops",
       provider: "gemini",
       model: "gemini-3-pro",
@@ -1405,11 +1406,12 @@ test("hdl-mcp-01: addLane is independently callable without an HTTP server — u
     assert.deepEqual(result, {
       ok: true,
       lane_id: "gemini@ops",
-      credential_ref: "GEMINI_OPS_TOKEN",
+      credential_ref: "HEIMDALL_API_LANE_67656d696e69406f7073",
       restart_required: true,
       restart_command: "npm run dev",
     });
   } finally {
+    addStore.close();
     fs.rmSync(envPath, { force: true });
   }
 });
@@ -1417,10 +1419,12 @@ test("hdl-mcp-01: addLane is independently callable without an HTTP server — u
 test("hdl-mcp-01: addLane returns {ok: false, error: 'missing_field', field} naming the missing field", () => {
   const registry = registryWithOneConfiguredLane();
   const envPath = tmpEnvPath();
+  const addStore = new StateStore(":memory:");
   try {
-    const result = addLane(registry, envPath, { lane_id: "gemini@ops", provider: "gemini", model: "gemini-3-pro" });
+    const result = addLane(registry, addStore, { lane_id: "gemini@ops", provider: "gemini", model: "gemini-3-pro" });
     assert.deepEqual(result, { ok: false, error: "missing_field", field: "token" });
   } finally {
+    addStore.close();
     fs.rmSync(envPath, { force: true });
   }
 });
@@ -1428,8 +1432,9 @@ test("hdl-mcp-01: addLane returns {ok: false, error: 'missing_field', field} nam
 test("hdl-mcp-01: addLane returns {ok: false, error: 'lane_already_declared', ...} for a lane already in the registry", () => {
   const registry = registryWithOneConfiguredLane();
   const envPath = tmpEnvPath();
+  const addStore = new StateStore(":memory:");
   try {
-    const result = addLane(registry, envPath, {
+    const result = addLane(registry, addStore, {
       lane_id: "claude@mathew.dostal",
       provider: "claude",
       model: "claude-sonnet",
@@ -1437,11 +1442,12 @@ test("hdl-mcp-01: addLane returns {ok: false, error: 'lane_already_declared', ..
     });
     assert.deepEqual(result, { ok: false, error: "lane_already_declared", lane_id: "claude@mathew.dostal" });
   } finally {
+    addStore.close();
     fs.rmSync(envPath, { force: true });
   }
 });
 
-test("hdl-lm-01: POST /lanes creates a lane, writes .env, and responds with restart_required", async () => {
+test("hdl-lm-01: POST /lanes creates a lane in SQLite, and responds with restart_required", async () => {
   const registry = registryWithOneConfiguredLane();
   const store = new StateStore(":memory:");
   const envPath = tmpEnvPath();
@@ -1458,17 +1464,13 @@ test("hdl-lm-01: POST /lanes creates a lane, writes .env, and responds with rest
     assert.equal(res.status, 201);
     const body = await res.json();
     assert.equal(body.lane_id, "gemini@ops");
-    assert.equal(body.credential_ref, "GEMINI_OPS_TOKEN");
+    assert.equal(body.credential_ref, "HEIMDALL_API_LANE_67656d696e69406f7073");
     assert.equal(body.restart_required, true);
     assert.equal(body.restart_command, "npm run dev");
 
-    // envPath starts empty in this test (independent of the in-memory
-    // registry fixture, which is constructed programmatically, not from
-    // this file) — appendLane's index-continuation logic is covered
-    // separately and thoroughly in env-file.test.ts.
-    const envContent = fs.readFileSync(envPath, "utf8");
-    assert.match(envContent, /HEIMDALL_LANE_1_ID=gemini@ops/);
-    assert.match(envContent, /GEMINI_OPS_TOKEN=secret-value/);
+    assert.equal(fs.existsSync(envPath), false);
+    assert.equal(store.getLaneDeclarations()[0].token, "secret-value");
+
   } finally {
     server.close();
     store.close();

@@ -125,9 +125,9 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
   const port = options.port ?? Number(process.env.PORT ?? 4870);
   const env = options.env ?? process.env;
 
-  const registry = buildLaneRegistry(env);
   const dbPath = resolveDefaultDbPath(env);
   const store = new StateStore(dbPath);
+  const registry = buildLaneRegistry(env, store);
   // heimdall#96: routing decisions/outcomes live in the same DB file as lane
   // state, so they survive a restart and every process sees them.
   useRouteLedgerPath(dbPath);

@@ -5,7 +5,7 @@
 // See .pHive/epics/lane-health-status/stories/lhs-02-credential-loading-state-storage.yaml
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { EnvCredentialSource, type CredentialSource } from "../core/credential-source.js";
+import { EnvCredentialSource, resolveCredential, type CredentialSource } from "../core/credential-source.js";
 import { PantheonSecretCredentialSource } from "../core/pantheon-secret-credential-source.js";
 import { loadLaneDeclarations, LaneRegistry, type CredentialState, type LaneCostTier } from "../core/lane-registry.js";
 import {
@@ -43,7 +43,6 @@ import { DOC_ENTRIES, getDocBySlug, renderDocMarkdown, renderDocsIndexHtml, rend
 import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { appendLane, deriveCredentialRef, laneIdAlreadyDeclared } from "../core/env-file.js";
 import { refreshModelCatalog, getModelCatalog, setModelEnabled } from "../core/model-catalog.js";
 import { NoHealthyAccountsAvailableError, type RotationController } from "../core/rotation-controller.js";
 import { renderMetrics } from "./metrics.js";
@@ -362,7 +361,7 @@ export type AddLaneResult =
 
 export function addLane(
   registry: LaneRegistry,
-  envFilePath: string,
+  store: StateStore,
   input: AddLaneInput,
 ): AddLaneResult {
   const missing = (["lane_id", "provider", "model", "token"] as const).find(
@@ -373,18 +372,20 @@ export function addLane(
   }
   const laneId = input.lane_id as string;
 
-  if (registry.get(laneId) || laneIdAlreadyDeclared(envFilePath, laneId)) {
+  if (registry.get(laneId)) {
     return { ok: false, error: "lane_already_declared", lane_id: laneId };
   }
 
-  const credentialRef = deriveCredentialRef(laneId);
-  appendLane(envFilePath, {
+  const credentialRef = `HEIMDALL_API_LANE_${Buffer.from(laneId).toString("hex")}`;
+  const created = store.addLaneDeclaration({
     lane_id: laneId,
     provider: input.provider as string,
     model: input.model as string,
     credential_ref: credentialRef,
     token: input.token as string,
   });
+
+  if (!created) return { ok: false, error: "lane_already_declared", lane_id: laneId };
 
   return {
     ok: true,
@@ -620,8 +621,17 @@ function buildCredentialSource(env: NodeJS.ProcessEnv): CredentialSource {
   return new EnvCredentialSource(env);
 }
 
-export function buildLaneRegistry(env: NodeJS.ProcessEnv = process.env): LaneRegistry {
-  return new LaneRegistry(loadLaneDeclarations(env), buildCredentialSource(env));
+export function buildLaneRegistry(env: NodeJS.ProcessEnv = process.env, store?: StateStore): LaneRegistry {
+  // Explicit env declarations win over persisted API lanes with the same ID.
+  const declarations = loadLaneDeclarations(env);
+  const ids = new Set(declarations.map((lane) => lane.lane_id));
+  const persisted = (store?.getLaneDeclarations() ?? []).filter((lane) => !ids.has(lane.lane_id));
+  const source = buildCredentialSource(env);
+  const tokens = new Map(persisted.map((lane) => [lane.credential_ref, lane.token]));
+  return new LaneRegistry([...declarations, ...persisted.map(({ token: _token, ...lane }) => lane)], {
+    resolve: (ref) => tokens.get(ref) ?? source.resolve(ref),
+    resolveDetailed: (ref) => tokens.has(ref) ? { state: "resolved", value: tokens.get(ref)! } : resolveCredential(source, ref),
+  });
 }
 
 // hdl-rr-04: rotation status/action for one provider — never returns the
@@ -754,7 +764,7 @@ export function createHttpServer(
   registry: LaneRegistry,
   store: StateStore,
   refreshLane?: RefreshLaneFn,
-  envFilePath: string = DEFAULT_ENV_FILE_PATH,
+  _envFilePath: string = DEFAULT_ENV_FILE_PATH,
   fetchImpl?: typeof fetch,
   rotationControllers?: Map<string, RotationController>,
   // hdl-msh-02: which Multica agent(s) a lane maps to, surfaced on GET
@@ -938,17 +948,14 @@ export function createHttpServer(
       return;
     }
 
-    // hdl-lm-01: add a new lane — writes a HEIMDALL_LANE_<N>_* block to the
-    // local .env (see src/core/env-file.ts). Does NOT restart the process —
-    // loadLaneDeclarations() only runs at boot, so the new lane is inert
-    // until the operator restarts (see the response's restart_command).
+    // Persist before acknowledging; boot loads declarations from the shared state DB.
     if (req.method === "POST" && req.url === "/lanes") {
       handleJsonBody(req, res, (body) => {
         if (!body.ok) {
           writeBodyError(res, body);
           return;
         }
-        const result = addLane(registry, envFilePath, body.data as AddLaneInput);
+        const result = addLane(registry, store, body.data as AddLaneInput);
         if (!result.ok) {
           const status = result.error === "lane_already_declared" ? 409 : 400;
           const { ok: _ok, ...wire } = result;
@@ -1607,8 +1614,8 @@ const isMainModule =
   process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`;
 
 if (isMainModule) {
-  const registry = buildLaneRegistry();
   const store = new StateStore(resolveDefaultDbPath());
+  const registry = buildLaneRegistry(process.env, store);
   const port = Number(process.env.PORT ?? 4870);
   createHttpServer(registry, store).listen(port, () => {
     console.log(`heimdall dev server listening on http://localhost:${port}`);
