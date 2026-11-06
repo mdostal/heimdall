@@ -1165,6 +1165,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
           " " + escapeHtml(entry.model_id) +
           "</label>" +
           "<span class=\\"" + flagClass + "\\">" + flagText + "</span>" + createdAt +
+          "<button type=\\"button\\" data-use-model=\\"" + escapeHtml(entry.model_id) + "\\" data-use-provider=\\"" + escapeHtml(entry.provider) + "\\">Create route</button>" +
           "</li>";
       });
       html += "</ul></div>";
@@ -1205,6 +1206,16 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
 
   // Dedicated listener — this panel's own root, not the page-wide #root
   // delegation used for lane rows.
+  document.getElementById("model-catalog-root").addEventListener("click", function (event) {
+    var button = event.target.closest("button[data-use-model]");
+    if (!button) return;
+    var form = document.getElementById("add-lane-form");
+    form.provider.value = button.getAttribute("data-use-provider");
+    form.model.value = button.getAttribute("data-use-model");
+    form.scrollIntoView({ behavior: "smooth", block: "center" });
+    form.lane_id.focus();
+  });
+
   document.getElementById("model-catalog-root").addEventListener("change", function (event) {
     var checkbox = event.target.closest("input[type=\\"checkbox\\"][data-provider]");
     if (!checkbox) return;
@@ -1596,12 +1607,12 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
     saveBackoffAdvancedField("/backoff-policy/exponential-ceiling-ms", "backoff-ceiling-input", Number, "Exponential ceiling saved.");
   });
 
-  // Per-provider override — six known providers (claude, codex, gemini,
-  // kimi, openrouter, ollama), each independently GET/POST-able via
+  // Per-provider override — seven known providers (claude, codex, gemini,
+  // kimi, openrouter, grok, ollama), each independently GET/POST-able via
   // /backoff-policy/override/:provider (hdl-bp-05). "effective" is the
   // resolved override-or-global policy this provider's lanes actually use
   // right now, so the row never needs a second request to be meaningful.
-  var BACKOFF_OVERRIDE_PROVIDERS = ["claude", "codex", "gemini", "kimi", "openrouter", "ollama"];
+  var BACKOFF_OVERRIDE_PROVIDERS = ["claude", "codex", "gemini", "kimi", "openrouter", "grok", "ollama"];
 
   function renderBackoffProviderOverrides(rows) {
     var html = "<table><thead><tr><th>Provider</th><th>Effective</th><th>Override</th></tr></thead><tbody>";

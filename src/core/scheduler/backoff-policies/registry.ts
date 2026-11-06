@@ -40,13 +40,13 @@ export function getActiveBackoffPolicyName(store: StateStore): string {
 // hdl-bp-04: per-provider override — one flat settings key per known
 // provider (design-discussion.md §3 item 6: grill C1 caught an earlier draft
 // proposing a JSON-map row for this in the same breath as arguing every
-// settings row should stay scalar; six flat keys instead, consistent with
+// settings row should stay scalar; flat keys instead, consistent with
 // every other row in the table). Real provider identifiers, not guessed —
 // sourced from src/main.ts's PROVIDER_ADAPTERS / src/core/lane-pipeline.ts's
 // exported adapter factories (claudeAdapters/codexAdapters/geminiAdapters/
-// kimiAdapters/openrouterAdapters/ollamaAdapters), the actual set of
+// kimiAdapters/openrouterAdapters/grokAdapters/ollamaAdapters), the actual set of
 // providers a lane's `provider` field can be.
-export const KNOWN_BACKOFF_OVERRIDE_PROVIDERS = ["claude", "codex", "gemini", "kimi", "openrouter", "ollama"] as const;
+export const KNOWN_BACKOFF_OVERRIDE_PROVIDERS = ["claude", "codex", "gemini", "kimi", "openrouter", "grok", "ollama"] as const;
 
 export function backoffPolicyOverrideSettingKey(provider: string): string {
   return `backoff_policy_override_${provider}`;

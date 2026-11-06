@@ -140,3 +140,15 @@ test("hdl-bp-04: getBackoffPolicyConfig reflects stored multiplier/ceilingMs ove
   assert.deepEqual(getBackoffPolicyConfig(store, "exponential"), { multiplier: 3, ceilingMs: 60_000 });
   store.close();
 });
+
+test("OpenRouter and Grok support independent backoff policy overrides", async () => {
+  const { KNOWN_BACKOFF_OVERRIDE_PROVIDERS } = await import("./registry.js");
+  const store = new StateStore(":memory:");
+  try {
+    for (const provider of ["openrouter", "grok"] as const) {
+      assert.ok(KNOWN_BACKOFF_OVERRIDE_PROVIDERS.includes(provider));
+      store.setSetting(backoffPolicyOverrideSettingKey(provider), "exponential");
+      assert.equal(getBackoffPolicyNameForProvider(store, provider), "exponential");
+    }
+  } finally { store.close(); }
+});
