@@ -67,3 +67,12 @@ test("an empty entries array for any provider returns an empty set without throw
   assert.deepEqual(defaultEnabledModelIds("kimi", []), new Set());
   assert.deepEqual(defaultEnabledModelIds("codex", []), new Set());
 });
+
+test("Gemini below 3.0 stays disabled even when no newer generation is listed", () => {
+  assert.equal(defaultEnabledModelIds("gemini", [entry("gemini-2.5-pro", null)]).size, 0);
+  const enabled = defaultEnabledModelIds("openrouter", [
+    entry("google/gemini-2.5-pro", null), entry("google/gemini-3-pro", null),
+    entry("anthropic/claude-sonnet-4", null),
+  ]);
+  assert.deepEqual([...enabled], ["google/gemini-3-pro", "anthropic/claude-sonnet-4"]);
+});

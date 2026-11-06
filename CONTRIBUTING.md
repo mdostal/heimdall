@@ -18,3 +18,5 @@ Welcome to Heimdall! We appreciate your interest in contributing to the Pantheon
 - Run `npm install` and `npm run dev`.
 
 Please read `docs/vision.md` for a deeper dive into the project goals and where you can help out.
+
+For provider integrations, follow the [provider checklist](docs/adding-a-provider.md).

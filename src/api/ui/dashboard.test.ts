@@ -89,3 +89,57 @@ test("PANT-823: never-probed and stale lanes render a grey 'no signal' badge; fr
   assert.match(rowFor("claude@fresh"), /class="badge badge-down">down</);
   assert.doesNotMatch(rowFor("claude@never"), /badge-down/);
 });
+
+test("provider catalog Create route fills the Add lane form and submits the listed model", async () => {
+  for (const provider of ["openrouter", "grok"]) {
+    const written = new Map<string, string>();
+    const listeners = new Map<string, (event: any) => void>();
+    let focused = false;
+    const form = {
+      provider: { value: "" }, model: { value: "" },
+      lane_id: { value: provider + "@ops", focus: () => { focused = true; } },
+      token: { value: "secret" }, scrollIntoView() {}, reset() {},
+    };
+    const document = new Proxy({}, {
+      get(_t, prop) {
+        if (prop === "getElementById") return (id: string) => {
+          if (id === "add-lane-form") return new Proxy(form, {
+            get(target, key) {
+              if (key === "addEventListener") return (name: string, fn: (event: any) => void) => listeners.set(id + ":" + name, fn);
+              return target[key as keyof typeof target];
+            },
+          });
+          if (id === "model-catalog-root") return {
+            set innerHTML(value: string) { written.set(id, value); },
+            addEventListener: (name: string, fn: (event: any) => void) => listeners.set(id + ":" + name, fn),
+          };
+          return stub(written, id);
+        };
+        return stub(written, String(prop));
+      },
+    });
+    const model = provider === "openrouter" ? "anthropic/claude-sonnet-4" : "grok-code-fast-1";
+    let submitted: any;
+    const fetch = (url: string, init?: RequestInit) => {
+      if (url === "/models") return Promise.resolve({ json: async () => [{ provider, model_id: model, enabled: true }] });
+      if (url === "/lanes" && init?.method === "POST") {
+        submitted = JSON.parse(String(init.body));
+      }
+      return new Promise(() => {});
+    };
+    const context = vm.createContext({
+      document, fetch, console, setTimeout, clearTimeout, setInterval: () => 0, clearInterval() {},
+      window: stub(written, "window"), localStorage: stub(written, "localStorage"), navigator: stub(written, "navigator"),
+    });
+    for (const script of inlineScripts(renderDashboardHtml())) new vm.Script(script).runInContext(context);
+    for (let i = 0; i < 100 && !written.has("model-catalog-root"); i++) await new Promise(resolve => setImmediate(resolve));
+    assert.match(written.get("model-catalog-root") ?? "", /Create route/);
+    const button = { getAttribute: (key: string) => key === "data-use-provider" ? provider : model };
+    listeners.get("model-catalog-root:click")!({ target: { closest: () => button } });
+    assert.equal(form.provider.value, provider);
+    assert.equal(form.model.value, model);
+    assert.ok(focused);
+    listeners.get("add-lane-form:submit")!({ preventDefault() {}, target: form });
+    assert.deepEqual(submitted, { lane_id: provider + "@ops", provider, model, token: "secret" });
+  }
+});

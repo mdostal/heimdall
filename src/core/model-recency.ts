@@ -29,8 +29,8 @@ function topNByCreatedAt(entries: RawModelEntry[], n: number): Set<string> {
 // Gemini has no date field at all (research-brief.md, confirmed) — extract
 // the leading generation number from the id (e.g. "gemini-3-pro-preview"
 // -> 3, "gemini-2.5-pro" -> 2.5) and include every entry at the HIGHEST
-// generation found. An id that doesn't match this pattern at all defaults
-// to included (safe-open — never silently excluded on a parse miss).
+// generation found, with a minimum generation of 3.0. An id that does not
+// match this pattern at all defaults to included (safe-open — never silently excluded on a parse miss).
 const GEMINI_GENERATION_RE = /^gemini-(\d+(?:\.\d+)?)/;
 
 function geminiDefaults(entries: RawModelEntry[]): Set<string> {
@@ -45,8 +45,8 @@ function geminiDefaults(entries: RawModelEntry[]): Set<string> {
   const enabled = new Set<string>();
   for (const entry of parsed) {
     // Unparseable id (generation === null) -> safe-open, always included.
-    // Parseable id -> included only if it's at the max generation found.
-    if (entry.generation === null || entry.generation === maxGeneration) {
+    // Parseable id -> included only at the max generation and at least 3.0.
+    if (entry.generation === null || (entry.generation >= 3 && entry.generation === maxGeneration)) {
       enabled.add(entry.id);
     }
   }
@@ -72,8 +72,15 @@ export function defaultEnabledModelIds(provider: string, entries: RawModelEntry[
     return topNByCreatedAt(entries, RECENCY_WINDOW_SIZE);
   }
 
+  if (provider === "openrouter" || provider === "grok") {
+    return new Set(entries.filter((entry) => {
+      const match = entry.id.replace(/^google\//, "").match(GEMINI_GENERATION_RE);
+      return !match || Number(match[1]) >= 3;
+    }).map((entry) => entry.id));
+  }
+
   // An ungated/unrecognized provider reaching this function is not
-  // expected (model-catalog.ts only calls this for the four gated
-  // providers) — safe-open rather than silently returning an empty set.
+  // expected (model-catalog.ts only calls this for a registered
+  // provider) — safe-open rather than silently returning an empty set.
   return new Set(entries.map((entry) => entry.id));
 }

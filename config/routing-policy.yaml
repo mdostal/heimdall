@@ -5,16 +5,22 @@ task_type_weights:
     gemini: 80
     codex: 60
     kimi: 40
+    openrouter: 50
+    grok: 50
   build:
     codex: 100
     claude: 80
     gemini: 60
     kimi: 40
+    openrouter: 50
+    grok: 50
   review:
     claude: 100
     codex: 80
     gemini: 60
     kimi: 40
+    openrouter: 50
+    grok: 50
 headroom_floor: 1000
 cost_preference: balanced
 experiments:
