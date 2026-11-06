@@ -189,6 +189,8 @@ function handleJsonBody(
  */
 export interface LaneStatusWithOverride extends LaneStatus {
   manual_override: ManualOverride;
+  override_until: string | null;
+  effective_enabled: boolean;
   override_reason: string | null;
   credential_configured: boolean;
   /** PANT-932 — why credential_configured is what it is: `unconfigured` (no
@@ -227,10 +229,11 @@ const VALID_OVERRIDE_STATES = new Set(["enabled", "disabled", "auto"]);
 // an MCP tool's structured content) translate the same result its own way.
 
 export type SetOverrideResult =
-  | { ok: true; lane_id: string; manual_override: ManualOverride; override_reason: string | null }
+  | { ok: true; lane_id: string; manual_override: ManualOverride; override_reason: string | null; override_until: string | null }
   | { ok: false; error: "unknown_lane"; lane_id: string }
   | { ok: false; error: "invalid_override_state"; allowed_states: string[] }
-  | { ok: false; error: "invalid_reason"; message: string };
+  | { ok: false; error: "invalid_reason"; message: string }
+  | { ok: false; error: "invalid_until"; message: string };
 
 export function setLaneOverride(
   registry: LaneRegistry,
@@ -238,6 +241,7 @@ export function setLaneOverride(
   laneId: string,
   rawState: unknown,
   rawReason?: unknown,
+  rawUntil?: unknown,
 ): SetOverrideResult {
   if (!registry.get(laneId)) {
     return { ok: false, error: "unknown_lane", lane_id: laneId };
@@ -248,10 +252,15 @@ export function setLaneOverride(
   if (rawReason !== undefined && rawReason !== null && typeof rawReason !== "string") {
     return { ok: false, error: "invalid_reason", message: "reason must be a string or null" };
   }
+  if (rawUntil !== undefined && rawUntil !== null &&
+      (typeof rawUntil !== "string" || !/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(rawUntil) || !Number.isFinite(Date.parse(rawUntil)) || Date.parse(rawUntil) <= Date.now())) {
+    return { ok: false, error: "invalid_until", message: "until must be a future ISO-8601 timestamp with timezone" };
+  }
+  const until = typeof rawUntil === "string" ? new Date(rawUntil).toISOString() : null;
   const value: ManualOverride = rawState === "auto" ? null : (rawState as "enabled" | "disabled");
   const reason = typeof rawReason === "string" && rawReason.trim() !== "" ? rawReason : null;
-  store.setManualOverride(laneId, value, reason);
-  return { ok: true, lane_id: laneId, manual_override: value, override_reason: store.getOverrideReason(laneId) };
+  store.setManualOverride(laneId, value, reason, until);
+  return { ok: true, lane_id: laneId, manual_override: value, override_reason: store.getOverrideReason(laneId), override_until: store.getOverrideUntil(laneId) };
 }
 
 export type SetResetAtResult =
@@ -677,9 +686,12 @@ export function getLaneStatuses(
   }
   return store.getAllCurrentStatuses().map((status) => {
     const declared = registry.get(status.lane_id);
+    const override = store.getManualOverride(status.lane_id);
     return {
       ...status,
-      manual_override: store.getManualOverride(status.lane_id),
+      manual_override: override,
+      override_until: store.getOverrideUntil(status.lane_id),
+      effective_enabled: declared?.credential != null && (override === "enabled" || (override === null && status.status === "up")),
       override_reason: store.getOverrideReason(status.lane_id),
       credential_configured: declared?.credential != null,
       credential_state: declared?.credential_state ?? "unconfigured",
@@ -1430,8 +1442,8 @@ export function createHttpServer(
           writeBodyError(res, body);
           return;
         }
-        const { state, reason } = body.data as { state?: unknown; reason?: unknown };
-        const result = setLaneOverride(registry, store, laneId, state, reason);
+        const { state, reason, until } = body.data as { state?: unknown; reason?: unknown; until?: unknown };
+        const result = setLaneOverride(registry, store, laneId, state, reason, until);
         if (!result.ok) {
           const status = result.error === "unknown_lane" ? 404 : 400;
           const { ok: _ok, ...wire } = result;

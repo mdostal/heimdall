@@ -645,13 +645,17 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
     var reasonInput =
       "<input type=\\"text\\" class=\\"override-reason-input\\" placeholder=\\"reason (optional)\\" " +
       "data-lane=\\"" + laneAttr + "\\" value=\\"" + escapeHtml(lane.override_reason || "") + "\\">";
+    var untilInput =
+      "<label>Override until (optional) <input type=\\"datetime-local\\" class=\\"override-until-input\\" data-lane=\\"" + laneAttr + "\\"></label>";
+    var untilDisplay = lane.override_until
+      ? "<div class=\\"override-expiry\\">Reverts to Auto at " + escapeHtml(lane.override_until) + "</div>" : "";
     var reasonDisplay = lane.override_reason
       ? "<div class=\\"reason override-reason-note\\">\\u201c" + escapeHtml(lane.override_reason) + "\\u201d</div>"
       : "";
     return (
       "<span class=\\"override-controls\\">" +
       btn("enabled", "Enable") + btn("disabled", "Disable") + btn("auto", "Auto") +
-      "</span>" + reasonInput + reasonDisplay
+      "</span>" + reasonInput + reasonDisplay + untilInput + untilDisplay
     );
   }
 
@@ -940,11 +944,13 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       var state = overrideBtn.getAttribute("data-state");
       var reasonInputEl = document.querySelector('.override-reason-input[data-lane="' + CSS.escape(laneId) + '"]');
       var reason = reasonInputEl ? reasonInputEl.value : "";
+      var untilInputEl = document.querySelector('.override-until-input[data-lane="' + CSS.escape(laneId) + '"]');
+      var until = state !== "auto" && untilInputEl && untilInputEl.value ? new Date(untilInputEl.value).toISOString() : null;
       overrideBtn.disabled = true;
       fetch("/lanes/" + encodeURIComponent(laneId) + "/override", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ state: state, reason: reason })
+        body: JSON.stringify({ state: state, reason: reason, until: until })
       })
         .then(poll)
         .catch(function () { overrideBtn.disabled = false; });

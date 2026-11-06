@@ -140,6 +140,7 @@ export interface PruneHistoryResult {
 export class StateStore {
   private readonly db: DatabaseSync;
   private closed = false;
+  private overrideTimer?: ReturnType<typeof setTimeout>;
 
   /** PANT-827 — lane.status_changed, emitted by recordStatus/setManualOverride/setManualResetAt only on a real change. */
   readonly events = new LaneEvents();
@@ -175,6 +176,11 @@ export class StateStore {
       // Column already exists — expected on every fresh DB (added via
       // SCHEMA) and on any DB this migration already ran against.
     }
+    try {
+      this.db.exec(`ALTER TABLE lanes ADD COLUMN override_until TEXT`);
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes("duplicate column")) throw error;
+    }
     // hdl-lm-03: same defensive migration, second column (mirrors manual_override).
     try {
       this.db.exec(`ALTER TABLE lanes ADD COLUMN manual_reset_at TEXT`);
@@ -207,6 +213,32 @@ export class StateStore {
     } catch {
       // Column already exists — same reasoning as manual_override above.
     }
+    this.scheduleOverrideExpiry();
+  }
+
+  /** Check persisted deadlines on startup and while running, including writes by other processes. */
+  private scheduleOverrideExpiry(): void {
+    if (this.overrideTimer) clearTimeout(this.overrideTimer);
+    if (this.closed) return;
+    const row = this.db.prepare(`SELECT MIN(override_until) AS deadline FROM lanes WHERE manual_override IS NOT NULL`).get() as { deadline: string | null };
+    const delay = row.deadline ? Math.max(1, Math.min(1000, Date.parse(row.deadline) - Date.now())) : 1000;
+    this.overrideTimer = setTimeout(() => {
+      this.expireOverrides();
+      this.scheduleOverrideExpiry();
+    }, delay);
+    this.overrideTimer.unref();
+  }
+
+  expireOverrides(now: Date = new Date()): void {
+    const rows = this.db.prepare(`UPDATE lanes SET manual_override = NULL, override_reason = NULL, override_until = NULL
+      WHERE manual_override IS NOT NULL AND override_until <= ? RETURNING lane_id`).all(now.toISOString()) as { lane_id: string }[];
+    for (const row of rows) this.emitStatusChanged(row.lane_id, this.currentStatusValue(row.lane_id), "override_expired");
+  }
+
+  getOverrideUntil(laneId: string): string | null {
+    this.expireOverrides();
+    const row = this.db.prepare(`SELECT override_until FROM lanes WHERE lane_id = ?`).get(laneId) as { override_until: string | null } | undefined;
+    return row?.override_until ?? null;
   }
 
   get database(): DatabaseSync {
@@ -385,7 +417,8 @@ export class StateStore {
    * override is meaningless and would be stale leftover text the next time
    * the lane IS overridden.
    */
-  setManualOverride(laneId: string, value: ManualOverride, reason: string | null = null): void {
+  setManualOverride(laneId: string, value: ManualOverride, reason: string | null = null, until: string | null = null): void {
+    if (until !== null && !Number.isFinite(Date.parse(until))) throw new Error("Invalid override expiry");
     // Guard the row's existence regardless of call order (same pattern as
     // recordStatus) — a no-op via ON CONFLICT DO NOTHING when the lane was
     // already upserted, but never silently affects 0 rows if it wasn't.
@@ -398,14 +431,16 @@ export class StateStore {
     const previous = this.getManualOverride(laneId);
     const effectiveReason = value === null ? null : reason;
     this.db
-      .prepare(`UPDATE lanes SET manual_override = ?, override_reason = ? WHERE lane_id = ?`)
-      .run(value, effectiveReason, laneId);
+      .prepare(`UPDATE lanes SET manual_override = ?, override_reason = ?, override_until = ? WHERE lane_id = ?`)
+      .run(value, effectiveReason, value === null || until === null ? null : new Date(until).toISOString(), laneId);
+    this.scheduleOverrideExpiry();
     if (value !== previous) {
       this.emitStatusChanged(laneId, this.currentStatusValue(laneId), "manual_override");
     }
   }
 
   getManualOverride(laneId: string): ManualOverride {
+    this.expireOverrides();
     const row = this.db
       .prepare(`SELECT manual_override FROM lanes WHERE lane_id = ?`)
       .get(laneId) as unknown as { manual_override: ManualOverride } | undefined;
@@ -413,6 +448,7 @@ export class StateStore {
   }
 
   getOverrideReason(laneId: string): string | null {
+    this.expireOverrides();
     const row = this.db
       .prepare(`SELECT override_reason FROM lanes WHERE lane_id = ?`)
       .get(laneId) as unknown as { override_reason: string | null } | undefined;
@@ -661,6 +697,7 @@ export class StateStore {
     // Idempotent: graceful shutdown and stopAll() may both reach here.
     if (this.closed) return;
     this.closed = true;
+    if (this.overrideTimer) clearTimeout(this.overrideTimer);
     this.db.close();
   }
 }
