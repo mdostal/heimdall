@@ -11,7 +11,7 @@ import { mkdirSync } from "node:fs";
 import { homedir as osHomedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { LaneCostTier } from "./lane-registry.js";
+import type { LaneCostTier, LaneDeclaration } from "./lane-registry.js";
 import { LaneEvents, type LaneStatusChangeCause } from "./lane-events.js";
 import type { ErrorCode, LaneStatus, LaneStatusValue, SignalSource } from "./status-model.js";
 
@@ -40,6 +40,13 @@ export function resolveDefaultDbPath(
 }
 
 const SCHEMA = `
+CREATE TABLE IF NOT EXISTS api_lane_declarations (
+  lane_id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  credential_ref TEXT NOT NULL,
+  token TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS lanes (
   lane_id TEXT PRIMARY KEY,
   provider TEXT NOT NULL,
@@ -211,6 +218,19 @@ export class StateStore {
 
   get database(): DatabaseSync {
     return this.db;
+  }
+
+  /** API declarations and credentials are private state, never status response fields. */
+  addLaneDeclaration(lane: LaneDeclaration & { model: string; token: string }): boolean {
+    return this.db.prepare(`INSERT INTO api_lane_declarations
+      (lane_id, provider, model, credential_ref, token) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(lane_id) DO NOTHING`).run(
+        lane.lane_id, lane.provider, lane.model, lane.credential_ref, lane.token,
+      ).changes > 0;
+  }
+
+  getLaneDeclarations(): Array<LaneDeclaration & { token: string }> {
+    return this.db.prepare(`SELECT * FROM api_lane_declarations ORDER BY rowid`).all() as unknown as Array<LaneDeclaration & { token: string }>;
   }
 
   upsertLane(lane: LaneRow): void {

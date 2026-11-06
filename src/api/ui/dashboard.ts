@@ -9,8 +9,8 @@
 // hdl-lane-override: per-lane enable/disable/auto controls, routed through
 //   the same ControlAdapter.reconcile() decision automatic sensing uses
 //   (POST /lanes/:laneId/override) — never a separate mechanism.
-// hdl-lane-management: add a lane (POST /lanes, writes a local .env block,
-//   restart required — see src/core/env-file.ts), a token-configured
+// hdl-lane-management: add a lane (POST /lanes, persists in the state DB,
+//   restart required — see src/core/state-store.ts), a token-configured
 //   indicator (credential_configured, never the secret itself), and manual
 //   reset_at editing ("change the times" — POST /lanes/:laneId/reset-at,
 //   feeds the already-shipped reset_at-aware scheduler from
