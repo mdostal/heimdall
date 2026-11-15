@@ -1253,7 +1253,7 @@ test("PANT-185: pushLaneStatus records the status with signal_source='passive' a
   const store = new StateStore(":memory:");
   try {
     const result = pushLaneStatus(registry, store, "claude@mathew.dostal", "out_of_credit");
-    assert.deepEqual(result, { ok: true, lane_id: "claude@mathew.dostal", status: "out_of_credit", signal_source: "passive" });
+    assert.deepEqual(result, { ok: true, lane_id: "claude@mathew.dostal", status: "out_of_credit", signal_source: "passive", limit: null });
     const current = store.getCurrentStatus("claude@mathew.dostal");
     assert.equal(current?.status, "out_of_credit");
     assert.equal(current?.signal_source, "passive");
