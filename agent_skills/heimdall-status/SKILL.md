@@ -21,6 +21,13 @@ Gives you, per declared lane: `lane_id`, `provider`, `model`, `status`
 (`up`/`down`/`out_of_credit`/`degraded`), and whether it's been manually overridden
 (`manual_override`, `override_reason`). This alone answers "is anything down right now."
 
+Each lane also has `limits`: the account's separate limits Heimdall has observed (`five_hour`,
+`weekly_all_models`, `weekly_model:<model id>`, `credits`, `spend_cap`), each with `state`
+(`exhausted`/`available`/`unknown`), `used_percent` and `resets_at`. Report them: a lane can be
+`up` with one model's limit exhausted (e.g. `weekly_model:claude-fable-5-2` exhausted while Opus
+still works). `used_percent` or `resets_at` of `null` means the provider did not say. Report it
+as unknown and never estimate it.
+
 ## Step 2 — `heimdall.routingStrategy.get`
 
 No parameters.

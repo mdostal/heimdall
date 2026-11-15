@@ -40,6 +40,8 @@ All request/response bodies are JSON. Errors return `{"error":"<message>"}` with
 | `POST` | `/lanes/:id/reset-at` | Set or clear the scheduled reset time. |
 | `POST` | `/lanes/:id/headroom` | Update the lane's headroom scoring input. |
 | `POST` | `/lanes/:id/cost-tier` | Update the lane's cost tier scoring input. |
+| `PATCH` | `/lanes/:id` | Passive status push from an external observer: `{ "status": "...", "error"?: "<provider error text>" }`. See [Limits](#limits-heimdall142). |
+| `POST` | `/lanes/:id/limits/clear` | Remove one recorded limit: `{ "kind": "weekly_model:claude-fable-5-2" }`. 200 with the lane's remaining `limits`, 400 `invalid_kind`, 404 `unknown_lane` / `unknown_limit`. |
 
 #### `GET /lanes` response shape
 
@@ -64,7 +66,21 @@ All request/response bodies are JSON. Errors return `{"error":"<message>"}` with
     "credential_configured": true,
     "credential_state": "resolved",
     "signal_state": "fresh",
-    "last_probed_at": "2026-09-27T00:00:00.000Z"
+    "last_probed_at": "2026-09-27T00:00:00.000Z",
+    "limits": [
+      {
+        "lane_id": "claude@primary",
+        "kind": "weekly_model:claude-fable-5-2",
+        "scope": "model",
+        "model": "claude-fable-5-2",
+        "state": "exhausted",
+        "used_percent": null,
+        "resets_at": "2026-11-20T19:00:00.000Z",
+        "reason": "You've reached your Fable limit · resets Fri 1pm (America/Chicago)",
+        "source": "passive",
+        "observed_at": "2026-11-15T15:00:00.000Z"
+      }
+    ]
   }
 ]
 ```
@@ -90,6 +106,21 @@ All request/response bodies are JSON. Errors return `{"error":"<message>"}` with
 | `stale` | The last observation is older than N × the lane's expected probe interval. `status` is the last verdict Heimdall saw, and nothing has confirmed it since. | timestamp of the last observation |
 
 `status` is never changed by `signal_state`, so REQ-07 still holds: every declared lane is reported, and a lane with no signal still reads `down`. **Consumers that act on `down` (e.g. Pantheon's lane reconciler, PANT-763) should act only when `signal_state` is `"fresh"`.** Treat `never_probed` and `stale` as "no signal".
+
+#### Limits (heimdall#142)
+
+A subscription account has several separate limits, and one being exhausted does not mean the others are. `limits` lists the ones Heimdall has observed for the lane. It is on every lane in `GET /lanes`, the `heimdall.lanes.list` MCP tool and the CLI JSON, and the dashboard shows it under the lane's reason.
+
+| Field | Values |
+|---|---|
+| `kind` | `five_hour` · `weekly_all_models` · `weekly_model:<model id>` · `credits` · `spend_cap` |
+| `scope` | `account`, or `model` for `weekly_model:*` |
+| `state` | `exhausted` (the provider said so) · `available` · `unknown` |
+| `used_percent` | 0–100 when the provider reported it, else `null` (unknown). Never estimated. |
+| `resets_at` | The provider's own reset time, else `null` (unknown). An `exhausted` limit whose `resets_at` has passed reads `available`. |
+| `source` | `active_probe` · `passive` · `operator` |
+
+Limits come from the Claude probe, reported route outcomes, rotation-controller cap handling, and the optional `error` on `PATCH /lanes/:id`. A message naming one model ("You've reached your Fable limit") records only `weekly_model:<id>` as exhausted and leaves the lane `up` (`error_code: "quota_exceeded"`), because the account still serves its other models. A `PATCH` carrying such an error does not change the lane's status, even if it asks for `out_of_credit`. Model names map to ids through `HEIMDALL_CLAUDE_MODEL_ALIASES` (see `docs/configuration.md`). An account-wide weekly or session limit still sets the lane `out_of_credit`, and also records `weekly_all_models` / `five_hour`.
 
 The staleness window:
 
