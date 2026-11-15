@@ -11,6 +11,7 @@
 
 import { parseClaudeCapSignal, type ClaudeCapKind } from "../error-parser.js";
 import type { ErrorCode } from "../status-model.js";
+import { isModelScopedCap, limitFromClaudeCapSignal } from "../limits.js";
 import type { PassiveSignalValue, ResponseLike } from "./passive.js";
 
 const SUCCESS_OUTCOMES = new Set(["success", "succeeded", "ok", "completed"]);
@@ -24,6 +25,8 @@ const CAP_KIND_TO_STATUS: Record<ClaudeCapKind, { status: PassiveSignalValue; er
   rate_limit: { status: "down", errorCode: "rate_limit" },
   session_limit: { status: "out_of_credit", errorCode: "quota_exceeded" },
   weekly_limit: { status: "out_of_credit", errorCode: "quota_exceeded" },
+  // heimdall#142: one model's sub-limit; the account serves its other models.
+  model_limit: { status: "up", errorCode: "quota_exceeded" },
   oauth_expired: { status: "down", errorCode: "auth_failed" },
 };
 
@@ -43,13 +46,16 @@ export function routeOutcomeToPassiveResponse(report: RouteOutcomeReport, now: D
   const cap = parseClaudeCapSignal(report.metadata?.error, now);
   if (!cap) return null;
 
-  const { status, errorCode } = CAP_KIND_TO_STATUS[cap.kind];
+  const { status, errorCode } = CAP_KIND_TO_STATUS[isModelScopedCap(cap) ? "model_limit" : cap.kind];
+  const limit = limitFromClaudeCapSignal(cap);
   return {
     ok: false,
     classifiedStatus: status,
     errorCode,
-    resetAt: cap.reset_at,
+    // A model-scoped limit does not cap the lane, so it sets no lane timer.
+    resetAt: status === "up" ? null : cap.reset_at,
     message: `route outcome: ${cap.reason}`,
+    ...(limit ? { limits: [limit] } : {}),
   };
 }
 

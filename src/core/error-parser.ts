@@ -8,11 +8,11 @@ export interface ClaudeCapSignal {
   /** Always set, for the lane-status timer. When `reset_at_known` is false it is a fallback window, not a provider value. */
   reset_at: string;
   /** heimdall#142: true only when the reset time came from the provider (body, header or message text). */
-  reset_at_known: boolean;
+  reset_at_known?: boolean;
   /** heimdall#142: the model display name the limit names ("fable"), lowercased; null for account-wide limits. */
-  model: string | null;
+  model?: string | null;
   /** heimdall#142: percent used when the provider stated it; null means unknown. */
-  used_percent: number | null;
+  used_percent?: number | null;
   reason: string;
 }
 

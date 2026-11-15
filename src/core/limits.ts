@@ -130,8 +130,9 @@ export function limitFromClaudeCapSignal(
     scope: scopeOfKind(kind),
     model: modelOfKind(kind),
     state: "exhausted",
-    used_percent: signal.used_percent,
-    resets_at: signal.reset_at_known ? signal.reset_at : null,
+    used_percent: signal.used_percent ?? null,
+    // A caller-built signal without the flag predates heimdall#142 and only ever carried provider reset times.
+    resets_at: signal.reset_at_known === false ? null : signal.reset_at,
     reason: signal.reason,
   };
 }
@@ -158,4 +159,13 @@ export function describeLimit(limit: LaneLimit): string {
   const percent = limit.used_percent === null ? "usage unknown" : `${limit.used_percent}% used`;
   const reset = limit.resets_at === null ? "reset time unknown" : `resets ${limit.resets_at}`;
   return `${limit.kind}: ${limit.state} (${percent}, ${reset}, source ${limit.source})`;
+}
+
+/**
+ * heimdall#142: true when a Claude cap names one model ("your Fable limit",
+ * "your weekly Opus limit"). The account still serves other models, so the
+ * lane itself stays usable and only that model's limit is exhausted.
+ */
+export function isModelScopedCap(signal: ClaudeCapSignal): boolean {
+  return (signal.model ?? null) !== null && (signal.kind === "model_limit" || signal.kind === "weekly_limit");
 }

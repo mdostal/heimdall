@@ -41,6 +41,7 @@ import { resolveStatus, type ErrorCode, type LaneStatusValue, type SignalSource 
 import type { StateStore } from "./state-store.js";
 import type { Lane } from "./lane-registry.js";
 import type { SensingMetrics } from "./telemetry/sensing-metrics.js";
+import type { LimitObservation } from "./limits.js";
 
 export interface RefreshDeps {
   /** Injected clock — an ISO-8601 timestamp for "now". Never Date.now() internally. */
@@ -92,6 +93,8 @@ export interface ProviderAdapters {
     reset_at: string | null;
     reason: string | null;
     error_code?: ErrorCode | null;
+    /** heimdall#142: limits the probe observed; recorded as-is, never corroborated away. */
+    limits?: LimitObservation[];
   }>;
 }
 
@@ -206,6 +209,7 @@ export class LanePipeline {
     const pending = observePassiveSignal(this.deps.lastPassiveResponse(lane.lane_id));
     if (pending) {
       attempt.source = "passive";
+      this.recordLimits(lane.lane_id, pending.limits, "passive", now);
       return this.persistResolved(lane.lane_id, resolveStatus(pending), "passive", now);
     }
 
@@ -268,7 +272,21 @@ export class LanePipeline {
 
     attempt.source = "active_probe";
     const probe = await this.adapters.probe(lane.credential, this.deps.fetchImpl);
+    this.recordLimits(lane.lane_id, probe.limits, "active_probe", now);
     return this.persistResolved(lane.lane_id, resolveStatus(probe), "active_probe", now);
+  }
+
+  /** heimdall#142: a limit is a provider statement, not a lane verdict, so
+   * it is stored straight away rather than waiting for corroboration. */
+  private recordLimits(
+    laneId: string,
+    limits: LimitObservation[] | undefined,
+    source: "active_probe" | "passive",
+    now: string,
+  ): void {
+    for (const limit of limits ?? []) {
+      this.store.recordLimit(laneId, limit, source, now);
+    }
   }
 
   /** store.recordStatus plus heimdall_lane_status_transitions_total — the
