@@ -265,3 +265,28 @@ test("PANT-1156: a spawn failure with no CLI output falls back to err.message", 
   assert.equal(result.status, "down");
   assert.match(result.reason ?? "", /ENOENT/);
 });
+
+test("heimdall#142: a Fable limit on stdout keeps the lane up and reports only that model's limit", async () => {
+  const result = await probeClaudeSubscriptionLane(
+    "sk-ant-oat01-fake",
+    execFileFailure("You've reached your Fable limit · resets Fri 1pm (America/Chicago). /upgrade or switch to Opus to continue.\n"),
+  );
+  assert.equal(result.status, "up", "the account still serves Opus; the lane is not capped");
+  assert.equal(result.error_code, "quota_exceeded");
+  assert.equal(result.reset_at, null, "no lane-wide timer for a per-model limit");
+  assert.equal(result.limits?.length, 1);
+  assert.equal(result.limits?.[0]?.scope, "model");
+  assert.ok(result.limits?.[0]?.kind.startsWith("weekly_model:"));
+  assert.equal(result.limits?.[0]?.state, "exhausted");
+  assert.ok(result.limits?.[0]?.resets_at !== null);
+});
+
+test("heimdall#142: an account-wide session limit carries a five_hour limit alongside out_of_credit", async () => {
+  const result = await probeClaudeSubscriptionLane(
+    "sk-ant-oat01-fake",
+    execFileFailure("You've hit your session limit · resets 2:20am (UTC)\n"),
+  );
+  assert.equal(result.status, "out_of_credit");
+  assert.equal(result.limits?.[0]?.kind, "five_hour");
+  assert.equal(result.limits?.[0]?.scope, "account");
+});

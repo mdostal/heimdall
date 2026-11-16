@@ -55,3 +55,17 @@ test("heimdall#96: RouteOutcomeTracker keeps the most recent outcome per lane an
   assert.equal(tracker.take("lane-a"), null, "a consumed outcome must not corroborate itself on the next refresh");
   assert.equal(tracker.take("lane-b")?.classifiedStatus, "out_of_credit");
 });
+
+test("heimdall#142: a failure outcome with a Fable limit keeps the lane up and carries the model limit", () => {
+  const response = routeOutcomeToPassiveResponse(
+    { outcome: "failure", metadata: { error: { message: "You've reached your Fable limit · resets Fri 1pm (America/Chicago)" } } },
+    new Date("2026-11-15T15:00:00Z"),
+  );
+  assert.ok(response);
+  assert.equal(response.classifiedStatus, "up");
+  assert.equal(response.errorCode, "quota_exceeded");
+  assert.equal(response.resetAt, null);
+  assert.equal(response.limits?.length, 1);
+  assert.equal(response.limits?.[0]?.scope, "model");
+  assert.equal(response.limits?.[0]?.resets_at, "2026-11-20T19:00:00.000Z");
+});
