@@ -1,3 +1,9 @@
+---
+title: DEC-hdl-role-actuation
+parent: Decision Records
+nav_order: 1
+---
+
 # DEC-hdl-role-actuation
 
 **Status:** Partially superseded by [`DEC-hdl-multica-disable-contract.md`](DEC-hdl-multica-disable-contract.md) (2026-08-27) — Multica's real API has no working non-destructive disable lever, so the "Heimdall actuates" half below (`MulticaControlAdapter`, the `max_concurrent_tasks: 0` lever) is retired, not fixed. The sense/report role, the `ControlAdapter`/`StubControlAdapter` split, unmapped-lane logging, and the flaky-connection-hardening pattern are all still accurate and unaffected — kept below for that reference value.

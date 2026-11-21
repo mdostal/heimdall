@@ -1,3 +1,8 @@
+---
+title: Role & Actuation
+nav_order: 10
+---
+
 # Heimdall — role + actuation (THE answer)
 
 Resolves the "what is Heimdall, exactly?" confusion. Verified against Multica's

@@ -1,3 +1,9 @@
+---
+title: DEC-hdl-reason-aware-recovery
+parent: Decision Records
+nav_order: 1
+---
+
 # DEC-hdl-reason-aware-recovery
 
 **Status:** Accepted (2026-08-12) — fully implemented. Items 1+2 as epic `hdl-reason-aware-recovery` (stories `hdl-rar-01-scheduler-reset-at`, `hdl-rar-02-actuation-reason-context`). Item 3 (UI + agent tooling) shipped in four parts: view-live-state (`hdl-lane-status-ui`), manual-disable/enable (`hdl-lane-override`), add-lane/token-visibility/manual-reset-at (`hdl-lane-management`), and the MCP agent-tooling surface (`hdl-mcp-lane-tools` — `heimdall.lanes.override`/`setResetAt`/`add` alongside the original `heimdall.lanes.list`, each wrapping the same shared functions the HTTP routes use). No open follow-up work remains from this decision.

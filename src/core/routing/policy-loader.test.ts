@@ -124,3 +124,26 @@ test("load parses experiment arm names and split ratios", () => {
     },
   });
 });
+
+// heimdall#123: lane-level exclusion.
+test("load defaults excluded_lanes to [] when the field is absent", () => {
+  assert.deepEqual(PolicyLoader.load(writePolicy(VALID_POLICY)).excluded_lanes, []);
+});
+
+test("load parses excluded_lanes as a list of lane ids", () => {
+  const policy = PolicyLoader.load(writePolicy(`${VALID_POLICY}excluded_lanes:\n  - claude@mathew.dostal\n`));
+  assert.deepEqual(policy.excluded_lanes, ["claude@mathew.dostal"]);
+});
+
+test("load rejects an excluded_lanes that is not a list of non-empty lane ids", () => {
+  for (const [value, pattern] of [
+    ["claude@mathew.dostal", /Invalid field "excluded_lanes": expected list of lane ids/],
+    ["\n  - 42", /Invalid field "excluded_lanes.0": expected non-empty lane id/],
+    ['\n  - claude@ffevents\n  - ""', /Invalid field "excluded_lanes.1": expected non-empty lane id/],
+  ] as const) {
+    assert.throws(
+      () => PolicyLoader.load(writePolicy(`${VALID_POLICY}excluded_lanes: ${value}\n`)),
+      (error: unknown) => error instanceof PolicyValidationError && pattern.test(error.message),
+    );
+  }
+});

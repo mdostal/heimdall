@@ -101,3 +101,5 @@ app/src-tauri/gen/
 !.pHive/epics/hdl-agent-onboarding/**
 !.pHive/epics/hdl-multica-status-handoff/
 !.pHive/epics/hdl-multica-status-handoff/**
+!.pHive/epics/hdl-grok-signals/
+!.pHive/epics/hdl-grok-signals/**

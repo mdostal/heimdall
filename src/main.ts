@@ -1,10 +1,11 @@
 // Real service entrypoint — composes everything built across the
 // lane-health-status, hdl-scheduler, and hdl-actuation epics into one
 // running Heimdall: lane registry + state store + Argus telemetry + per-lane
-// MulticaAutopilotScheduler (coarse, default) + InProcessScheduler (fine,
-// suspect-lane-only) + a shared status-watcher loop that calls
-// ControlAdapter.reconcile() every tick for every lane — StubControlAdapter
-// for every lane, unconditionally.
+// InProcessScheduler (probes never-probed lanes at startup, fine ~5s while suspect, periodic
+// while healthy) + an opt-in per-lane MulticaAutopilotScheduler (only when
+// MULTICA_AUTOPILOT_AGENT is set — PANT-753) + a lane.status_changed
+// subscription (PANT-827) that calls ControlAdapter.reconcile() once per
+// real transition — StubControlAdapter for every lane, unconditionally.
 //
 // hdl-msh-01: Heimdall no longer actuates Multica directly (heimdall#83 —
 // Multica's real API has no working disable lever; see docs/decisions/
@@ -16,7 +17,7 @@
 // inject a mock CommandRunner/fetchImpl and inspect every piece without
 // touching a real Argus connection or binding a real port.
 
-import { buildLaneRegistry, createHttpServer, type RefreshLaneFn } from "./api/http-server.js";
+import { buildLaneRegistry, createHttpServer, endEventStreams, type RefreshLaneFn } from "./api/http-server.js";
 import type { Server } from "node:http";
 import { StateStore, resolveDefaultDbPath } from "./core/state-store.js";
 import type { LaneRegistry } from "./core/lane-registry.js";
@@ -27,6 +28,7 @@ import {
   geminiAdapters,
   kimiAdapters,
   openrouterAdapters,
+  grokAdapters,
   ollamaAdapters,
   type ProviderAdapters,
 } from "./core/lane-pipeline.js";
@@ -39,7 +41,16 @@ import type { CommandRunner } from "./core/scheduler/command-runner.js";
 import { StaticLaneAgentResolver, type LaneAgentResolver } from "./core/actuation/lane-agent-resolver.js";
 import { StubControlAdapter, type ControlAdapter } from "./core/actuation/control-adapter.js";
 import { RotationController, ProviderScopedLaneRegistry } from "./core/rotation-controller.js";
-import { startCapResetRecoveryJob, type RunningBackgroundJob } from "./core/background-jobs.js";
+import {
+  startCapResetRecoveryJob,
+  startHistoryRetentionJob,
+  resolveRetentionDays,
+  type RunningBackgroundJob,
+} from "./core/background-jobs.js";
+import { SensingMetrics } from "./core/telemetry/sensing-metrics.js";
+import { resolveReadinessStalenessMs } from "./api/readiness.js";
+import { closeRouteLedgers, onRouteOutcome, useRouteLedgerPath } from "./core/route-selector.js";
+import { RouteOutcomeTracker, routeOutcomeToPassiveResponse } from "./core/signal-sources/route-outcome.js";
 
 const PROVIDER_ADAPTERS: Record<string, () => ProviderAdapters> = {
   claude: claudeAdapters,
@@ -47,11 +58,12 @@ const PROVIDER_ADAPTERS: Record<string, () => ProviderAdapters> = {
   gemini: geminiAdapters,
   kimi: kimiAdapters,
   openrouter: openrouterAdapters,
+  grok: grokAdapters,
   ollama: ollamaAdapters,
 };
 
 const DEFAULT_AUTOPILOT_CRON = "*/1 * * * *";
-const STATUS_WATCHER_INTERVAL_MS = 5_000;
+const SHUTDOWN_GRACE_MS = 10_000;
 
 export interface ComposeServiceOptions {
   port?: number;
@@ -61,8 +73,8 @@ export interface ComposeServiceOptions {
   argus?: ArgusEmitter;
   /** Test-only: skip actually binding the HTTP server to a port. */
   skipHttpListen?: boolean;
-  /** Test-only: override the shared status-watcher's tick interval (default 5000ms). */
-  statusWatcherIntervalMs?: number;
+  /** Test-only: called instead of process.exit(1) when the HTTP server emits 'error' (e.g. EADDRINUSE). */
+  onFatalServerError?: (err: Error) => void;
 }
 
 export interface ComposedService {
@@ -74,18 +86,30 @@ export interface ComposedService {
   controlAdapters: Map<string, ControlAdapter>;
   /** hdl-rr-04 — keyed by provider, only present for providers with 2+ credentialed lanes (nothing to rotate between otherwise). */
   rotationControllers: Map<string, RotationController>;
+  /** PANT-824 — probe/transition/scheduler-start-failure counters behind GET /metrics and GET /readyz. */
+  sensing: SensingMetrics;
+  /** Stops every timer/job and closes the server and DB immediately. Idempotent. */
   stopAll: () => void;
+  /**
+   * PANT-829 graceful shutdown: stops every timer/job, stops accepting new
+   * connections and waits for in-flight requests to finish (up to
+   * graceMs, then drops remaining connections), then closes the DB. Idempotent.
+   */
+  shutdown: (options?: { graceMs?: number }) => Promise<void>;
 }
 
 // hdl-rr-04: mirrors PROVIDER_ADAPTERS' "every lane always gets a real
 // mechanism, never a silent no-op" precedent from hdl-actuation — but
 // rotation only makes sense with 2+ credentialed lanes on the SAME
 // provider to rotate between, so a single-lane provider correctly gets
-// none rather than a controller with nowhere to rotate to.
+// none rather than a controller with nowhere to rotate to. PANT-932: a lane
+// whose credential is only temporarily unavailable (credential source down at
+// startup) still counts — it gains its credential in place once the source
+// recovers, and the controller skips credential-less lanes until then.
 function buildRotationControllers(registry: LaneRegistry, store: StateStore): Map<string, RotationController> {
   const credentialedByProvider = new Map<string, number>();
   for (const lane of registry.list()) {
-    if (lane.credential === null) continue;
+    if (lane.credential_state === "unconfigured") continue;
     credentialedByProvider.set(lane.provider, (credentialedByProvider.get(lane.provider) ?? 0) + 1);
   }
 
@@ -102,7 +126,12 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
   const env = options.env ?? process.env;
 
   const registry = buildLaneRegistry(env);
-  const store = new StateStore(resolveDefaultDbPath(env));
+  const dbPath = resolveDefaultDbPath(env);
+  const store = new StateStore(dbPath);
+  // heimdall#96: routing decisions/outcomes live in the same DB file as lane
+  // state, so they survive a restart and every process sees them.
+  useRouteLedgerPath(dbPath);
+  const routeOutcomes = new RouteOutcomeTracker();
 
   // hdl-ot-01: Heimdall's own local record (telemetry_events) is the source
   // of truth; Argus is one downstream consumer of the same facts, composed
@@ -120,6 +149,14 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
   const sharedStubControlAdapter = new StubControlAdapter();
   const controlAdapters = new Map<string, ControlAdapter>();
 
+  const autopilotAgent = env.MULTICA_AUTOPILOT_AGENT || undefined;
+  if (!autopilotAgent) {
+    console.log(
+      "[main] MULTICA_AUTOPILOT_AGENT not set — Multica-autopilot scheduling disabled; lanes are probed in-process only.",
+    );
+  }
+
+  const sensing = new SensingMetrics();
   const pipelines = new Map<string, LanePipeline>();
   const multicaSchedulers: MulticaAutopilotScheduler[] = [];
   const inProcessSchedulers: InProcessScheduler[] = [];
@@ -136,62 +173,97 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
       console.error(
         `[main] no ProviderAdapters registered for provider "${lane.provider}" (lane ${lane.lane_id}) — skipping scheduling for this lane.`,
       );
+      // Declared but never sensed — surface it on /metrics and /readyz
+      // rather than only in the log.
+      sensing.recordSchedulerStartFailure(
+        lane.lane_id,
+        "in_process",
+        new Error(`no ProviderAdapters registered for provider "${lane.provider}"`),
+      );
       continue;
     }
 
     const pipeline = new LanePipeline(
       store,
-      { now: () => new Date().toISOString(), lastPassiveResponse: () => null, fetchImpl: options.fetchImpl },
+      {
+        now: () => new Date().toISOString(),
+        lastPassiveResponse: (laneId) => routeOutcomes.take(laneId),
+        fetchImpl: options.fetchImpl,
+        retryCredential: (laneId) => registry.retryCredential(laneId),
+      },
       buildAdapters(),
+      sensing,
     );
     pipelines.set(lane.lane_id, pipeline);
 
-    const multicaScheduler = new MulticaAutopilotScheduler({
+    // PANT-753 (heimdall#103): Multica-autopilot scheduling is OPT-IN, enabled
+    // only when MULTICA_AUTOPILOT_AGENT is configured. An autopilot trigger
+    // dispatches a full agent (LLM) session, so scheduling health probes that
+    // way spends subscription quota on health checks. Without it, every lane
+    // is still probed by its InProcessScheduler below (first probe at startup)
+    // — a missing autopilot config never leaves a lane unprobed/"down".
+    if (autopilotAgent) {
+      const multicaScheduler = new MulticaAutopilotScheduler({
+        lane,
+        cron: env.HEIMDALL_AUTOPILOT_CRON ?? DEFAULT_AUTOPILOT_CRON,
+        description:
+          `Trigger a Heimdall lane refresh by sending: ` +
+          `POST http://localhost:${port}/lanes/${encodeURIComponent(lane.lane_id)}/refresh`,
+        agent: autopilotAgent,
+        commandRunner: options.commandRunner,
+        argus,
+      });
+      try {
+        multicaScheduler.start();
+      } catch (err) {
+        // Per-lane failure isolation (REQ-07 precedent): one lane's bad config
+        // (e.g. an invalid HEIMDALL_AUTOPILOT_CRON) must not prevent every
+        // other lane's scheduling from starting.
+        console.error(`[main] failed to start MulticaAutopilotScheduler for lane ${lane.lane_id}:`, err);
+        sensing.recordSchedulerStartFailure(lane.lane_id, "multica_autopilot", err);
+      }
+      multicaSchedulers.push(multicaScheduler);
+    }
+
+    // A lane with no recorded status reads as the StateStore's "down"
+    // fallback until probed — probe it right away rather than a full
+    // interval later, so a fresh start never reports every lane down.
+    const inProcessScheduler = new InProcessScheduler({
       lane,
-      cron: env.HEIMDALL_AUTOPILOT_CRON ?? DEFAULT_AUTOPILOT_CRON,
-      description:
-        `Trigger a Heimdall lane refresh by sending: ` +
-        `POST http://localhost:${port}/lanes/${encodeURIComponent(lane.lane_id)}/refresh`,
-      commandRunner: options.commandRunner,
+      pipeline,
+      store,
       argus,
+      initialDelayMs: store.hasRecordedStatus(lane.lane_id) ? undefined : 0,
     });
     try {
-      multicaScheduler.start();
+      inProcessScheduler.start();
     } catch (err) {
-      // Per-lane failure isolation (REQ-07 precedent): one lane's bad config
-      // (e.g. missing MULTICA_AUTOPILOT_AGENT) must not prevent every other
-      // lane's scheduling from starting.
-      console.error(`[main] failed to start MulticaAutopilotScheduler for lane ${lane.lane_id}:`, err);
+      // Same per-lane isolation as the autopilot scheduler above.
+      console.error(`[main] failed to start InProcessScheduler for lane ${lane.lane_id}:`, err);
+      sensing.recordSchedulerStartFailure(lane.lane_id, "in_process", err);
     }
-    multicaSchedulers.push(multicaScheduler);
-
-    const inProcessScheduler = new InProcessScheduler({ lane, pipeline, store, argus });
-    inProcessScheduler.start();
     inProcessSchedulers.push(inProcessScheduler);
 
     controlAdapters.set(lane.lane_id, sharedStubControlAdapter);
   }
 
-  // Lightweight shared observer — one timer for the whole service (not
-  // per-lane), cheap local StateStore reads only. reconcile() is called
-  // every tick for every lane regardless of whether status changed; every
-  // lane's adapter is StubControlAdapter (hdl-msh-01), so this now only
-  // records/logs the intended action via ActuationStub, never a real call.
-  const statusWatcher = setInterval(() => {
-    for (const lane of registry.list()) {
-      const current = store.getCurrentStatus(lane.lane_id);
-      if (!current) continue;
-      const adapter = controlAdapters.get(lane.lane_id);
-      if (!adapter) continue;
-      const manualOverride = store.getManualOverride(lane.lane_id);
-      adapter
-        .reconcile(lane, current.status, { reason: current.reason, reset_at: current.reset_at, manualOverride })
-        .catch((err) => {
-          console.error(`[main] reconcile() failed for lane ${lane.lane_id}:`, err);
-        });
-    }
-  }, options.statusWatcherIntervalMs ?? STATUS_WATCHER_INTERVAL_MS);
-  statusWatcher.unref?.();
+  // PANT-827 ("nothing polls"): reconcile() runs once per lane.status_changed
+  // event — a resolved-status transition, or a manual override/reset_at
+  // change — instead of every tick for every lane. Every lane's adapter is
+  // StubControlAdapter (hdl-msh-01), so this only records/logs the intended
+  // action via ActuationStub, never a real call.
+  const stopReconcileSubscription = store.events.onStatusChanged((event) => {
+    const lane = registry.get(event.lane_id);
+    const adapter = controlAdapters.get(event.lane_id);
+    const current = store.getCurrentStatus(event.lane_id);
+    if (!lane || !adapter || !current) return;
+    const manualOverride = store.getManualOverride(event.lane_id);
+    adapter
+      .reconcile(lane, current.status, { reason: current.reason, reset_at: current.reset_at, manualOverride })
+      .catch((err) => {
+        console.error(`[main] reconcile() failed for lane ${lane.lane_id}:`, err);
+      });
+  });
 
   const refreshLane: RefreshLaneFn = async (laneId: string): Promise<void> => {
     const lane = registry.get(laneId);
@@ -202,6 +274,21 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     await pipeline.refresh(lane);
   };
 
+  // heimdall#96: close the routing loop. A reported outcome becomes a
+  // passive observation of the lane that served the decision, and the lane
+  // is refreshed right away so the outcome decides its status now rather
+  // than at the scheduler's next (possibly minutes-away) tick. Corroboration
+  // still applies: a single failure outcome only shows `degraded`.
+  const unsubscribeRouteOutcomes = onRouteOutcome((event) => {
+    if (!pipelines.has(event.laneId)) return;
+    const response = routeOutcomeToPassiveResponse(event, new Date());
+    if (!response) return;
+    routeOutcomes.record(event.laneId, response);
+    refreshLane(event.laneId).catch((err) => {
+      console.error(`[main] refresh after route outcome failed for lane ${event.laneId}:`, err);
+    });
+  });
+
   // hdl-rr-04: rotation is a credential-selection concern orthogonal to
   // which lane routing picks — it decides which account backs a given
   // provider's calls, not which provider/lane serves a task. Never wired
@@ -210,12 +297,28 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
   // background job for the first time on either branch and exposes it for
   // manual inspection/rotation via GET/POST /rotation/:provider.
   const rotationControllers = buildRotationControllers(registry, store);
-  const rotationJobs: RunningBackgroundJob[] = [];
+  const backgroundJobs: RunningBackgroundJob[] = [];
   for (const controller of rotationControllers.values()) {
-    rotationJobs.push(startCapResetRecoveryJob(controller));
+    backgroundJobs.push(startCapResetRecoveryJob(controller));
   }
 
-  const httpServer = createHttpServer(registry, store, refreshLane, undefined, options.fetchImpl, rotationControllers, resolver);
+  // PANT-829: lane_status_history (a row every ~5s per suspect lane) and
+  // telemetry_events are otherwise append-only forever.
+  backgroundJobs.push(startHistoryRetentionJob(store, { retentionDays: resolveRetentionDays(env) }));
+
+  const httpServer = createHttpServer(registry, store, refreshLane, undefined, options.fetchImpl, rotationControllers, resolver, sensing, resolveReadinessStalenessMs(env));
+  // PANT-829: without a listener, EADDRINUSE and friends surface as an
+  // uncaught exception with a raw stack. Log what actually went wrong and
+  // exit non-zero so a supervisor sees a clean failure.
+  httpServer.on("error", (err: NodeJS.ErrnoException) => {
+    const hint = err.code === "EADDRINUSE" ? ` — port ${port} is already in use (set PORT to change it)` : "";
+    console.error(`[main] HTTP server error${hint}:`, err.message);
+    if (options.onFatalServerError) {
+      options.onFatalServerError(err);
+      return;
+    }
+    process.exit(1);
+  });
   if (!options.skipHttpListen) {
     httpServer.listen(port, () => {
       console.log(`heimdall service listening on http://localhost:${port}`);
@@ -230,14 +333,86 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     inProcessSchedulers,
     controlAdapters,
     rotationControllers,
+    sensing,
     stopAll: () => {
-      clearInterval(statusWatcher);
-      for (const s of multicaSchedulers) s.stop();
-      for (const s of inProcessSchedulers) s.stop();
-      for (const job of rotationJobs) job.stop();
-      httpServer.close();
+      stopBackgroundWork();
+      if (httpServer.listening) {
+        httpServer.close();
+        // Open GET /events (SSE) streams never end on their own — without this
+        // close() would wait on them forever.
+        httpServer.closeAllConnections();
+      }
+      closeRouteLedgers();
       store.close();
     },
+    shutdown: async ({ graceMs = SHUTDOWN_GRACE_MS } = {}) => {
+      stopBackgroundWork();
+      if (httpServer.listening) {
+        await new Promise<void>((resolve) => {
+          const force = setTimeout(() => httpServer.closeAllConnections(), graceMs);
+          force.unref();
+          httpServer.close(() => {
+            clearTimeout(force);
+            resolve();
+          });
+          // SSE streams never finish on their own; end them now so only real
+          // in-flight requests use the grace period.
+          endEventStreams(httpServer);
+          httpServer.closeIdleConnections();
+        });
+      }
+      closeRouteLedgers();
+      store.close();
+    },
+  };
+
+  function stopBackgroundWork(): void {
+    stopReconcileSubscription();
+    for (const s of multicaSchedulers) s.stop();
+    for (const s of inProcessSchedulers) s.stop();
+    for (const job of backgroundJobs) job.stop();
+    unsubscribeRouteOutcomes();
+  }
+}
+
+/**
+ * PANT-829: SIGTERM (container stop/restart) and SIGINT (Ctrl-C) run the
+ * graceful shutdown and exit 0, instead of killing the process mid-request.
+ * A second signal while shutting down exits immediately.
+ */
+export function installShutdownHandlers(
+  service: Pick<ComposedService, "shutdown">,
+  {
+    exit = (code) => process.exit(code),
+    signals = process,
+  }: {
+    exit?: (code: number) => void;
+    /** Test-only: where signal listeners are attached (default: process). */
+    signals?: Pick<NodeJS.EventEmitter, "on" | "off">;
+  } = {},
+): () => void {
+  let shuttingDown = false;
+  const onSignal = (signal: NodeJS.Signals): void => {
+    if (shuttingDown) {
+      console.warn(`[main] received ${signal} again — exiting immediately.`);
+      exit(1);
+      return;
+    }
+    shuttingDown = true;
+    console.log(`[main] received ${signal} — shutting down.`);
+    service.shutdown().then(
+      () => exit(0),
+      (err) => {
+        console.error("[main] error during shutdown:", err);
+        exit(1);
+      },
+    );
+  };
+  signals.on("SIGTERM", onSignal);
+  signals.on("SIGINT", onSignal);
+  return () => {
+    signals.off("SIGTERM", onSignal);
+    signals.off("SIGINT", onSignal);
   };
 }
 
@@ -250,5 +425,12 @@ if (isMainModule) {
   // title so operators/monitors can find it by name (e.g. `pgrep heimdall`).
   process.title = "heimdall";
   startArgusSdk();
-  composeService();
+  installShutdownHandlers(composeService());
+  // heimdall#95: installed only after composeService() returned, so a
+  // startup failure still crashes the process exactly as before. From here
+  // on, a stray rejected promise (one bad request, one failed probe) is
+  // logged loudly and contained instead of taking every lane down with it.
+  process.on("unhandledRejection", (reason) => {
+    console.error("[main] UNHANDLED PROMISE REJECTION — contained, Heimdall keeps running:", reason);
+  });
 }

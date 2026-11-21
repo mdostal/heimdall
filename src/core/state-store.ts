@@ -12,6 +12,8 @@ import { homedir as osHomedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { LaneCostTier } from "./lane-registry.js";
+import { LaneEvents, type LaneStatusChangeCause } from "./lane-events.js";
+import { effectiveLimit, type LaneLimit, type LimitObservation, type LimitSource } from "./limits.js";
 import type { ErrorCode, LaneStatus, LaneStatusValue, SignalSource } from "./status-model.js";
 
 // hdl-ao-01 — same shape as resolveDefaultPolicyPath (routing/policy-loader.ts):
@@ -79,6 +81,19 @@ CREATE TABLE IF NOT EXISTS telemetry_events (
   occurred_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_telemetry_events_type_time ON telemetry_events(event_type, occurred_at DESC);
+CREATE TABLE IF NOT EXISTS lane_limits (
+  lane_id TEXT NOT NULL REFERENCES lanes(lane_id),
+  kind TEXT NOT NULL,
+  scope TEXT NOT NULL CHECK (scope IN ('account','model')),
+  model TEXT,
+  state TEXT NOT NULL CHECK (state IN ('available','exhausted','unknown')),
+  used_percent REAL,
+  resets_at TEXT,
+  reason TEXT,
+  source TEXT NOT NULL CHECK (source IN ('active_probe','passive','operator')),
+  observed_at TEXT NOT NULL,
+  PRIMARY KEY (lane_id, kind)
+);
 `;
 
 export type ManualOverride = "enabled" | "disabled" | null;
@@ -128,14 +143,31 @@ export interface TelemetryEvent {
   occurred_at: string;
 }
 
+/** PANT-829: how long a connection waits on another writer's lock before SQLITE_BUSY. */
+export const SQLITE_BUSY_TIMEOUT_MS = 5000;
+
+export interface PruneHistoryResult {
+  lane_status_history: number;
+  telemetry_events: number;
+}
+
 export class StateStore {
   private readonly db: DatabaseSync;
+  private closed = false;
+
+  /** PANT-827 — lane.status_changed, emitted by recordStatus/setManualOverride/setManualResetAt only on a real change. */
+  readonly events = new LaneEvents();
 
   constructor(path: string = ":memory:") {
     // node:sqlite's default for foreign-key enforcement varies by Node
     // version (observed OFF on Node 22.9, ON on the hive's Node build) —
     // pinned explicitly so behavior is deterministic across environments.
     this.db = new DatabaseSync(path, { enableForeignKeyConstraints: true });
+    // PANT-829: the HTTP server, MCP and CLI processes share this one WAL
+    // file. Without a busy timeout a write that collides with another
+    // process's write throws SQLITE_BUSY immediately instead of waiting its
+    // turn. Set before journal_mode, which itself needs the write lock.
+    this.db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
     // hdl-ao-01: WAL mode is required for safe concurrent multi-process
     // access — the whole point of resolveDefaultDbPath's shared per-machine
     // default is that the dashboard server (http-server.ts), an MCP process
@@ -216,6 +248,8 @@ export class StateStore {
     signal_source: SignalSource;
     observed_at: string;
   }): void {
+    const before = this.hasRecordedStatus(entry.lane_id) ? this.getCurrentStatus(entry.lane_id)?.status ?? null : null;
+
     // Guard the FK to lanes(lane_id) regardless of call order — a no-op via
     // ON CONFLICT DO NOTHING when the caller already upserted the lane (the
     // normal path), but never a foreign-key violation if it didn't.
@@ -241,6 +275,34 @@ export class StateStore {
         entry.signal_source,
         entry.observed_at,
       );
+
+    // Compared against the resolved latest row, not the entry just written —
+    // an out-of-order (older observed_at) entry doesn't change the current
+    // status, so it must not emit either.
+    const after = this.getCurrentStatus(entry.lane_id);
+    if (after && after.status !== before) {
+      this.emitStatusChanged(entry.lane_id, before, "status");
+    }
+  }
+
+  private emitStatusChanged(laneId: string, from: LaneStatusValue | null, cause: LaneStatusChangeCause): void {
+    const current = this.getCurrentStatus(laneId);
+    if (!current) return;
+    this.events.emitStatusChanged({
+      lane_id: laneId,
+      from,
+      to: current.status,
+      error_code: current.error_code,
+      // Same precedence InProcessScheduler applies: an operator's manual reset_at wins over the sensed one.
+      reset_at: this.getManualResetAt(laneId) ?? current.reset_at,
+      observed_at: new Date().toISOString(),
+      cause,
+    });
+  }
+
+  /** The lane's resolved status for a manual-lever event (no status transition — from === to). */
+  private currentStatusValue(laneId: string): LaneStatusValue | null {
+    return this.getCurrentStatus(laneId)?.status ?? null;
   }
 
   listLanes(): LaneRow[] {
@@ -293,6 +355,15 @@ export class StateStore {
     };
   }
 
+  /** True once any status has been recorded for this lane — false while
+   * getCurrentStatus is still returning its "no status recorded yet"
+   * fallback. main.ts uses this to probe never-probed lanes at startup. */
+  hasRecordedStatus(laneId: string): boolean {
+    return (
+      this.db.prepare(`SELECT 1 FROM lane_status_history WHERE lane_id = ? LIMIT 1`).get(laneId) !== undefined
+    );
+  }
+
   /** Timestamp of the most recent status entry recorded from a specific
    * signal source for this lane, or null if none exists yet. Used by
    * escalation.ts (via lane-pipeline.ts) to decide staleness per source. */
@@ -338,10 +409,14 @@ export class StateStore {
          ON CONFLICT(lane_id) DO NOTHING`,
       )
       .run(laneId);
+    const previous = this.getManualOverride(laneId);
     const effectiveReason = value === null ? null : reason;
     this.db
       .prepare(`UPDATE lanes SET manual_override = ?, override_reason = ? WHERE lane_id = ?`)
       .run(value, effectiveReason, laneId);
+    if (value !== previous) {
+      this.emitStatusChanged(laneId, this.currentStatusValue(laneId), "manual_override");
+    }
   }
 
   getManualOverride(laneId: string): ManualOverride {
@@ -373,7 +448,11 @@ export class StateStore {
          ON CONFLICT(lane_id) DO NOTHING`,
       )
       .run(laneId);
+    const previous = this.getManualResetAt(laneId);
     this.db.prepare(`UPDATE lanes SET manual_reset_at = ? WHERE lane_id = ?`).run(value, laneId);
+    if (value !== previous) {
+      this.emitStatusChanged(laneId, this.currentStatusValue(laneId), "manual_reset_at");
+    }
   }
 
   getManualResetAt(laneId: string): string | null {
@@ -429,6 +508,80 @@ export class StateStore {
       .prepare(`SELECT manual_cost_tier FROM lanes WHERE lane_id = ?`)
       .get(laneId) as unknown as { manual_cost_tier: LaneCostTier | null } | undefined;
     return row?.manual_cost_tier ?? null;
+  }
+
+  /**
+   * heimdall#142: records the current observation of one limit on a lane.
+   * One row per (lane, kind): a newer observation replaces the older one; an
+   * older (out-of-order) observation is ignored. Returns true when stored.
+   */
+  recordLimit(laneId: string, limit: LimitObservation, source: LimitSource, observedAt: string): boolean {
+    this.db
+      .prepare(
+        `INSERT INTO lanes (lane_id, provider, credential_ref) VALUES (?, '', '')
+         ON CONFLICT(lane_id) DO NOTHING`,
+      )
+      .run(laneId);
+    const result = this.db
+      .prepare(
+        `INSERT INTO lane_limits
+           (lane_id, kind, scope, model, state, used_percent, resets_at, reason, source, observed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(lane_id, kind) DO UPDATE SET
+           scope = excluded.scope,
+           model = excluded.model,
+           state = excluded.state,
+           used_percent = excluded.used_percent,
+           resets_at = excluded.resets_at,
+           reason = excluded.reason,
+           source = excluded.source,
+           observed_at = excluded.observed_at
+         WHERE excluded.observed_at >= lane_limits.observed_at`,
+      )
+      .run(
+        laneId,
+        limit.kind,
+        limit.scope,
+        limit.model,
+        limit.state,
+        limit.used_percent,
+        limit.resets_at,
+        limit.reason,
+        source,
+        observedAt,
+      );
+    return Number(result.changes) > 0;
+  }
+
+  /**
+   * heimdall#142: a lane's limits as they stand at `now` (an exhausted limit
+   * whose reset time passed reads as available). Sorted by kind.
+   */
+  getLimits(laneId: string, now: Date = new Date()): LaneLimit[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM lane_limits WHERE lane_id = ? ORDER BY kind`)
+      .all(laneId) as unknown as LaneLimit[];
+    return rows.map((row) => effectiveLimit({ ...row }, now));
+  }
+
+  /** heimdall#142: every lane's limits, keyed by lane id. Lanes with none are absent. */
+  getAllLimits(now: Date = new Date()): Map<string, LaneLimit[]> {
+    const rows = this.db
+      .prepare(`SELECT * FROM lane_limits ORDER BY lane_id, kind`)
+      .all() as unknown as LaneLimit[];
+    const byLane = new Map<string, LaneLimit[]>();
+    for (const row of rows) {
+      const list = byLane.get(row.lane_id) ?? [];
+      list.push(effectiveLimit({ ...row }, now));
+      byLane.set(row.lane_id, list);
+    }
+    return byLane;
+  }
+
+  /** heimdall#142: operator clear of one limit. Returns false when the lane had no such limit. */
+  clearLimit(laneId: string, kind: string): boolean {
+    const result = this.db.prepare(`DELETE FROM lane_limits WHERE lane_id = ? AND kind = ?`).run(laneId, kind);
+    return Number(result.changes) > 0;
   }
 
   /**
@@ -547,7 +700,55 @@ export class StateStore {
     }));
   }
 
+  /**
+   * PANT-829 retention: deletes lane_status_history and telemetry_events
+   * rows observed/occurred strictly before `cutoffIso`. A lane's latest
+   * status row is always kept, however old: current status is "latest row
+   * per lane" (getCurrentStatus), so pruning it would flip a long-stable
+   * lane back to the "no status recorded yet" fallback.
+   */
+  pruneHistoryOlderThan(cutoffIso: string): PruneHistoryResult {
+    const history = this.db
+      .prepare(
+        `DELETE FROM lane_status_history
+         WHERE observed_at < ?
+           AND observed_at < (
+             SELECT MAX(h.observed_at) FROM lane_status_history h
+             WHERE h.lane_id = lane_status_history.lane_id
+           )`,
+      )
+      .run(cutoffIso);
+    const telemetry = this.db.prepare(`DELETE FROM telemetry_events WHERE occurred_at < ?`).run(cutoffIso);
+    return {
+      lane_status_history: Number(history.changes),
+      telemetry_events: Number(telemetry.changes),
+    };
+  }
+
+  /** PANT-824 readiness: attempts a real write inside a savepoint and rolls
+   * it back, so nothing persists. Returns the error message if the DB can't
+   * be written (read-only file, closed handle, locked, disk I/O), else null. */
+  checkWritable(): string | null {
+    try {
+      this.db.exec("SAVEPOINT heimdall_readiness");
+      try {
+        this.db
+          .prepare(`INSERT INTO settings (key, value) VALUES ('__readiness_probe__', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+          .run();
+      } finally {
+        this.db.exec("ROLLBACK TO heimdall_readiness");
+        this.db.exec("RELEASE heimdall_readiness");
+      }
+      return null;
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+  }
+
   close(): void {
+    // Idempotent: graceful shutdown and stopAll() may both reach here.
+    if (this.closed) return;
+    this.closed = true;
     this.db.close();
   }
 }

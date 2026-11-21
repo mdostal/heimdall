@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { StateStore, resolveDefaultDbPath } from "./state-store.js";
+import type { LaneStatusChangedEvent } from "./lane-events.js";
 
 test("a declared lane with no recorded status reports down/unconfigured (REQ-07)", () => {
   const store = new StateStore(":memory:");
@@ -183,6 +184,23 @@ test("getLastObservedAt breaks observed_at ties by insertion order (rowid)", () 
   });
 
   assert.equal(store.getLastObservedAt("claude@mathew.dostal", "passive"), sameTimestamp);
+  store.close();
+});
+
+test("hasRecordedStatus is false while only the no-status fallback exists, true once a status is recorded", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+
+  assert.equal(store.hasRecordedStatus("claude@mathew.dostal"), false);
+  store.recordStatus({
+    lane_id: "claude@mathew.dostal",
+    status: "up",
+    reset_at: null,
+    reason: null,
+    signal_source: "active_probe",
+    observed_at: "2026-07-25T12:00:00.000Z",
+  });
+  assert.equal(store.hasRecordedStatus("claude@mathew.dostal"), true);
   store.close();
 });
 
@@ -786,4 +804,201 @@ test("hdl-ao-01: StateStore enables WAL journal mode on a real database file", (
   assert.equal(row.journal_mode, "wal");
   store.close();
   fs.rmSync(path.dirname(dbPath), { recursive: true, force: true });
+});
+
+test("PANT-829: pruneHistoryOlderThan deletes only rows older than the cutoff", () => {
+  const store = new StateStore(":memory:");
+  const lane = "claude@mathew.dostal";
+  store.upsertLane({ lane_id: lane, provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+  const record = (observed_at: string) =>
+    store.recordStatus({ lane_id: lane, status: "degraded", reset_at: null, reason: null, signal_source: "active_probe", observed_at });
+
+  record("2026-01-01T00:00:00.000Z");
+  record("2026-01-15T00:00:00.000Z");
+  record("2026-02-01T00:00:00.000Z"); // exactly at the cutoff — kept
+  record("2026-02-05T00:00:00.000Z");
+  store.recordTelemetryEvent("probe", {}, "2026-01-10T00:00:00.000Z");
+  store.recordTelemetryEvent("probe", {}, "2026-02-01T00:00:00.000Z");
+  store.recordTelemetryEvent("probe", {}, "2026-02-03T00:00:00.000Z");
+
+  const result = store.pruneHistoryOlderThan("2026-02-01T00:00:00.000Z");
+
+  assert.deepEqual(result, { lane_status_history: 2, telemetry_events: 1 });
+  const history = store.database
+    .prepare(`SELECT observed_at FROM lane_status_history ORDER BY observed_at`)
+    .all()
+    .map((r) => (r as { observed_at: string }).observed_at);
+  assert.deepEqual(history, ["2026-02-01T00:00:00.000Z", "2026-02-05T00:00:00.000Z"]);
+  assert.deepEqual(
+    store.listRecentTelemetryEvents(10).map((e) => e.occurred_at),
+    ["2026-02-03T00:00:00.000Z", "2026-02-01T00:00:00.000Z"],
+  );
+  store.close();
+});
+
+test("PANT-829: pruneHistoryOlderThan keeps a lane's latest status row even when it is older than the cutoff", () => {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "stable", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+  for (const observed_at of ["2026-01-01T00:00:00.000Z", "2026-01-02T00:00:00.000Z"]) {
+    store.recordStatus({ lane_id: "stable", status: "up", reset_at: null, reason: null, signal_source: "active_probe", observed_at });
+  }
+
+  store.pruneHistoryOlderThan("2026-03-01T00:00:00.000Z");
+
+  assert.equal(store.getCurrentStatus("stable")?.status, "up", "pruning must never reset a lane to the no-status fallback");
+  assert.equal(store.getCurrentStatus("stable")?.last_updated, "2026-01-02T00:00:00.000Z");
+  assert.equal(store.hasRecordedStatus("stable"), true);
+  store.close();
+});
+
+test("PANT-829: close() is idempotent", () => {
+  const store = new StateStore(":memory:");
+  store.close();
+  assert.doesNotThrow(() => store.close());
+});
+
+test("PANT-829: two StateStores on one file writing at the same time wait on busy_timeout instead of throwing SQLITE_BUSY", async () => {
+  const { Worker } = await import("node:worker_threads");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "heimdall-busy-"));
+  const dbPath = path.join(dir, "state.db");
+  const mine = new StateStore(dbPath);
+  const stateStoreUrl = new URL("./state-store.ts", import.meta.url).href;
+
+  // The worker opens its own StateStore on the same file, takes the write
+  // lock, tells us, then holds it for 300ms before committing — so our
+  // write below collides with a lock held by a genuinely separate connection.
+  const worker = new Worker(
+    `
+    const { parentPort, workerData } = require("node:worker_threads");
+    // Import through tsx: the loader the test runner uses isn't inherited by
+    // the worker, and state-store.ts imports siblings by their .js names.
+    require("tsx/esm/api").tsImport(workerData.stateStoreUrl, workerData.stateStoreUrl).then(({ StateStore }) => {
+      const theirs = new StateStore(workerData.dbPath);
+      theirs.database.exec("BEGIN IMMEDIATE");
+      theirs.recordTelemetryEvent("from-worker", {});
+      parentPort.postMessage("locked");
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+      theirs.database.exec("COMMIT");
+      theirs.close();
+      parentPort.postMessage("committed");
+    });
+    `,
+    { eval: true, workerData: { dbPath, stateStoreUrl } },
+  );
+
+  try {
+    const messages: string[] = [];
+    const done = new Promise<void>((resolve, reject) => {
+      worker.on("message", (m: string) => {
+        messages.push(m);
+        if (m === "committed") resolve();
+      });
+      worker.on("error", reject);
+    });
+    await new Promise<void>((resolve, reject) => {
+      worker.once("message", () => resolve());
+      worker.once("error", reject);
+    });
+
+    const started = Date.now();
+    assert.doesNotThrow(() => mine.recordTelemetryEvent("from-main", {}));
+    const waitedMs = Date.now() - started;
+    await done;
+
+    assert.ok(waitedMs >= 100, `expected our write to wait for the worker's lock, waited ${waitedMs}ms`);
+    assert.deepEqual(
+      mine.listRecentTelemetryEvents(10).map((e) => e.event_type).sort(),
+      ["from-main", "from-worker"],
+    );
+  } finally {
+    await worker.terminate();
+    mine.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// PANT-827 — lane.status_changed emission (replaces main.ts's status-watcher poll).
+
+function recordingStore(): { store: StateStore; events: LaneStatusChangedEvent[] } {
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "codex", provider: "codex", credential_ref: "CODEX_TOKEN" });
+  const events: LaneStatusChangedEvent[] = [];
+  store.events.onStatusChanged((event) => events.push(event));
+  return { store, events };
+}
+
+function statusEntry(status: "up" | "down" | "out_of_credit", observed_at: string) {
+  return { lane_id: "codex", status, reset_at: null, reason: null, signal_source: "active_probe" as const, observed_at };
+}
+
+test("recordStatus emits lane.status_changed only when the resolved status changes", () => {
+  const { store, events } = recordingStore();
+
+  store.recordStatus(statusEntry("up", "2026-09-27T10:00:00.000Z"));
+  store.recordStatus(statusEntry("up", "2026-09-27T10:00:05.000Z"));
+  store.recordStatus({
+    ...statusEntry("out_of_credit", "2026-09-27T10:00:10.000Z"),
+    error_code: "quota_exceeded",
+    reset_at: "2026-09-28T00:00:00.000Z",
+  });
+  store.recordStatus(statusEntry("out_of_credit", "2026-09-27T10:00:15.000Z"));
+  // Out of order (older than the latest row) — current status unchanged, no event.
+  store.recordStatus(statusEntry("up", "2026-09-27T09:00:00.000Z"));
+
+  assert.deepEqual(
+    events.map((e) => [e.from, e.to, e.cause]),
+    [
+      [null, "up", "status"],
+      ["up", "out_of_credit", "status"],
+    ],
+  );
+  assert.equal(events[1].error_code, "quota_exceeded");
+  assert.equal(events[1].reset_at, "2026-09-28T00:00:00.000Z");
+  assert.equal(events[1].lane_id, "codex");
+  assert.ok(!Number.isNaN(Date.parse(events[1].observed_at)));
+  store.close();
+});
+
+test("manual override / reset_at changes emit lane.status_changed; unchanged re-sets don't", () => {
+  const { store, events } = recordingStore();
+  store.recordStatus(statusEntry("up", "2026-09-27T10:00:00.000Z"));
+  events.length = 0;
+
+  store.setManualOverride("codex", "disabled", "maintenance");
+  store.setManualOverride("codex", "disabled", "maintenance");
+  store.setManualResetAt("codex", "2026-09-27T12:00:00.000Z");
+  store.setManualResetAt("codex", "2026-09-27T12:00:00.000Z");
+  store.setManualOverride("codex", null);
+
+  assert.deepEqual(
+    events.map((e) => [e.from, e.to, e.cause]),
+    [
+      ["up", "up", "manual_override"],
+      ["up", "up", "manual_reset_at"],
+      ["up", "up", "manual_override"],
+    ],
+  );
+  // Manual reset_at wins over the (null) sensed one in the event payload.
+  assert.equal(events[1].reset_at, "2026-09-27T12:00:00.000Z");
+  store.close();
+});
+
+test("a throwing lane.status_changed listener neither fails the write nor starves other listeners", () => {
+  const { store, events } = recordingStore();
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    store.events.onStatusChanged(() => {
+      throw new Error("boom");
+    });
+    const late: string[] = [];
+    store.events.onStatusChanged((e) => late.push(e.to));
+    store.recordStatus(statusEntry("down", "2026-09-27T10:00:00.000Z"));
+    assert.equal(store.getCurrentStatus("codex")?.status, "down");
+    assert.equal(events.length, 1);
+    assert.deepEqual(late, ["down"]);
+  } finally {
+    console.error = originalError;
+    store.close();
+  }
 });

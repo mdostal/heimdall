@@ -3,7 +3,9 @@
 // no build step, no framework, no new npm dependency, no external network
 // calls — a consumer of Heimdall's own HTTP surface only.
 //
-// hdl-lane-status-ui: read-only live status (GET /lanes, polled every 5s).
+// hdl-lane-status-ui: read-only live status (GET /lanes, re-fetched on each
+// lane.status_changed event from GET /events — PANT-827; 5s poll only as an
+// SSE fallback).
 // hdl-lane-override: per-lane enable/disable/auto controls, routed through
 //   the same ControlAdapter.reconcile() decision automatic sensing uses
 //   (POST /lanes/:laneId/override) — never a separate mechanism.
@@ -181,6 +183,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
   .badge-degraded { background: var(--hd-status-degraded); }
   .badge-down { background: var(--hd-status-down); }
   .badge-out_of_credit { background: var(--hd-status-credit); }
+  .badge-no-signal { background: var(--hd-status-off); }
   .override-badge {
     display: inline-block;
     margin-left: 0.4rem;
@@ -211,6 +214,12 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
   }
   .empty-state { color: var(--hd-text-muted); padding: 2rem 0; }
   .reason { color: var(--hd-text-muted); font-size: 0.85rem; }
+  .limits { margin-top: 0.35rem; display: flex; flex-direction: column; gap: 0.2rem; }
+  .limit-row { font-size: 0.8rem; color: var(--hd-text-muted); }
+  .limit-chip { display: inline-block; padding: 0 0.35rem; border-radius: 4px; border: 1px solid currentColor; margin-right: 0.3rem; font-family: monospace; }
+  .limit-exhausted .limit-chip { color: var(--hd-status-credit); }
+  .limit-available .limit-chip { color: var(--hd-status-up); }
+  .limit-unknown .limit-chip { color: var(--hd-text-muted); }
   .gateway-header td {
     background: var(--hd-surface-2);
     font-size: 0.75rem;
@@ -448,7 +457,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
 </head>
 <body>
   <h1>Heimdall — Lane Status <a href="/docs" style="font-size:0.6em;font-weight:400;">Docs &rarr;</a></h1>
-  <div class="subtitle">Polls <code>GET /lanes</code> every 5s · manual overrides route through the same ControlAdapter Heimdall already uses for automatic sensing</div>
+  <div class="subtitle">Live via <code>GET /events</code> (refetches <code>GET /lanes</code> on each status change) · manual overrides route through the same ControlAdapter Heimdall already uses for automatic sensing</div>
 
   <div class="panel" id="agent-onboarding-panel">
     <div class="agent-onboarding-collapsed" id="agent-onboarding-collapsed" style="display:${onboardingCollapsedDisplay};">
@@ -478,6 +487,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       <span><i class="legend-dot" style="background:var(--hd-status-degraded)"></i>degraded</span>
       <span><i class="legend-dot" style="background:var(--hd-status-credit)"></i>out of credit</span>
       <span><i class="legend-dot" style="background:var(--hd-status-down)"></i>down</span>
+      <span><i class="legend-dot" style="background:var(--hd-status-off)"></i>no signal</span>
       <span><i class="legend-dot" style="border:1.3px solid var(--hd-status-off);background:transparent"></i>overridden</span>
     </div>
   </div>
@@ -653,6 +663,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
 
   function tokenChip(lane) {
     if (lane.credential_configured) return "<span class=\\"chip\\">configured</span>";
+    if (lane.credential_state === "credential_unavailable") return "<span class=\\"chip chip-missing\\">credential source unreachable</span>";
     return "<span class=\\"chip chip-missing\\">token missing</span>";
   }
 
@@ -725,6 +736,26 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
     );
   }
 
+  // heimdall#142: each separate account limit (5-hour, weekly, per-model
+  // weekly, credits, spend cap) with its state, percent and reset time. A
+  // number the provider did not give reads "unknown", never an estimate.
+  function limitsBlock(lane) {
+    var limits = lane.limits || [];
+    if (limits.length === 0) return "";
+    var laneAttr = escapeHtml(lane.lane_id);
+    return "<div class=\\"limits\\">" + limits.map(function (limit) {
+      var percent = limit.used_percent === null || limit.used_percent === undefined
+        ? "usage unknown"
+        : escapeHtml(String(limit.used_percent)) + "% used";
+      var reset = limit.resets_at ? "resets " + escapeHtml(formatResetAt(limit.resets_at)) : "reset time unknown";
+      return "<div class=\\"limit-row limit-" + escapeHtml(limit.state) + "\\" title=\\"" + escapeHtml(limit.reason || "") + "\\">" +
+        "<span class=\\"limit-chip\\">" + escapeHtml(limit.kind) + "</span>" +
+        escapeHtml(limit.state) + " / " + percent + " / " + reset + " / " + escapeHtml(limit.source) +
+        " <button type=\\"button\\" data-lane=\\"" + laneAttr + "\\" data-limit-kind=\\"" + escapeHtml(limit.kind) + "\\" data-limit-clear=\\"1\\">Clear</button>" +
+        "</div>";
+    }).join("") + "</div>";
+  }
+
   function errorCodeChip(lane) {
     // hdl-error-taxonomy: the normalized code, distinct from the native
     // reason text — "degraded from X" at a glance, full detail still in the
@@ -733,17 +764,36 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
     return "<span class=\\"error-code-chip\\">" + escapeHtml(lane.error_code) + "</span> ";
   }
 
-  function renderRow(lane) {
+  // PANT-823: a never-probed or stale lane has no live signal, so its
+  // status (often the REQ-07 "down" fallback) isn't an observed outage —
+  // shown grey as "no signal" instead of in its status colour. The raw
+  // status stays visible in the badge's tooltip and in GET /lanes.
+  function hasNoSignal(lane) {
+    return lane.signal_state === "never_probed" || lane.signal_state === "stale";
+  }
+
+  function statusBadge(lane) {
+    if (hasNoSignal(lane)) {
+      var detail = lane.signal_state === "never_probed"
+        ? "never probed"
+        : "stale — last probed " + (lane.last_probed_at || "unknown");
+      return "<span class=\\"badge badge-no-signal\\" title=\\"" + escapeHtml("status " + lane.status + ", " + detail) + "\\">" +
+        escapeHtml(lane.signal_state === "never_probed" ? "no signal" : "no signal (stale)") + "</span>";
+    }
     var badgeClass = "badge badge-" + escapeHtml(lane.status);
     var label = BADGE_LABEL[lane.status] || lane.status;
+    return "<span class=\\"" + badgeClass + "\\">" + escapeHtml(label) + "</span>";
+  }
+
+  function renderRow(lane) {
     return (
       "<tr>" +
       "<td>" + escapeHtml(lane.lane_id) + "</td>" +
       "<td>" + escapeHtml(lane.provider) + "</td>" +
       "<td>" + escapeHtml(lane.model || "") + priorityBadge(lane.priority) + "</td>" +
-      "<td><span class=\\"" + badgeClass + "\\">" + escapeHtml(label) + "</span>" + overrideBadge(lane.manual_override) + "</td>" +
+      "<td>" + statusBadge(lane) + overrideBadge(lane.manual_override) + "</td>" +
       "<td>" + tokenChip(lane) + "</td>" +
-      "<td class=\\"reason\\">" + errorCodeChip(lane) + escapeHtml(lane.reason) + "</td>" +
+      "<td class=\\"reason\\">" + errorCodeChip(lane) + escapeHtml(lane.reason) + limitsBlock(lane) + "</td>" +
       "<td>" + resetAtCell(lane) + "</td>" +
       "<td>" + headroomCell(lane) + "</td>" +
       "<td>" + costTierCell(lane) + "</td>" +
@@ -815,8 +865,12 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       var angle = (i / n) * 2 * Math.PI;
       var cx = (100 + ring * Math.sin(angle)).toFixed(2);
       var cy = (100 - ring * Math.cos(angle)).toFixed(2);
-      var colorVar = "var(" + (SCOPE_COLOR_VAR[lane.status] || SCOPE_COLOR_VAR.down) + ")";
-      var title = escapeHtml(lane.lane_id) + " — " + escapeHtml(lane.status) + (lane.manual_override ? " (overridden)" : "");
+      var colorVar = hasNoSignal(lane)
+        ? "var(--hd-status-off)"
+        : "var(" + (SCOPE_COLOR_VAR[lane.status] || SCOPE_COLOR_VAR.down) + ")";
+      var title = escapeHtml(lane.lane_id) + " — " + escapeHtml(lane.status) +
+        (hasNoSignal(lane) ? " (no signal: " + escapeHtml(lane.signal_state) + ")" : "") +
+        (lane.manual_override ? " (overridden)" : "");
       if (lane.manual_override) {
         blips +=
           "<g class=\\"blip\\"><title>" + title + "</title>" +
@@ -859,6 +913,37 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       "</tr></thead>" +
       "<tbody>" + rows + "</tbody>" +
       "</table>";
+  }
+
+  // PANT-827: event-driven refresh. GET /events (SSE) pushes
+  // lane.status_changed only when a lane actually changes; each event (and
+  // each (re)connect, to catch anything missed while disconnected)
+  // re-fetches GET /lanes. The old 5s poll survives only as a fallback when
+  // SSE is unavailable or the stream is given up on.
+  var fallbackPollTimer = null;
+  function startFallbackPoll() {
+    if (fallbackPollTimer === null) fallbackPollTimer = setInterval(poll, 5000);
+  }
+
+  function subscribeLaneEvents() {
+    if (typeof EventSource === "undefined") {
+      startFallbackPoll();
+      return;
+    }
+    var source = new EventSource("/events");
+    var connected = false;
+    source.addEventListener("open", function () {
+      connected = true;
+      poll();
+    });
+    source.addEventListener("lane.status_changed", function () { poll(); });
+    source.addEventListener("error", function () {
+      // Never connected, or the browser stopped auto-reconnecting: poll instead.
+      if (!connected || source.readyState === EventSource.CLOSED) {
+        source.close();
+        startFallbackPoll();
+      }
+    });
   }
 
   function poll() {
@@ -909,6 +994,19 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       return;
     }
 
+    var limitClearBtn = event.target.closest("button[data-limit-clear]");
+    if (limitClearBtn) {
+      limitClearBtn.disabled = true;
+      fetch("/lanes/" + encodeURIComponent(limitClearBtn.getAttribute("data-lane")) + "/limits/clear", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ kind: limitClearBtn.getAttribute("data-limit-kind") })
+      })
+        .then(poll)
+        .catch(function () { limitClearBtn.disabled = false; });
+      return;
+    }
+
     var clearBtn = event.target.closest("button[data-reset-clear]");
     if (clearBtn) {
       var clearLaneId = clearBtn.getAttribute("data-lane");
@@ -924,7 +1022,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
     }
 
     // hdl-bp-06: per-lane headroom Save/Clear -- same delegation pattern as
-    // the reset-at controls just above (event delegation survives the 5s
+    // the reset-at controls just above (event delegation survives the
     // re-render; direct listeners on the buttons wouldn't).
     var headroomSaveBtn = event.target.closest("button[data-headroom-save]");
     if (headroomSaveBtn) {
@@ -1189,11 +1287,64 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
     return { families: families, order: order };
   }
 
+  function parseLabels(labels) {
+    var out = {};
+    var re = /([a-zA-Z_]+)="([^"]*)"/g;
+    var m;
+    while ((m = re.exec(labels)) !== null) out[m[1]] = m[2];
+    return out;
+  }
+
+  // PANT-824: per-lane sensing summary above the raw table — probes by
+  // result, last-probe age, status transitions, mean probe duration and
+  // scheduler start failures, i.e. "is each lane actually being sensed".
+  function renderSensingSummary(parsed) {
+    var lanes = {};
+    var laneOrder = [];
+    function lane(id) {
+      if (!lanes[id]) {
+        lanes[id] = { probes: {}, age: null, transitions: 0, durSum: 0, durCount: 0, schedFailures: 0 };
+        laneOrder.push(id);
+      }
+      return lanes[id];
+    }
+    function each(name, fn) {
+      (parsed.families[name] || []).forEach(function (s) { fn(parseLabels(s.labels), Number(s.value)); });
+    }
+    each("heimdall_probes_total", function (l, v) {
+      var key = l.result === "up" || l.error_code === "none" ? l.result : l.result + " (" + l.error_code + ")";
+      var entry = lane(l.lane);
+      entry.probes[key] = (entry.probes[key] || 0) + v;
+    });
+    each("heimdall_lane_last_probe_age_seconds", function (l, v) { lane(l.lane).age = v; });
+    each("heimdall_lane_status_transitions_total", function (l, v) { lane(l.lane).transitions += v; });
+    each("heimdall_probe_duration_seconds_sum", function (l, v) { lane(l.lane).durSum += v; });
+    each("heimdall_probe_duration_seconds_count", function (l, v) { lane(l.lane).durCount += v; });
+    each("heimdall_scheduler_start_failures_total", function (l, v) { lane(l.lane).schedFailures += v; });
+    if (laneOrder.length === 0) return "";
+    var html = "<h3>Sensing</h3><table><thead><tr><th>Lane</th><th>Probes</th><th>Last probe</th>" +
+      "<th>Transitions</th><th>Mean probe</th><th>Scheduler start failures</th></tr></thead><tbody>";
+    laneOrder.forEach(function (id) {
+      var e = lanes[id];
+      var probes = Object.keys(e.probes).map(function (k) { return escapeHtml(k) + ": " + e.probes[k]; }).join(", ") || "none";
+      var age = e.age === null ? "never" : e.age + "s ago";
+      var mean = e.durCount > 0 ? (e.durSum / e.durCount).toFixed(2) + "s" : "—";
+      html += "<tr><td>" + escapeHtml(id) + "</td><td>" + probes + "</td><td>" + escapeHtml(age) +
+        "</td><td>" + e.transitions + "</td><td>" + escapeHtml(mean) + "</td><td>" +
+        (e.schedFailures > 0 ? "<strong>" + e.schedFailures + "</strong>" : "0") + "</td></tr>";
+    });
+    html += "</tbody></table>";
+    return html;
+  }
+
   function renderTelemetry(text) {
     var root = document.getElementById("telemetry-root");
     var parsed = parsePrometheusText(text);
     var rows = [];
     parsed.order.forEach(function (name) {
+      // Histogram buckets are unreadable as table rows — the sensing
+      // summary shows the mean from _sum/_count instead.
+      if (/_bucket$/.test(name)) return;
       parsed.families[name].forEach(function (sample) {
         rows.push({ name: name, labels: sample.labels, value: sample.value });
       });
@@ -1202,7 +1353,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       root.innerHTML = "<div class=\\"empty-state\\">No telemetry recorded yet.</div>";
       return;
     }
-    var html = "<table><thead><tr><th>Metric</th><th>Labels</th><th>Value</th></tr></thead><tbody>";
+    var html = renderSensingSummary(parsed) + "<table><thead><tr><th>Metric</th><th>Labels</th><th>Value</th></tr></thead><tbody>";
     rows.forEach(function (row) {
       html +=
         "<tr><td>" + escapeHtml(row.name) + "</td><td>" + escapeHtml(row.labels) +
@@ -1581,7 +1732,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
   loadBackoffAdvancedValues();
   loadBackoffProviderOverrides();
   poll();
-  setInterval(poll, 5000);
+  subscribeLaneEvents();
 })();
 </script>
 </body>

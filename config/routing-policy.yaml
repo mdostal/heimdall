@@ -22,3 +22,15 @@ experiments:
   arms:
     control:
       split: 1
+# excluded_lanes (optional, heimdall#123): lane ids that must never be routed
+# to. Applied to the candidate list before any strategy runs (priority,
+# round-robin and scored alike), and it wins over a manual "enabled"
+# override. A decision whose only healthy lane is excluded answers no route;
+# it never falls back to the excluded lane. task_type_weights are keyed by
+# provider family, so this is the only way to tell two lanes of the same
+# provider apart. Withheld lanes are reported as `excluded_lanes` on the route
+# response and recorded in the scored decision's rationale and ledger row
+# (request_summary.constraints.excluded_lanes). Example:
+#
+# excluded_lanes:
+#   - claude@mathew.dostal

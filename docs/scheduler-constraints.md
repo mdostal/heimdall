@@ -1,3 +1,9 @@
+---
+title: Scheduler Constraints
+nav_order: 13
+parent: Architecture
+---
+
 # Heimdall Scheduler — hard constraints (feed into `/plan`)
 
 Decision of record: `DEC-hdl-scheduler-backend` (Pantheon decision-log).

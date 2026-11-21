@@ -28,6 +28,11 @@ export interface RouteSelectionContext {
    * experiment bucketing isn't sticky for /available-route callers, only
    * for POST /route callers who supply one). */
   readonly taskId?: string;
+  /** heimdall#123 — lanes that were otherwise eligible but were withheld
+   * from `candidates` by the policy's excluded_lanes. Already removed
+   * upstream; only the scored strategy reads it, to record the withholding
+   * in its rationale and ledger. */
+  readonly excludedLanes?: readonly string[];
 }
 
 export interface RouteSelectionDetail {
@@ -36,6 +41,7 @@ export interface RouteSelectionDetail {
   experimentArm?: string;
   rankedCandidates?: ReadonlyArray<{ laneId: string; score: number }>;
   policyVersion?: string;
+  excludedLanes?: readonly string[];
 }
 
 export interface RouteSelectionResult {
