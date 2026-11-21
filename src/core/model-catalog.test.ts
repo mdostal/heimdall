@@ -121,7 +121,7 @@ test("hdl-mc-04: a lane with an unconfigured credential is skipped silently, no 
   store.close();
 });
 
-test("hdl-mc-04: a lane with an ungated provider (openrouter/ollama) is skipped, confirmed no fetch attempted", async () => {
+test("hdl-mc-04: a lane with an ungated provider (ollama) is skipped, confirmed no fetch attempted", async () => {
   const store = new StateStore(":memory:");
   let called = false;
   const fetchImpl: typeof fetch = (async () => {
@@ -129,7 +129,7 @@ test("hdl-mc-04: a lane with an ungated provider (openrouter/ollama) is skipped,
     return { ok: true, status: 200, json: async () => ({}) } as unknown as Response;
   }) as typeof fetch;
 
-  const registry = registryWithLane("openrouter", "OPENROUTER_TOKEN", "fake-key");
+  const registry = registryWithLane("ollama", "OLLAMA_TOKEN", "fake-key");
   await refreshModelCatalog(store, registry, fetchImpl);
   assert.equal(called, false);
   store.close();
@@ -209,7 +209,7 @@ test("hdl-mcr-01: resolveEffectiveModel falls back to the declared model when NO
   store.close();
 });
 
-test("hdl-mcr-01: resolveEffectiveModel never substitutes for an ungated provider (openrouter/ollama), regardless of model_catalog state", () => {
+test("hdl-mcr-01: resolveEffectiveModel preserves absent-provider fallback and ungated Ollama models", () => {
   const store = new StateStore(":memory:");
   // Even with catalog data present under a different provider key, an
   // ungated provider must never be affected.
@@ -222,3 +222,23 @@ test("hdl-mcr-01: resolveEffectiveModel never substitutes for an ungated provide
   assert.deepEqual(ollamaResult, { model: "llama3", substituted: false });
   store.close();
 });
+
+for (const [provider, host, model] of [
+  ["openrouter", "openrouter.ai", "anthropic/claude-sonnet-4"],
+  ["grok", "api.x.ai", "grok-code-fast-1"],
+]) {
+  test(provider + ": catalog refresh, selection and operator override survive refresh", async () => {
+    const store = new StateStore(":memory:");
+    try {
+      const registry = registryWithLane(provider, "TOKEN", "secret");
+      const fetchImpl = fakeFetch({ [host]: { data: [{ id: model, created: 1700000000 }] } });
+      const result = await refreshModelCatalog(store, registry, fetchImpl);
+      assert.deepEqual(result.providersRefreshed, [provider]);
+      assert.equal(getModelCatalog(store, provider)[0].model_id, model);
+      assert.deepEqual(resolveEffectiveModel(store, provider, "missing"), { model, substituted: true });
+      assert.equal(setModelEnabled(store, provider, model, false).ok, true);
+      await refreshModelCatalog(store, registry, fetchImpl);
+      assert.equal(getModelCatalog(store, provider)[0].enabled, false);
+    } finally { store.close(); }
+  });
+}

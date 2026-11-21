@@ -12,17 +12,18 @@ import { listKimiModels } from "./signal-sources/model-list/kimi.js";
 import { listGeminiModels } from "./signal-sources/model-list/gemini.js";
 import type { RawModelEntry } from "./signal-sources/model-list/claude.js";
 
+import { listOpenRouterModels } from "./signal-sources/model-list/openrouter.js";
+import { listGrokModels } from "./signal-sources/model-list/grok.js";
+
 type ModelListFn = (credential: string, fetchImpl?: typeof fetch) => Promise<RawModelEntry[]>;
 
-// The four providers this epic gates. OpenRouter/Ollama are deliberately
-// excluded — see research-brief.md's scoping note (OpenRouter routes are
-// already explicit per-lane declarations; Ollama has no deprecation
-// concept at all).
 const GATED_PROVIDER_LIST_FNS: Record<string, ModelListFn> = {
   claude: listClaudeModels,
   codex: listCodexModels,
   kimi: listKimiModels,
   gemini: listGeminiModels,
+  openrouter: listOpenRouterModels,
+  grok: listGrokModels,
 };
 
 export interface RefreshModelCatalogResult {
@@ -56,7 +57,7 @@ export async function refreshModelCatalog(
 
   for (const lane of registry.list()) {
     const listFn = GATED_PROVIDER_LIST_FNS[lane.provider];
-    if (!listFn) continue; // ungated provider (openrouter, ollama, or unknown) — skip silently
+    if (!listFn) continue; // ungated provider (ollama or unknown) — skip silently
     if (!lane.credential) continue; // unconfigured lane — nothing to fetch with
 
     // Dedup by credential_ref (the env-var NAME), never the resolved
