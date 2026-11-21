@@ -110,14 +110,14 @@ export function listLaneToolsDescriptor() {
     {
       name: LANES_ADD_TOOL_NAME,
       description:
-        "Declare a new lane, writing it to the local .env file. Does NOT restart the process — the new lane is inert until Heimdall is restarted (the response names the exact restart command).",
+        "Declare a new lane, persisting it in the state DB. Does NOT restart the process — the new lane is inert until Heimdall is restarted (the response names the exact restart command).",
       inputSchema: {
         type: "object" as const,
         properties: {
           lane_id: { type: "string" as const },
           provider: { type: "string" as const },
           model: { type: "string" as const },
-          token: { type: "string" as const, description: "The lane's credential — stored locally in .env, never returned by any Heimdall API." },
+          token: { type: "string" as const, description: "The lane's credential — stored locally in the state DB, never returned by any Heimdall API." },
         },
         required: ["lane_id", "provider", "model", "token"],
       },
@@ -222,8 +222,8 @@ export function callLaneSetResetAtTool(registry: LaneRegistry, store: StateStore
   return textResult(setLaneResetAt(registry, store, laneId, input.reset_at ?? null));
 }
 
-export function callAddLaneTool(registry: LaneRegistry, envFilePath: string, args: unknown) {
-  return textResult(addLane(registry, envFilePath, (args ?? {}) as AddLaneInput));
+export function callAddLaneTool(registry: LaneRegistry, store: StateStore, args: unknown) {
+  return textResult(addLane(registry, store, (args ?? {}) as AddLaneInput));
 }
 
 export function callRoutingStrategyGetTool(store: StateStore) {
@@ -294,14 +294,14 @@ type ToolResult = ReturnType<typeof callLanesListTool>;
 export function buildToolDispatch(
   registry: LaneRegistry,
   store: StateStore,
-  envFilePath: string = DEFAULT_ENV_FILE_PATH,
+  _envFilePath: string = DEFAULT_ENV_FILE_PATH,
   fetchImpl?: typeof fetch,
 ): Record<string, (args: unknown) => ToolResult | Promise<ToolResult>> {
   return {
     [LANES_LIST_TOOL_NAME]: () => callLanesListTool(registry, store),
     [LANES_OVERRIDE_TOOL_NAME]: (args) => callLaneOverrideTool(registry, store, args),
     [LANES_SET_RESET_AT_TOOL_NAME]: (args) => callLaneSetResetAtTool(registry, store, args),
-    [LANES_ADD_TOOL_NAME]: (args) => callAddLaneTool(registry, envFilePath, args),
+    [LANES_ADD_TOOL_NAME]: (args) => callAddLaneTool(registry, store, args),
     [ROUTING_STRATEGY_GET_TOOL_NAME]: () => callRoutingStrategyGetTool(store),
     [ROUTING_STRATEGY_SET_TOOL_NAME]: (args) => callRoutingStrategySetTool(store, args),
     [MODELS_LIST_TOOL_NAME]: (args) => callModelsListTool(store, args),
@@ -352,8 +352,8 @@ const isMainModule =
   process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`;
 
 if (isMainModule) {
-  const registry = buildLaneRegistry();
   const store = new StateStore(resolveDefaultDbPath());
+  const registry = buildLaneRegistry(process.env, store);
   const server = createMcpServer(registry, store);
   const transport = new StdioServerTransport();
   await server.connect(transport);

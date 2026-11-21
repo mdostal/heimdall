@@ -2,7 +2,8 @@
 //
 // Lanes are declared via HEIMDALL_LANE_<N>_{ID,PROVIDER,CREDENTIAL_REF}
 // env-var triples (contiguous numbering starting at 1; loading stops at the
-// first gap). credential_ref names another env var holding the actual
+// first gap), or the unbounded HEIMDALL_LANES_JSON array. credential_ref
+// names another env var holding the actual
 // secret — see credential-source.ts. This separation lets a lane be known
 // (declared) even when its credential fails to resolve, which is exactly
 // what REQ-07 requires: report down/unconfigured, don't crash, don't
@@ -107,6 +108,27 @@ export function loadLaneDeclarations(
       ...(rawHeadroom !== undefined ? { headroom: Number(rawHeadroom) } : {}),
       ...(rawCostTier !== undefined ? { cost_tier: rawCostTier as LaneCostTier } : {}),
     });
+  }
+  // A single JSON value crosses container boundaries without numbered compose slots.
+  if (env.HEIMDALL_LANES_JSON) {
+    const values: unknown = JSON.parse(env.HEIMDALL_LANES_JSON);
+    if (!Array.isArray(values)) throw new Error("HEIMDALL_LANES_JSON must be an array");
+    for (const value of values) {
+      if (!value || typeof value !== "object" ||
+          !["lane_id", "provider", "credential_ref"].every((key) =>
+            typeof value[key] === "string" && value[key].length > 0) ||
+          (value.model !== undefined && typeof value.model !== "string") ||
+          (value.priority !== undefined && (!Number.isInteger(value.priority) || value.priority < 0)) ||
+          (value.headroom !== undefined && (typeof value.headroom !== "number" || !Number.isFinite(value.headroom) || value.headroom < 0)) ||
+          (value.cost_tier !== undefined && !COST_TIERS.includes(value.cost_tier))) {
+        throw new Error("Invalid lane declaration in HEIMDALL_LANES_JSON");
+      }
+      const { lane_id, provider, credential_ref, model, priority, headroom, cost_tier } = value;
+      const lane = { lane_id, provider, credential_ref, model, priority, headroom, cost_tier };
+      const index = declarations.findIndex((entry) => entry.lane_id === lane_id);
+      if (index < 0) declarations.push(lane);
+      else declarations[index] = lane;
+    }
   }
   return declarations;
 }

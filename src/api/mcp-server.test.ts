@@ -257,8 +257,9 @@ test("hdl-mcp-02: callLaneSetResetAtTool sets and clears a manual reset_at, matc
 test("hdl-mcp-02: callAddLaneTool adds a lane and reports restart_required — an agent must be able to tell the lane isn't live yet", () => {
   const registry = registryWithOneConfiguredLane();
   const envPath = tmpEnvPath();
+  const addStore = new StateStore(":memory:");
   try {
-    const result = callAddLaneTool(registry, envPath, {
+    const result = callAddLaneTool(registry, addStore, {
       lane_id: "gemini@ops",
       provider: "gemini",
       model: "gemini-3-pro",
@@ -267,10 +268,11 @@ test("hdl-mcp-02: callAddLaneTool adds a lane and reports restart_required — a
     const parsed = JSON.parse(result.content[0].text);
     assert.equal(parsed.ok, true);
     assert.equal(parsed.lane_id, "gemini@ops");
-    assert.equal(parsed.credential_ref, "GEMINI_OPS_TOKEN");
+    assert.equal(parsed.credential_ref, "HEIMDALL_API_LANE_67656d696e69406f7073");
     assert.equal(parsed.restart_required, true);
     assert.equal(parsed.restart_command, "npm run dev");
   } finally {
+    addStore.close();
     fs.rmSync(envPath, { force: true });
   }
 });
@@ -278,11 +280,12 @@ test("hdl-mcp-02: callAddLaneTool adds a lane and reports restart_required — a
 test("hdl-mcp-02: callAddLaneTool does NOT throw on a duplicate lane_id — returns structured {ok: false} content instead", () => {
   const registry = registryWithOneConfiguredLane();
   const envPath = tmpEnvPath();
+  const addStore = new StateStore(":memory:");
   try {
     assert.doesNotThrow(() =>
-      callAddLaneTool(registry, envPath, { lane_id: "claude@mathew.dostal", provider: "claude", model: "claude-sonnet", token: "x" }),
+      callAddLaneTool(registry, addStore, { lane_id: "claude@mathew.dostal", provider: "claude", model: "claude-sonnet", token: "x" }),
     );
-    const result = callAddLaneTool(registry, envPath, {
+    const result = callAddLaneTool(registry, addStore, {
       lane_id: "claude@mathew.dostal",
       provider: "claude",
       model: "claude-sonnet",
@@ -292,6 +295,7 @@ test("hdl-mcp-02: callAddLaneTool does NOT throw on a duplicate lane_id — retu
     assert.equal(parsed.ok, false);
     assert.equal(parsed.error, "lane_already_declared");
   } finally {
+    addStore.close();
     fs.rmSync(envPath, { force: true });
   }
 });

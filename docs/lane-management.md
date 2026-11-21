@@ -29,7 +29,7 @@ HEIMDALL_LANE_1_CREDENTIAL_REF=MY_TOKEN
 MY_TOKEN=sk-ant-...
 ```
 
-You can also add a lane at runtime (without restarting) via the API:
+You can also add a lane through the API (restart Heimdall after creation) via the API:
 
 ```bash
 curl -X POST http://localhost:4870/lanes \
@@ -37,7 +37,21 @@ curl -X POST http://localhost:4870/lanes \
   -d '{"lane_id":"gemini@new","provider":"gemini","model":"gemini-2-pro","token":"AIza..."}'
 ```
 
-This persists the new lane to the `.env` file on disk. **The token is never returned by any API after this call.**
+This persists the declaration and token in the state DB (`HEIMDALL_DB_PATH`). Back up and restrict access to this file as it contains credentials. The response reports `restart_required: true`; restart Heimdall to load new lanes. **The token is never returned by any API after this call.**
+
+For container deployments, set `HEIMDALL_LANES_JSON` to a JSON array of declarations
+(`lane_id`, `provider`, `credential_ref`, optional `model`, `priority`, `headroom`,
+`cost_tier`). This supports any number of lanes through one compose variable.
+Numbered env declarations remain supported. JSON declarations override numbered
+declarations with the same ID; env declarations override API declarations with
+that ID. Removing an env override reveals the saved API declaration on restart.
+API duplicate IDs return 409, including additions pending a restart. Tokens are
+resolved from the saved API credential regardless of the configured credential
+backend. Env-only credentials still use the configured backend. Existing `.env`
+declarations keep working; they are not automatically imported into the DB.
+
+Persist the DB directory (including SQLite WAL files) across container recreates.
+The paired Pantheon compose configuration mounts `heimdall-state` for this purpose.
 
 ## Health states
 
