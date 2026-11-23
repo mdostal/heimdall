@@ -1002,3 +1002,56 @@ test("a throwing lane.status_changed listener neither fails the write nor starve
     store.close();
   }
 });
+
+test("time-boxed overrides expire without a read and emit exactly one expiry event", async () => {
+  const store = new StateStore();
+  const events: LaneStatusChangedEvent[] = [];
+  store.events.onStatusChanged(event => events.push(event));
+  try {
+    store.setManualOverride("timed", "enabled", "temporary", new Date(Date.now() + 40).toISOString());
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(events.filter(event => event.cause === "override_expired").length, 1);
+    assert.equal(store.getManualOverride("timed"), null);
+    assert.equal(store.getOverrideUntil("timed"), null);
+    assert.equal(store.getOverrideReason("timed"), null);
+  } finally { store.close(); }
+});
+
+test("persisted deadlines survive restart, replacements cancel expiry, and Auto clears metadata", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "heimdall-expiry-"));
+  const file = path.join(dir, "state.db");
+  let store = new StateStore(file);
+  try {
+    store.setManualOverride("timed", "disabled", "temporary", new Date(Date.now() + 60000).toISOString());
+    store.close();
+    store = new StateStore(file);
+    assert.equal(store.getManualOverride("timed"), "disabled");
+    const events: LaneStatusChangedEvent[] = [];
+    store.events.onStatusChanged(event => events.push(event));
+    store.expireOverrides(new Date(Date.now() + 120000));
+    assert.equal(store.getManualOverride("timed"), null);
+    assert.equal(events[0].cause, "override_expired");
+    store.setManualOverride("timed", "enabled", null, new Date(Date.now() + 60000).toISOString());
+    store.setManualOverride("timed", "disabled");
+    store.expireOverrides(new Date(Date.now() + 120000));
+    assert.equal(store.getManualOverride("timed"), "disabled");
+    store.setManualOverride("timed", null);
+    assert.equal(store.getOverrideUntil("timed"), null);
+  } finally { store.close(); fs.rmSync(dir, { recursive: true }); }
+});
+
+test("overdue overrides loaded after downtime expire and notify subscribers", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "heimdall-overdue-"));
+  const file = path.join(dir, "state.db");
+  let store = new StateStore(file);
+  try {
+    store.setManualOverride("overdue", "disabled", "pause", new Date(Date.now() - 1000).toISOString());
+    store.close();
+    store = new StateStore(file);
+    const events: LaneStatusChangedEvent[] = [];
+    store.events.onStatusChanged(event => events.push(event));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(events.filter(event => event.cause === "override_expired").length, 1);
+    assert.equal(store.getManualOverride("overdue"), null);
+  } finally { store.close(); fs.rmSync(dir, { recursive: true }); }
+});
