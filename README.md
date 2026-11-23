@@ -295,3 +295,13 @@ Heimdall is free, open-source, and built in the open by [Mathew Dostal](https://
 | ❤️ Sponsor | **[github.com/sponsors/mdostal](https://github.com/sponsors/mdostal)** |
 | ☕ Buy Me A Coffee | **[buymeacoffee.com/mdostal](https://www.buymeacoffee.com/mdostal)** |
 | 📬 Consulting / collab | **[mathew.dostal@gmail.com](mailto:mathew.dostal@gmail.com)** |
+
+Lane overrides can be time-boxed: `POST /lanes/:id/override` accepts
+`{"state":"disabled","reason":"maintenance","until":"2027-01-01T12:00:00Z"}`.
+`until` must be a future ISO-8601 timestamp with a timezone; omit it (or use
+`null`) for an indefinite override. Both enabled and disabled overrides revert
+to Auto when the deadline passes, including after downtime. Expiry clears the
+reason and emits `lane.status_changed` with cause `override_expired`.
+`GET /lanes` includes `override_until` and `effective_enabled` (credential
+configured and either forced enabled or automatically up). The dashboard's
+optional **Override until** field uses local time and displays the saved deadline.

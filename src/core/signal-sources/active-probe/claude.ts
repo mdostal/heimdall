@@ -24,6 +24,7 @@
 import { NodeCommandRunner, type CommandRunner } from "../../scheduler/command-runner.js";
 import { parseClaudeCapSignal, type ClaudeCapSignal } from "../../error-parser.js";
 import type { ErrorCode } from "../../status-model.js";
+import { isModelScopedCap, limitFromClaudeCapSignal, type LimitObservation } from "../../limits.js";
 
 export type ProbeStatusValue = "up" | "down" | "out_of_credit" | "degraded";
 
@@ -32,6 +33,8 @@ export interface ProbeResult {
   reset_at: string | null;
   reason: string | null;
   error_code: ErrorCode | null;
+  /** heimdall#142: limits this probe observed (e.g. the Fable weekly sub-limit). */
+  limits?: LimitObservation[];
 }
 
 const CLAUDE_MODELS_URL = "https://api.anthropic.com/v1/models";
@@ -101,12 +104,19 @@ export async function probeClaudeSubscriptionLane(
     // auth_failed, so the CLI's own output is what gets classified.
     const output = cliOutput(err);
     const capSignal = parseClaudeCapSignal(new Error(output));
+    // heimdall#142: "You've reached your Fable limit" is one model's
+    // sub-limit. Before this it fell through to auth_failed/down and took
+    // the whole account out of routing while Opus still had room.
+    if (capSignal && isModelScopedCap(capSignal)) {
+      return modelLimitResult(capSignal);
+    }
     if (isQuotaCap(capSignal)) {
       return {
         status: "out_of_credit",
         reset_at: capSignal.reset_at,
         reason: capSignal.reason,
         error_code: "quota_exceeded",
+        limits: limitsOf(capSignal),
       };
     }
     return {
@@ -118,6 +128,26 @@ export async function probeClaudeSubscriptionLane(
   }
 
   return { status: "up", reset_at: null, reason: null, error_code: null };
+}
+
+function limitsOf(signal: ClaudeCapSignal): LimitObservation[] {
+  const limit = limitFromClaudeCapSignal(signal);
+  return limit ? [limit] : [];
+}
+
+// heimdall#142: the account is reachable and serves its other models, so the
+// lane stays `up`; the exhausted model shows in `limits` and in the reason.
+// reset_at stays null: it is the lane-wide timer, and the lane is not capped.
+function modelLimitResult(signal: ClaudeCapSignal): ProbeResult {
+  const limits = limitsOf(signal);
+  const kind = limits[0]?.kind ?? `weekly_model:${signal.model}`;
+  return {
+    status: "up",
+    reset_at: null,
+    reason: `${kind} exhausted; other models on this account not affected: ${signal.reason}`,
+    error_code: "quota_exceeded",
+    limits,
+  };
 }
 
 // The CLI's own words from a failed run: stdout and stderr (where execFile
@@ -202,6 +232,9 @@ async function interpretRateLimitResponse(response: Response): Promise<ProbeResu
   }
 
   const signal = parseClaudeCapSignal({ status: response.status, headers: response.headers, body });
+  if (signal && isModelScopedCap(signal)) {
+    return modelLimitResult(signal);
+  }
   const status: ProbeStatusValue = isQuotaCap(signal) ? "out_of_credit" : "degraded";
   // The specific Anthropic header first (proven-correct, already shipped
   // behavior); parseClaudeCapSignal's own reset_at (retry-after-based, per
@@ -213,5 +246,6 @@ async function interpretRateLimitResponse(response: Response): Promise<ProbeResu
     reset_at: resetAt,
     reason: signal?.reason ?? "rate limited (429)",
     error_code: isQuotaCap(signal) ? "quota_exceeded" : "rate_limit",
+    limits: signal ? limitsOf(signal) : [],
   };
 }

@@ -1215,6 +1215,7 @@ test("hdl-mcp-01: setLaneOverride is independently callable without an HTTP serv
       lane_id: "claude@mathew.dostal",
       manual_override: "disabled",
       override_reason: null,
+      override_until: null,
     });
     assert.equal(store.getManualOverride("claude@mathew.dostal"), "disabled");
   } finally {
@@ -1253,7 +1254,7 @@ test("PANT-185: pushLaneStatus records the status with signal_source='passive' a
   const store = new StateStore(":memory:");
   try {
     const result = pushLaneStatus(registry, store, "claude@mathew.dostal", "out_of_credit");
-    assert.deepEqual(result, { ok: true, lane_id: "claude@mathew.dostal", status: "out_of_credit", signal_source: "passive" });
+    assert.deepEqual(result, { ok: true, lane_id: "claude@mathew.dostal", status: "out_of_credit", signal_source: "passive", limit: null });
     const current = store.getCurrentStatus("claude@mathew.dostal");
     assert.equal(current?.status, "out_of_credit");
     assert.equal(current?.signal_source, "passive");
@@ -2234,7 +2235,7 @@ test("hdl-override-reason: GET / (dashboard) renders a reason input next to the 
     assert.match(body, /override-reason-input/, "must render a reason input the operator can type into before overriding");
     assert.match(
       body,
-      /body: JSON\.stringify\(\{ state: state, reason: reason \}\)/,
+      /body: JSON\.stringify\(\{ state: state, reason: reason, until: until \}\)/,
       "the click handler must send the reason input's current value alongside state",
     );
     assert.match(body, /override-reason-note/, "must render the persisted reason as a distinct, scoped element (not the shared .reason class also used for status text and the routing-policy panel)");
@@ -3614,6 +3615,131 @@ test("heimdall#95: a synchronous throw in a route returns a JSON 500 and the ser
   } finally {
     console.error = originalConsoleError;
     server.close();
+    store.close();
+  }
+});
+
+test("time-boxed override API validates deadlines and exposes effective policy", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore();
+  const server = createHttpServer(registry, store);
+  await new Promise<void>(resolve => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  const url = `http://localhost:${port}`;
+  const post = (body: object) => fetch(url + "/lanes/claude@mathew.dostal/override", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  try {
+    for (const until of ["garbage", 123, "2020-01-01T00:00:00Z", "2099-01-01T00:00:00"]) {
+      assert.equal((await post({ state: "enabled", until })).status, 400);
+    }
+    const until = new Date(Date.now() + 60000).toISOString();
+    assert.equal((await post({ state: "enabled", until })).status, 200);
+    let lane = (await (await fetch(url + "/lanes")).json())[0];
+    assert.equal(lane.override_until, until);
+    assert.equal(lane.effective_enabled, true);
+    store.expireOverrides(new Date(Date.now() + 120000));
+    lane = (await (await fetch(url + "/lanes")).json())[0];
+    assert.equal(lane.manual_override, null);
+    assert.equal(lane.override_until, null);
+    assert.equal(lane.effective_enabled, false);
+    const html = await (await fetch(url + "/")).text();
+    assert.match(html, /override-until-input/);
+    assert.match(html, /Reverts to Auto at/);
+  } finally { server.close(); store.close(); }
+});
+
+const FABLE_LIMIT_ERROR = "You've reached your Fable limit · resets Fri 1pm (America/Chicago). /upgrade or switch to Opus to continue.";
+
+test("heimdall#142: a pushed Fable limit records only weekly_model:<id> and leaves the lane up", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const previous = process.env.HEIMDALL_CLAUDE_MODEL_ALIASES;
+  process.env.HEIMDALL_CLAUDE_MODEL_ALIASES = "fable=claude-fable-5-2";
+  try {
+    const now = new Date("2026-11-15T15:00:00Z");
+    pushLaneStatus(registry, store, "claude@mathew.dostal", "up", undefined, now);
+    const result = pushLaneStatus(registry, store, "claude@mathew.dostal", "out_of_credit", FABLE_LIMIT_ERROR, now);
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.status, "up", "a per-model limit must not take the whole account out of routing");
+      assert.equal(result.limit?.kind, "weekly_model:claude-fable-5-2");
+    }
+    assert.equal(store.getCurrentStatus("claude@mathew.dostal")?.status, "up");
+    const limits = store.getLimits("claude@mathew.dostal", now);
+    assert.deepEqual(limits.map((l) => [l.kind, l.state, l.resets_at, l.used_percent]), [
+      ["weekly_model:claude-fable-5-2", "exhausted", "2026-11-20T19:00:00.000Z", null],
+    ]);
+    const status = getLaneStatuses(registry, store).find((s) => s.lane_id === "claude@mathew.dostal");
+    assert.equal(status?.limits.length, 1, "lane status shows the limit");
+  } finally {
+    if (previous === undefined) delete process.env.HEIMDALL_CLAUDE_MODEL_ALIASES;
+    else process.env.HEIMDALL_CLAUDE_MODEL_ALIASES = previous;
+    store.close();
+  }
+});
+
+test("heimdall#142: a pushed account-wide weekly limit records out_of_credit with the provider's reset time", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  try {
+    const now = new Date("2026-11-15T15:00:00Z");
+    const result = pushLaneStatus(registry, store, "claude@mathew.dostal", "out_of_credit",
+      "You've hit your weekly limit · resets Mon 9am (UTC)", now);
+    assert.equal(result.ok, true);
+    const current = store.getCurrentStatus("claude@mathew.dostal");
+    assert.equal(current?.status, "out_of_credit");
+    assert.equal(current?.reset_at, "2026-11-16T09:00:00.000Z");
+    assert.equal(store.getLimits("claude@mathew.dostal", now)[0]?.kind, "weekly_all_models");
+  } finally {
+    store.close();
+  }
+});
+
+test("heimdall#142: pushLaneStatus rejects a non-string error", () => {
+  const store = new StateStore(":memory:");
+  try {
+    const result = pushLaneStatus(registryWithOneConfiguredLane(), store, "claude@mathew.dostal", "down", { message: 1 });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.error, "invalid_error");
+  } finally {
+    store.close();
+  }
+});
+
+test("heimdall#142: PATCH with error, GET /lanes limits, POST /lanes/:id/limits/clear", async () => {
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registryWithOneConfiguredLane(), store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  const base = `http://localhost:${port}/lanes/claude%40mathew.dostal`;
+  try {
+    const patch = await fetch(base, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "out_of_credit", error: FABLE_LIMIT_ERROR }),
+    });
+    assert.equal(patch.status, 200);
+    const patched = (await patch.json()) as { limit: { scope: string } | null };
+    assert.equal(patched.limit?.scope, "model");
+
+    const lanes = (await (await fetch(`http://localhost:${port}/lanes`)).json()) as Array<{ lane_id: string; limits: Array<{ kind: string }> }>;
+    const lane = lanes.find((l) => l.lane_id === "claude@mathew.dostal");
+    assert.equal(lane?.limits.length, 1);
+    const kind = lane?.limits[0]?.kind;
+
+    const post = (body: unknown) => fetch(`${base}/limits/clear`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    assert.equal((await post({})).status, 400);
+    const cleared = await post({ kind });
+    assert.equal(cleared.status, 200);
+    assert.deepEqual(((await cleared.json()) as { limits: unknown[] }).limits, []);
+    assert.equal((await post({ kind })).status, 404);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     store.close();
   }
 });

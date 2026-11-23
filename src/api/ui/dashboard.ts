@@ -214,6 +214,12 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
   }
   .empty-state { color: var(--hd-text-muted); padding: 2rem 0; }
   .reason { color: var(--hd-text-muted); font-size: 0.85rem; }
+  .limits { margin-top: 0.35rem; display: flex; flex-direction: column; gap: 0.2rem; }
+  .limit-row { font-size: 0.8rem; color: var(--hd-text-muted); }
+  .limit-chip { display: inline-block; padding: 0 0.35rem; border-radius: 4px; border: 1px solid currentColor; margin-right: 0.3rem; font-family: monospace; }
+  .limit-exhausted .limit-chip { color: var(--hd-status-credit); }
+  .limit-available .limit-chip { color: var(--hd-status-up); }
+  .limit-unknown .limit-chip { color: var(--hd-text-muted); }
   .gateway-header td {
     background: var(--hd-surface-2);
     font-size: 0.75rem;
@@ -645,13 +651,17 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
     var reasonInput =
       "<input type=\\"text\\" class=\\"override-reason-input\\" placeholder=\\"reason (optional)\\" " +
       "data-lane=\\"" + laneAttr + "\\" value=\\"" + escapeHtml(lane.override_reason || "") + "\\">";
+    var untilInput =
+      "<label>Override until (optional) <input type=\\"datetime-local\\" class=\\"override-until-input\\" data-lane=\\"" + laneAttr + "\\"></label>";
+    var untilDisplay = lane.override_until
+      ? "<div class=\\"override-expiry\\">Reverts to Auto at " + escapeHtml(lane.override_until) + "</div>" : "";
     var reasonDisplay = lane.override_reason
       ? "<div class=\\"reason override-reason-note\\">\\u201c" + escapeHtml(lane.override_reason) + "\\u201d</div>"
       : "";
     return (
       "<span class=\\"override-controls\\">" +
       btn("enabled", "Enable") + btn("disabled", "Disable") + btn("auto", "Auto") +
-      "</span>" + reasonInput + reasonDisplay
+      "</span>" + reasonInput + reasonDisplay + untilInput + untilDisplay
     );
   }
 
@@ -730,6 +740,26 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
     );
   }
 
+  // heimdall#142: each separate account limit (5-hour, weekly, per-model
+  // weekly, credits, spend cap) with its state, percent and reset time. A
+  // number the provider did not give reads "unknown", never an estimate.
+  function limitsBlock(lane) {
+    var limits = lane.limits || [];
+    if (limits.length === 0) return "";
+    var laneAttr = escapeHtml(lane.lane_id);
+    return "<div class=\\"limits\\">" + limits.map(function (limit) {
+      var percent = limit.used_percent === null || limit.used_percent === undefined
+        ? "usage unknown"
+        : escapeHtml(String(limit.used_percent)) + "% used";
+      var reset = limit.resets_at ? "resets " + escapeHtml(formatResetAt(limit.resets_at)) : "reset time unknown";
+      return "<div class=\\"limit-row limit-" + escapeHtml(limit.state) + "\\" title=\\"" + escapeHtml(limit.reason || "") + "\\">" +
+        "<span class=\\"limit-chip\\">" + escapeHtml(limit.kind) + "</span>" +
+        escapeHtml(limit.state) + " / " + percent + " / " + reset + " / " + escapeHtml(limit.source) +
+        " <button type=\\"button\\" data-lane=\\"" + laneAttr + "\\" data-limit-kind=\\"" + escapeHtml(limit.kind) + "\\" data-limit-clear=\\"1\\">Clear</button>" +
+        "</div>";
+    }).join("") + "</div>";
+  }
+
   function errorCodeChip(lane) {
     // hdl-error-taxonomy: the normalized code, distinct from the native
     // reason text — "degraded from X" at a glance, full detail still in the
@@ -767,7 +797,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       "<td>" + escapeHtml(lane.model || "") + priorityBadge(lane.priority) + "</td>" +
       "<td>" + statusBadge(lane) + overrideBadge(lane.manual_override) + "</td>" +
       "<td>" + tokenChip(lane) + "</td>" +
-      "<td class=\\"reason\\">" + errorCodeChip(lane) + escapeHtml(lane.reason) + "</td>" +
+      "<td class=\\"reason\\">" + errorCodeChip(lane) + escapeHtml(lane.reason) + limitsBlock(lane) + "</td>" +
       "<td>" + resetAtCell(lane) + "</td>" +
       "<td>" + headroomCell(lane) + "</td>" +
       "<td>" + costTierCell(lane) + "</td>" +
@@ -940,11 +970,13 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       var state = overrideBtn.getAttribute("data-state");
       var reasonInputEl = document.querySelector('.override-reason-input[data-lane="' + CSS.escape(laneId) + '"]');
       var reason = reasonInputEl ? reasonInputEl.value : "";
+      var untilInputEl = document.querySelector('.override-until-input[data-lane="' + CSS.escape(laneId) + '"]');
+      var until = state !== "auto" && untilInputEl && untilInputEl.value ? new Date(untilInputEl.value).toISOString() : null;
       overrideBtn.disabled = true;
       fetch("/lanes/" + encodeURIComponent(laneId) + "/override", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ state: state, reason: reason })
+        body: JSON.stringify({ state: state, reason: reason, until: until })
       })
         .then(poll)
         .catch(function () { overrideBtn.disabled = false; });
@@ -965,6 +997,19 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       })
         .then(poll)
         .catch(function () { saveBtn.disabled = false; });
+      return;
+    }
+
+    var limitClearBtn = event.target.closest("button[data-limit-clear]");
+    if (limitClearBtn) {
+      limitClearBtn.disabled = true;
+      fetch("/lanes/" + encodeURIComponent(limitClearBtn.getAttribute("data-lane")) + "/limits/clear", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ kind: limitClearBtn.getAttribute("data-limit-kind") })
+      })
+        .then(poll)
+        .catch(function () { limitClearBtn.disabled = false; });
       return;
     }
 

@@ -83,6 +83,7 @@ OLLAMA_DUMMY=local
 | `HEIMDALL_TOKEN_REGISTRY_PATH` | `$HEIMDALL_HOME/token-registry.json` | Path to the multi-account token registry file. |
 | `HEIMDALL_CODEX_HOME_ROOT` | `$HEIMDALL_HOME/codex` | Where Heimdall keeps its own `CODEX_HOME` for each ChatGPT-login codex lane. Put it on a persistent volume. See [Codex credentials](#codex-credentials). |
 | `HEIMDALL_SIGNAL_STALE_MULTIPLIER` | `3` | A lane's `signal_state` becomes `stale` when its last observation is older than this many × its expected probe interval (PANT-823). With the default 5-minute interval that is 15 min. |
+| `HEIMDALL_CLAUDE_MODEL_ALIASES` | _(empty)_ | Maps model display names in Claude limit messages to model ids, as comma-separated `name=model_id` pairs, e.g. `fable=claude-fable-5-2,opus=claude-opus-5-5`. Names match case-insensitively. "You've reached your Fable limit" then records the limit `weekly_model:claude-fable-5-2`. An unmapped name is kept as its lowercase display name (`weekly_model:fable`). See heimdall#142. |
 | `HEIMDALL_READINESS_STALENESS_MS` | `900000` (15 min) | `GET /readyz` reports `degraded` if no lane has been observed within this window. |
 
 ## Multica integration

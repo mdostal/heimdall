@@ -8,6 +8,7 @@
 // ResponseLike before calling observePassiveSignal.
 
 import type { ErrorCode } from "../status-model.js";
+import type { LimitObservation } from "../limits.js";
 
 export interface ResponseLike {
   ok: boolean;
@@ -22,6 +23,8 @@ export interface ResponseLike {
    * statusCode heuristics below, which only see a thin normalized shape. */
   classifiedStatus?: PassiveSignalValue;
   errorCode?: ErrorCode | null;
+  /** heimdall#142: limits the response named (e.g. a per-model weekly sub-limit). */
+  limits?: LimitObservation[];
 }
 
 export type PassiveSignalValue = "up" | "degraded" | "down" | "out_of_credit";
@@ -31,6 +34,7 @@ export interface PassiveSignal {
   reset_at: string | null;
   reason: string | null;
   error_code?: ErrorCode | null;
+  limits?: LimitObservation[];
 }
 
 /**
@@ -47,6 +51,7 @@ export function observePassiveSignal(response: ResponseLike | null): PassiveSign
       reset_at: response.resetAt ?? null,
       reason: response.message ?? null,
       error_code: response.errorCode ?? null,
+      ...(response.limits ? { limits: response.limits } : {}),
     };
   }
 

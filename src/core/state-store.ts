@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { LaneCostTier, LaneDeclaration } from "./lane-registry.js";
 import { LaneEvents, type LaneStatusChangeCause } from "./lane-events.js";
+import { effectiveLimit, type LaneLimit, type LimitObservation, type LimitSource } from "./limits.js";
 import type { ErrorCode, LaneStatus, LaneStatusValue, SignalSource } from "./status-model.js";
 
 // hdl-ao-01 — same shape as resolveDefaultPolicyPath (routing/policy-loader.ts):
@@ -87,6 +88,19 @@ CREATE TABLE IF NOT EXISTS telemetry_events (
   occurred_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_telemetry_events_type_time ON telemetry_events(event_type, occurred_at DESC);
+CREATE TABLE IF NOT EXISTS lane_limits (
+  lane_id TEXT NOT NULL REFERENCES lanes(lane_id),
+  kind TEXT NOT NULL,
+  scope TEXT NOT NULL CHECK (scope IN ('account','model')),
+  model TEXT,
+  state TEXT NOT NULL CHECK (state IN ('available','exhausted','unknown')),
+  used_percent REAL,
+  resets_at TEXT,
+  reason TEXT,
+  source TEXT NOT NULL CHECK (source IN ('active_probe','passive','operator')),
+  observed_at TEXT NOT NULL,
+  PRIMARY KEY (lane_id, kind)
+);
 `;
 
 export type ManualOverride = "enabled" | "disabled" | null;
@@ -147,6 +161,7 @@ export interface PruneHistoryResult {
 export class StateStore {
   private readonly db: DatabaseSync;
   private closed = false;
+  private overrideTimer?: ReturnType<typeof setTimeout>;
 
   /** PANT-827 — lane.status_changed, emitted by recordStatus/setManualOverride/setManualResetAt only on a real change. */
   readonly events = new LaneEvents();
@@ -182,6 +197,11 @@ export class StateStore {
       // Column already exists — expected on every fresh DB (added via
       // SCHEMA) and on any DB this migration already ran against.
     }
+    try {
+      this.db.exec(`ALTER TABLE lanes ADD COLUMN override_until TEXT`);
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes("duplicate column")) throw error;
+    }
     // hdl-lm-03: same defensive migration, second column (mirrors manual_override).
     try {
       this.db.exec(`ALTER TABLE lanes ADD COLUMN manual_reset_at TEXT`);
@@ -214,6 +234,32 @@ export class StateStore {
     } catch {
       // Column already exists — same reasoning as manual_override above.
     }
+    this.scheduleOverrideExpiry();
+  }
+
+  /** Check persisted deadlines on startup and while running, including writes by other processes. */
+  private scheduleOverrideExpiry(): void {
+    if (this.overrideTimer) clearTimeout(this.overrideTimer);
+    if (this.closed) return;
+    const row = this.db.prepare(`SELECT MIN(override_until) AS deadline FROM lanes WHERE manual_override IS NOT NULL`).get() as { deadline: string | null };
+    const delay = row.deadline ? Math.max(1, Math.min(1000, Date.parse(row.deadline) - Date.now())) : 1000;
+    this.overrideTimer = setTimeout(() => {
+      this.expireOverrides();
+      this.scheduleOverrideExpiry();
+    }, delay);
+    this.overrideTimer.unref();
+  }
+
+  expireOverrides(now: Date = new Date()): void {
+    const rows = this.db.prepare(`UPDATE lanes SET manual_override = NULL, override_reason = NULL, override_until = NULL
+      WHERE manual_override IS NOT NULL AND override_until <= ? RETURNING lane_id`).all(now.toISOString()) as { lane_id: string }[];
+    for (const row of rows) this.emitStatusChanged(row.lane_id, this.currentStatusValue(row.lane_id), "override_expired");
+  }
+
+  getOverrideUntil(laneId: string): string | null {
+    this.expireOverrides();
+    const row = this.db.prepare(`SELECT override_until FROM lanes WHERE lane_id = ?`).get(laneId) as { override_until: string | null } | undefined;
+    return row?.override_until ?? null;
   }
 
   get database(): DatabaseSync {
@@ -405,7 +451,8 @@ export class StateStore {
    * override is meaningless and would be stale leftover text the next time
    * the lane IS overridden.
    */
-  setManualOverride(laneId: string, value: ManualOverride, reason: string | null = null): void {
+  setManualOverride(laneId: string, value: ManualOverride, reason: string | null = null, until: string | null = null): void {
+    if (until !== null && !Number.isFinite(Date.parse(until))) throw new Error("Invalid override expiry");
     // Guard the row's existence regardless of call order (same pattern as
     // recordStatus) — a no-op via ON CONFLICT DO NOTHING when the lane was
     // already upserted, but never silently affects 0 rows if it wasn't.
@@ -418,14 +465,16 @@ export class StateStore {
     const previous = this.getManualOverride(laneId);
     const effectiveReason = value === null ? null : reason;
     this.db
-      .prepare(`UPDATE lanes SET manual_override = ?, override_reason = ? WHERE lane_id = ?`)
-      .run(value, effectiveReason, laneId);
+      .prepare(`UPDATE lanes SET manual_override = ?, override_reason = ?, override_until = ? WHERE lane_id = ?`)
+      .run(value, effectiveReason, value === null || until === null ? null : new Date(until).toISOString(), laneId);
+    this.scheduleOverrideExpiry();
     if (value !== previous) {
       this.emitStatusChanged(laneId, this.currentStatusValue(laneId), "manual_override");
     }
   }
 
   getManualOverride(laneId: string): ManualOverride {
+    this.expireOverrides();
     const row = this.db
       .prepare(`SELECT manual_override FROM lanes WHERE lane_id = ?`)
       .get(laneId) as unknown as { manual_override: ManualOverride } | undefined;
@@ -433,6 +482,7 @@ export class StateStore {
   }
 
   getOverrideReason(laneId: string): string | null {
+    this.expireOverrides();
     const row = this.db
       .prepare(`SELECT override_reason FROM lanes WHERE lane_id = ?`)
       .get(laneId) as unknown as { override_reason: string | null } | undefined;
@@ -514,6 +564,80 @@ export class StateStore {
       .prepare(`SELECT manual_cost_tier FROM lanes WHERE lane_id = ?`)
       .get(laneId) as unknown as { manual_cost_tier: LaneCostTier | null } | undefined;
     return row?.manual_cost_tier ?? null;
+  }
+
+  /**
+   * heimdall#142: records the current observation of one limit on a lane.
+   * One row per (lane, kind): a newer observation replaces the older one; an
+   * older (out-of-order) observation is ignored. Returns true when stored.
+   */
+  recordLimit(laneId: string, limit: LimitObservation, source: LimitSource, observedAt: string): boolean {
+    this.db
+      .prepare(
+        `INSERT INTO lanes (lane_id, provider, credential_ref) VALUES (?, '', '')
+         ON CONFLICT(lane_id) DO NOTHING`,
+      )
+      .run(laneId);
+    const result = this.db
+      .prepare(
+        `INSERT INTO lane_limits
+           (lane_id, kind, scope, model, state, used_percent, resets_at, reason, source, observed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(lane_id, kind) DO UPDATE SET
+           scope = excluded.scope,
+           model = excluded.model,
+           state = excluded.state,
+           used_percent = excluded.used_percent,
+           resets_at = excluded.resets_at,
+           reason = excluded.reason,
+           source = excluded.source,
+           observed_at = excluded.observed_at
+         WHERE excluded.observed_at >= lane_limits.observed_at`,
+      )
+      .run(
+        laneId,
+        limit.kind,
+        limit.scope,
+        limit.model,
+        limit.state,
+        limit.used_percent,
+        limit.resets_at,
+        limit.reason,
+        source,
+        observedAt,
+      );
+    return Number(result.changes) > 0;
+  }
+
+  /**
+   * heimdall#142: a lane's limits as they stand at `now` (an exhausted limit
+   * whose reset time passed reads as available). Sorted by kind.
+   */
+  getLimits(laneId: string, now: Date = new Date()): LaneLimit[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM lane_limits WHERE lane_id = ? ORDER BY kind`)
+      .all(laneId) as unknown as LaneLimit[];
+    return rows.map((row) => effectiveLimit({ ...row }, now));
+  }
+
+  /** heimdall#142: every lane's limits, keyed by lane id. Lanes with none are absent. */
+  getAllLimits(now: Date = new Date()): Map<string, LaneLimit[]> {
+    const rows = this.db
+      .prepare(`SELECT * FROM lane_limits ORDER BY lane_id, kind`)
+      .all() as unknown as LaneLimit[];
+    const byLane = new Map<string, LaneLimit[]>();
+    for (const row of rows) {
+      const list = byLane.get(row.lane_id) ?? [];
+      list.push(effectiveLimit({ ...row }, now));
+      byLane.set(row.lane_id, list);
+    }
+    return byLane;
+  }
+
+  /** heimdall#142: operator clear of one limit. Returns false when the lane had no such limit. */
+  clearLimit(laneId: string, kind: string): boolean {
+    const result = this.db.prepare(`DELETE FROM lane_limits WHERE lane_id = ? AND kind = ?`).run(laneId, kind);
+    return Number(result.changes) > 0;
   }
 
   /**
@@ -681,6 +805,7 @@ export class StateStore {
     // Idempotent: graceful shutdown and stopAll() may both reach here.
     if (this.closed) return;
     this.closed = true;
+    if (this.overrideTimer) clearTimeout(this.overrideTimer);
     this.db.close();
   }
 }

@@ -38,6 +38,8 @@ import type { LaneStatus, LaneStatusValue } from "../core/status-model.js";
 import { LANE_STATUS_VALUES } from "../core/status-model.js";
 import type { LaneAgentResolver } from "../core/actuation/lane-agent-resolver.js";
 import { getLaneSignal, type SignalState } from "../core/signal-state.js";
+import { parseClaudeCapSignal } from "../core/error-parser.js";
+import { isModelScopedCap, limitFromClaudeCapSignal, type LaneLimit, type LimitObservation } from "../core/limits.js";
 import { renderDashboardHtml } from "./ui/dashboard.js";
 import { DOC_ENTRIES, getDocBySlug, renderDocMarkdown, renderDocsIndexHtml, renderDocPageHtml } from "./ui/docs-viewer.js";
 import { createRequire } from "node:module";
@@ -188,6 +190,8 @@ function handleJsonBody(
  */
 export interface LaneStatusWithOverride extends LaneStatus {
   manual_override: ManualOverride;
+  override_until: string | null;
+  effective_enabled: boolean;
   override_reason: string | null;
   credential_configured: boolean;
   /** PANT-932 — why credential_configured is what it is: `unconfigured` (no
@@ -214,6 +218,11 @@ export interface LaneStatusWithOverride extends LaneStatus {
    * a consumer must not treat their "down" as a sensed outage. */
   signal_state: SignalState;
   last_probed_at: string | null;
+  /** heimdall#142 — the account's separate limits (5-hour, weekly, per-model
+   * weekly, credits, spend cap) with type, state, percent and reset time.
+   * `used_percent`/`resets_at` are null when unknown, never estimated.
+   * Always an array, [] when nothing has been observed. */
+  limits: LaneLimit[];
 }
 
 const VALID_OVERRIDE_STATES = new Set(["enabled", "disabled", "auto"]);
@@ -226,10 +235,11 @@ const VALID_OVERRIDE_STATES = new Set(["enabled", "disabled", "auto"]);
 // an MCP tool's structured content) translate the same result its own way.
 
 export type SetOverrideResult =
-  | { ok: true; lane_id: string; manual_override: ManualOverride; override_reason: string | null }
+  | { ok: true; lane_id: string; manual_override: ManualOverride; override_reason: string | null; override_until: string | null }
   | { ok: false; error: "unknown_lane"; lane_id: string }
   | { ok: false; error: "invalid_override_state"; allowed_states: string[] }
-  | { ok: false; error: "invalid_reason"; message: string };
+  | { ok: false; error: "invalid_reason"; message: string }
+  | { ok: false; error: "invalid_until"; message: string };
 
 export function setLaneOverride(
   registry: LaneRegistry,
@@ -237,6 +247,7 @@ export function setLaneOverride(
   laneId: string,
   rawState: unknown,
   rawReason?: unknown,
+  rawUntil?: unknown,
 ): SetOverrideResult {
   if (!registry.get(laneId)) {
     return { ok: false, error: "unknown_lane", lane_id: laneId };
@@ -247,10 +258,15 @@ export function setLaneOverride(
   if (rawReason !== undefined && rawReason !== null && typeof rawReason !== "string") {
     return { ok: false, error: "invalid_reason", message: "reason must be a string or null" };
   }
+  if (rawUntil !== undefined && rawUntil !== null &&
+      (typeof rawUntil !== "string" || !/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(rawUntil) || !Number.isFinite(Date.parse(rawUntil)) || Date.parse(rawUntil) <= Date.now())) {
+    return { ok: false, error: "invalid_until", message: "until must be a future ISO-8601 timestamp with timezone" };
+  }
+  const until = typeof rawUntil === "string" ? new Date(rawUntil).toISOString() : null;
   const value: ManualOverride = rawState === "auto" ? null : (rawState as "enabled" | "disabled");
   const reason = typeof rawReason === "string" && rawReason.trim() !== "" ? rawReason : null;
-  store.setManualOverride(laneId, value, reason);
-  return { ok: true, lane_id: laneId, manual_override: value, override_reason: store.getOverrideReason(laneId) };
+  store.setManualOverride(laneId, value, reason, until);
+  return { ok: true, lane_id: laneId, manual_override: value, override_reason: store.getOverrideReason(laneId), override_until: store.getOverrideUntil(laneId) };
 }
 
 export type SetResetAtResult =
@@ -685,11 +701,15 @@ export function getLaneStatuses(
     // (throttled by the registry's backoff) rather than report it forever.
     if (lane.credential_state === "credential_unavailable") registry.retryCredential(lane.lane_id);
   }
+  const limitsByLane = store.getAllLimits(now);
   return store.getAllCurrentStatuses().map((status) => {
     const declared = registry.get(status.lane_id);
+    const override = store.getManualOverride(status.lane_id);
     return {
       ...status,
-      manual_override: store.getManualOverride(status.lane_id),
+      manual_override: override,
+      override_until: store.getOverrideUntil(status.lane_id),
+      effective_enabled: declared?.credential != null && (override === "enabled" || (override === null && status.status === "up")),
       override_reason: store.getOverrideReason(status.lane_id),
       credential_configured: declared?.credential != null,
       credential_state: declared?.credential_state ?? "unconfigured",
@@ -701,6 +721,7 @@ export function getLaneStatuses(
       manual_cost_tier: store.getManualCostTier(status.lane_id),
       multica_agent_ids: resolver?.resolve(status.lane_id) ?? [],
       ...getLaneSignal(store, status.lane_id, { now }),
+      limits: limitsByLane.get(status.lane_id) ?? [],
     };
   });
 }
@@ -716,9 +737,17 @@ export function getLaneStatuses(
 export type RefreshLaneFn = (laneId: string) => Promise<void>;
 
 export type PushLaneStatusResult =
-  | { ok: true; lane_id: string; status: LaneStatusValue; signal_source: "passive" }
+  | {
+      ok: true;
+      lane_id: string;
+      status: LaneStatusValue;
+      signal_source: "passive";
+      /** heimdall#142 — the limit parsed from the pushed `error` text, or null. */
+      limit: LimitObservation | null;
+    }
   | { ok: false; error: "unknown_lane"; lane_id: string }
-  | { ok: false; error: "invalid_status"; allowed_statuses: readonly LaneStatusValue[] };
+  | { ok: false; error: "invalid_status"; allowed_statuses: readonly LaneStatusValue[] }
+  | { ok: false; error: "invalid_error"; message: string };
 
 /**
  * Records an externally-pushed lane status as `signal_source: "passive"`.
@@ -727,11 +756,21 @@ export type PushLaneStatusResult =
  * active probe cycle.  A resulting status change emits lane.status_changed
  * (PANT-827), which reconciles immediately and streams over GET /events.
  */
+/**
+ * heimdall#142: the observer may also send the provider's own error text as
+ * `error` ("You've reached your Fable limit. Switch to another model to
+ * continue."). It is parsed into the limit it names and recorded. When it
+ * names one model's limit, the lane's status is left as it is: the account
+ * still serves its other models, and pushing `out_of_credit` for it is what
+ * idled every agent on 11/15.
+ */
 export function pushLaneStatus(
   registry: LaneRegistry,
   store: StateStore,
   laneId: string,
   rawStatus: unknown,
+  rawError?: unknown,
+  now: Date = new Date(),
 ): PushLaneStatusResult {
   if (!registry.get(laneId)) {
     return { ok: false, error: "unknown_lane", lane_id: laneId };
@@ -739,15 +778,51 @@ export function pushLaneStatus(
   if (typeof rawStatus !== "string" || !(LANE_STATUS_VALUES as readonly string[]).includes(rawStatus)) {
     return { ok: false, error: "invalid_status", allowed_statuses: LANE_STATUS_VALUES };
   }
+  if (rawError !== undefined && rawError !== null && typeof rawError !== "string") {
+    return { ok: false, error: "invalid_error", message: "error must be the provider's error text (a string) or null" };
+  }
+  const observedAt = now.toISOString();
+  const cap = typeof rawError === "string" && rawError.trim() !== "" ? parseClaudeCapSignal(new Error(rawError), now) : null;
+  const limit = cap ? limitFromClaudeCapSignal(cap) : null;
+  if (limit) store.recordLimit(laneId, limit, "passive", observedAt);
+  if (cap && isModelScopedCap(cap)) {
+    const current = store.getCurrentStatus(laneId)?.status ?? (rawStatus as LaneStatusValue);
+    return { ok: true, lane_id: laneId, status: current, signal_source: "passive", limit };
+  }
   store.recordStatus({
     lane_id: laneId,
     status: rawStatus as LaneStatusValue,
-    reset_at: null,
-    reason: "pushed by external observer",
+    reset_at: cap && cap.reset_at_known !== false && rawStatus !== "up" ? cap.reset_at : null,
+    reason: cap ? `pushed by external observer: ${cap.reason}` : "pushed by external observer",
     signal_source: "passive",
-    observed_at: new Date().toISOString(),
+    observed_at: observedAt,
   });
-  return { ok: true, lane_id: laneId, status: rawStatus as LaneStatusValue, signal_source: "passive" };
+  return { ok: true, lane_id: laneId, status: rawStatus as LaneStatusValue, signal_source: "passive", limit };
+}
+
+export type ClearLimitResult =
+  | { ok: true; lane_id: string; kind: string; limits: LaneLimit[] }
+  | { ok: false; error: "unknown_lane"; lane_id: string }
+  | { ok: false; error: "invalid_kind"; message: string }
+  | { ok: false; error: "unknown_limit"; lane_id: string; kind: string };
+
+/** heimdall#142: operator clear of one recorded limit (e.g. after a manual reset). */
+export function clearLaneLimit(
+  registry: LaneRegistry,
+  store: StateStore,
+  laneId: string,
+  rawKind: unknown,
+): ClearLimitResult {
+  if (!registry.get(laneId)) {
+    return { ok: false, error: "unknown_lane", lane_id: laneId };
+  }
+  if (typeof rawKind !== "string" || rawKind.trim() === "") {
+    return { ok: false, error: "invalid_kind", message: "kind must be a limit kind such as weekly_model:claude-fable-5-2" };
+  }
+  if (!store.clearLimit(laneId, rawKind)) {
+    return { ok: false, error: "unknown_limit", lane_id: laneId, kind: rawKind };
+  }
+  return { ok: true, lane_id: laneId, kind: rawKind, limits: store.getLimits(laneId) };
 }
 
 // PANT-829: open GET /events responses per server, so a graceful shutdown can
@@ -1437,8 +1512,8 @@ export function createHttpServer(
           writeBodyError(res, body);
           return;
         }
-        const { state, reason } = body.data as { state?: unknown; reason?: unknown };
-        const result = setLaneOverride(registry, store, laneId, state, reason);
+        const { state, reason, until } = body.data as { state?: unknown; reason?: unknown; until?: unknown };
+        const result = setLaneOverride(registry, store, laneId, state, reason, until);
         if (!result.ok) {
           const status = result.error === "unknown_lane" ? 404 : 400;
           const { ok: _ok, ...wire } = result;
@@ -1564,6 +1639,25 @@ export function createHttpServer(
       return;
     }
 
+    // heimdall#142: operator clear of one recorded limit.
+    const clearLimitMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/limits\/clear$/);
+    if (clearLimitMatch) {
+      const laneId = decodeURIComponent(clearLimitMatch[1]);
+      handleJsonBody(req, res, (body) => {
+        if (!body.ok) {
+          writeBodyError(res, body);
+          return;
+        }
+        const { kind } = body.data as { kind?: unknown };
+        const result = clearLaneLimit(registry, store, laneId, kind);
+        const { ok, ...wire } = result;
+        const httpStatus = ok ? 200 : result.error === "invalid_kind" ? 400 : 404;
+        res.writeHead(httpStatus, { "content-type": "application/json" });
+        res.end(JSON.stringify(wire));
+      });
+      return;
+    }
+
     // PANT-185: passive lane-status push — external observers (Pantheon's
     // quota-failure watcher) send PATCH /lanes/:id with { status: "..." }
     // to update Heimdall's StateStore immediately, without waiting for the
@@ -1577,8 +1671,8 @@ export function createHttpServer(
           writeBodyError(res, body);
           return;
         }
-        const { status } = body.data as { status?: unknown };
-        const result = pushLaneStatus(registry, store, laneId, status);
+        const { status, error } = body.data as { status?: unknown; error?: unknown };
+        const result = pushLaneStatus(registry, store, laneId, status, error);
         if (!result.ok) {
           const httpStatus = result.error === "unknown_lane" ? 404 : 400;
           const { ok: _ok, ...wire } = result;

@@ -1,8 +1,18 @@
-export type ClaudeCapKind = "rate_limit" | "session_limit" | "weekly_limit" | "oauth_expired";
+// heimdall#142: `model_limit` is a per-model sub-limit ("You've reached your
+// Fable limit. Switch to another model to continue."). The account can still
+// serve other models, so it must never read as a lane-wide cap.
+export type ClaudeCapKind = "rate_limit" | "session_limit" | "weekly_limit" | "model_limit" | "oauth_expired";
 
 export interface ClaudeCapSignal {
   kind: ClaudeCapKind;
+  /** Always set, for the lane-status timer. When `reset_at_known` is false it is a fallback window, not a provider value. */
   reset_at: string;
+  /** heimdall#142: true only when the reset time came from the provider (body, header or message text). */
+  reset_at_known?: boolean;
+  /** heimdall#142: the model display name the limit names ("fable"), lowercased; null for account-wide limits. */
+  model?: string | null;
+  /** heimdall#142: percent used when the provider stated it; null means unknown. */
+  used_percent?: number | null;
   reason: string;
 }
 
@@ -168,7 +178,12 @@ function parsePipeEpochReset(message: string): string | null {
   return match ? parseResetTimestamp(match[1]) : null;
 }
 
-function extractResetAt(input: unknown, headers: HeaderLike | null, now: Date, kind: ClaudeCapKind): string {
+function extractResetAt(
+  input: unknown,
+  headers: HeaderLike | null,
+  now: Date,
+  kind: ClaudeCapKind,
+): { at: string; known: boolean } {
   const body = extractBody(input);
   const explicit =
     getNestedString(body, ["reset_at"]) ??
@@ -177,10 +192,10 @@ function extractResetAt(input: unknown, headers: HeaderLike | null, now: Date, k
     getNestedString(body, ["error", "resetAt"]) ??
     getNestedString(body, ["error", "reset"]);
   const parsedExplicit = parseResetTimestamp(explicit);
-  if (parsedExplicit) return parsedExplicit;
+  if (parsedExplicit) return { at: parsedExplicit, known: true };
 
   const headerReset = extractHeaderResetAt(headers, now);
-  if (headerReset) return headerReset;
+  if (headerReset) return { at: headerReset, known: true };
 
   // CLI error messages (e.g. "resets 7pm (America/Chicago)") carry the reset
   // time as human-readable text rather than a header or structured field —
@@ -193,12 +208,17 @@ function extractResetAt(input: unknown, headers: HeaderLike | null, now: Date, k
     .join(" ");
   const isSession = kind === "session_limit";
   const cliReset = parseCliStyleResetTime(rawMsg, now, isSession ? DAY_MS : DEFAULT_RESET_MS);
-  if (cliReset) return cliReset;
+  if (cliReset) return { at: cliReset, known: true };
   const pipeReset = parsePipeEpochReset(rawMsg);
-  if (pipeReset) return pipeReset;
+  if (pipeReset) return { at: pipeReset, known: true };
 
-  return new Date(now.getTime() + (isSession ? SESSION_RESET_MS : DEFAULT_RESET_MS)).toISOString();
+  return {
+    at: new Date(now.getTime() + (isSession ? SESSION_RESET_MS : DEFAULT_RESET_MS)).toISOString(),
+    known: false,
+  };
 }
+
+const WEEKDAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 
 // Parses "resets 7pm (America/Chicago)" or "resets 7:30pm (America/Chicago)"
 // from a CLI error message into an absolute ISO-8601 reset timestamp. Returns
@@ -208,9 +228,12 @@ function extractResetAt(input: unknown, headers: HeaderLike | null, now: Date, k
 // `rollover` is how far a reset time that already passed today moves forward:
 // a week for the weekly cap, a day for the 5-hour session limit.
 export function parseCliStyleResetTime(message: string, now: Date, rollover: number = DEFAULT_RESET_MS): string | null {
-  const match = message.match(/resets\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*\(([^)]+)\)/i);
+  // heimdall#142: weekly resets name the day too ("resets Fri 1pm (America/Chicago)").
+  const match = message.match(
+    /resets\s+(?:(sun|mon|tue|wed|thu|fri|sat)[a-z]*,?\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*\(([^)]+)\)/i,
+  );
   if (!match) return null;
-  const [, hourStr, minStr = "00", ampm, tz] = match;
+  const [, weekdayStr, hourStr, minStr = "00", ampm, tz] = match;
   let hour = parseInt(hourStr, 10);
   const minute = parseInt(minStr, 10);
   if (Number.isNaN(hour) || Number.isNaN(minute)) return null;
@@ -221,7 +244,7 @@ export function parseCliStyleResetTime(message: string, now: Date, rollover: num
     // Get the current local time components in the target timezone.
     const fmt = new Intl.DateTimeFormat("en-US", {
       timeZone: tz,
-      hour: "2-digit", minute: "2-digit", hour12: false,
+      weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false,
     });
     const parts = Object.fromEntries(fmt.formatToParts(now).map(({ type, value }) => [type, value]));
     const nowLocalH = parseInt(parts.hour, 10);
@@ -234,7 +257,13 @@ export function parseCliStyleResetTime(message: string, now: Date, rollover: num
     // today; in that case it moves forward by `rollover`.
     const deltaMinutes = (hour * 60 + minute) - (nowLocalH * 60 + nowLocalMin);
     let targetMs = now.getTime() + deltaMinutes * 60_000;
-    if (targetMs <= now.getTime()) {
+    if (weekdayStr) {
+      const targetDay = WEEKDAYS.indexOf(weekdayStr.toLowerCase());
+      const nowDay = WEEKDAYS.indexOf(String(parts.weekday).slice(0, 3).toLowerCase());
+      if (targetDay === -1 || nowDay === -1) return null;
+      targetMs += ((targetDay - nowDay + 7) % 7) * DAY_MS;
+      if (targetMs <= now.getTime()) targetMs += 7 * DAY_MS;
+    } else if (targetMs <= now.getTime()) {
       targetMs += rollover;
     }
     return new Date(targetMs).toISOString();
@@ -281,12 +310,34 @@ export function parseTryAgainAtResetTime(message: string, now: Date): string | n
   return reset.toISOString();
 }
 
-function classify(status: number | null, message: string): ClaudeCapKind | null {
+// Words that name a limit window rather than a model in "your X limit".
+const NON_MODEL_LIMIT_WORDS = new Set([
+  "weekly", "session", "usage", "daily", "monthly", "hourly", "rate", "spend", "spending",
+  "credit", "credits", "plan", "token", "tokens", "request", "requests", "api", "org", "organization",
+  "account", "current", "overall", "all-models", "extra",
+]);
+
+/**
+ * heimdall#142: the model a Claude Code limit message names, lowercased, or
+ * null. "You've reached your Fable limit" -> "fable"; "your weekly Opus
+ * limit" -> "opus"; "your weekly limit" / "your session limit" -> null.
+ */
+export function extractLimitModel(message: string): string | null {
+  const match = message.toLowerCase().match(/(?:reached|hit)\s+your\s+((?:[a-z][\w.-]*\s+){0,2}?[a-z][\w.-]*)\s+limit\b/);
+  if (!match) return null;
+  const words = match[1].split(/\s+/).filter((word) => !NON_MODEL_LIMIT_WORDS.has(word) && !/^\d/.test(word));
+  return words.length > 0 ? words.join(" ") : null;
+}
+
+function classify(status: number | null, message: string, model: string | null): ClaudeCapKind | null {
   if (message.includes("oauth") && (message.includes("expired") || message.includes("invalid"))) {
     return "oauth_expired";
   }
   if (message.includes("weekly") && (message.includes("limit") || message.includes("cap"))) {
     return "weekly_limit";
+  }
+  if (model !== null) {
+    return "model_limit";
   }
   // Claude Code 2.1.x prints "You've hit your session limit · resets 3pm (tz)"
   // (the binary builds it from "You've hit your " + "session limit"); older
@@ -304,7 +355,8 @@ export function parseClaudeCapSignal(input: unknown, now: Date = new Date()): Cl
   const body = extractBody(input);
   const message = [extractMessage(input), extractMessage(body)].join(" ").trim();
   const status = extractStatus(input) ?? extractStatus(body);
-  const kind = classify(status, message);
+  const model = extractLimitModel(message);
+  const kind = classify(status, message, model);
   if (!kind) return null;
 
   const reason =
@@ -312,9 +364,13 @@ export function parseClaudeCapSignal(input: unknown, now: Date = new Date()): Cl
     getNestedString(body, ["message"]) ??
     (kind === "oauth_expired" ? "Claude OAuth token expired" : "Claude API limit reached");
 
+  const reset = extractResetAt(input, extractHeaders(input), now, kind);
   return {
     kind,
-    reset_at: extractResetAt(input, extractHeaders(input), now, kind),
+    reset_at: reset.at,
+    reset_at_known: reset.known,
+    model: kind === "model_limit" || kind === "weekly_limit" ? model : null,
+    used_percent: null,
     reason,
   };
 }
