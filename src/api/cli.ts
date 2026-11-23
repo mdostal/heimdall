@@ -60,8 +60,8 @@ if (isMainModule) {
   const args = process.argv.slice(2);
   const command = args[0] && !args[0].startsWith("--") ? args[0] : "lanes";
 
-  const registry = buildLaneRegistry();
   const store = new StateStore(resolveDefaultDbPath());
+  const registry = buildLaneRegistry(process.env, store);
   
   try {
     if (command === "route") {
