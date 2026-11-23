@@ -216,10 +216,10 @@ test("route-selector: an enabled declared model is used as-is, with no substitut
 });
 
 test("route-selector: an ungated provider's declared model is never substituted", () => {
-  const registry = registryOf([decl("or-a", "openrouter", "some/model")]);
+  const registry = registryOf([decl("local-a", "ollama", "some/model")]);
   withStore((store) => {
-    setStatus(store, "or-a", "up");
-    seeModel(store, "openrouter", "other/model", true, "2026-06-01T00:00:00Z");
+    setStatus(store, "local-a", "up");
+    seeModel(store, "ollama", "other/model", true, "2026-06-01T00:00:00Z");
     const route = getAvailableRoute("build", registry, store);
     assert.equal(route?.model, "some/model");
     assert.equal(route?.model_substituted, false);
@@ -362,4 +362,18 @@ test("heimdall#123: with no policy file at all, the non-scored strategies route 
     useRoutePolicyPath(undefined);
     rmSync(dirname(missing), { recursive: true, force: true });
   }
+});
+
+test("OpenRouter and Grok receive positive default scores for all task types", () => {
+  useRoutePolicyPath(DEFAULT_POLICY_PATH);
+  const registry = registryOf([decl("or", "openrouter"), decl("xai", "grok")]);
+  withStore((store) => {
+    setStatus(store, "or", "up");
+    setStatus(store, "xai", "up");
+    for (const task_type of ["planning", "build", "review"] as const) {
+      const result = getScoredRoute({ task_id: "provider-parity-" + task_type, task_type }, registry, store);
+      assert.equal(result.ranked_candidates.length, 2);
+      for (const candidate of result.ranked_candidates) assert.ok(candidate.score > 0);
+    }
+  });
 });

@@ -42,16 +42,17 @@ test("kimi: createdAt present -> behaves like the claude/codex top-N case", () =
   assert.ok(enabled.has("kimi-7"));
 });
 
-test("gemini: only the highest-generation entries are included, never an older generation", () => {
+test("gemini: every generation at 3.0 or later is enabled, while 2.5 stays disabled", () => {
   const entries = [
     entry("gemini-2.5-pro", null),
     entry("gemini-2.5-flash", null),
     entry("gemini-3-pro-preview", null),
     entry("gemini-3-flash-preview", null),
+    entry("gemini-4-pro", null),
   ];
   const enabled = defaultEnabledModelIds("gemini", entries);
-  assert.deepEqual([...enabled].sort(), ["gemini-3-flash-preview", "gemini-3-pro-preview"]);
-  assert.ok(!enabled.has("gemini-2.5-pro"), "an older generation must never be included alongside a newer one");
+  assert.deepEqual([...enabled].sort(), ["gemini-3-flash-preview", "gemini-3-pro-preview", "gemini-4-pro"]);
+  assert.ok(!enabled.has("gemini-2.5-pro"), "generations below 3.0 must stay disabled");
 });
 
 test("gemini: an id that doesn't match the generation pattern defaults to INCLUDED, not silently excluded", () => {
@@ -66,4 +67,13 @@ test("an empty entries array for any provider returns an empty set without throw
   assert.deepEqual(defaultEnabledModelIds("gemini", []), new Set());
   assert.deepEqual(defaultEnabledModelIds("kimi", []), new Set());
   assert.deepEqual(defaultEnabledModelIds("codex", []), new Set());
+});
+
+test("Gemini below 3.0 stays disabled even when no newer generation is listed", () => {
+  assert.equal(defaultEnabledModelIds("gemini", [entry("gemini-2.5-pro", null)]).size, 0);
+  const enabled = defaultEnabledModelIds("openrouter", [
+    entry("google/gemini-2.5-pro", null), entry("google/gemini-3-pro", null),
+    entry("anthropic/claude-sonnet-4", null),
+  ]);
+  assert.deepEqual([...enabled], ["google/gemini-3-pro", "anthropic/claude-sonnet-4"]);
 });
