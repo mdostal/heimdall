@@ -58,6 +58,9 @@ test("parses Claude 429 weekly-limit responses with reset windows", () => {
   assert.deepEqual(signal, {
     kind: "weekly_limit",
     reset_at: "2026-08-15T12:00:00.000Z",
+    reset_at_known: true,
+    model: null,
+    used_percent: null,
     reason: "weekly limit reached",
   });
 });
