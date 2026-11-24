@@ -117,6 +117,12 @@ CREATE TABLE IF NOT EXISTS lane_model_swaps (
   cause TEXT NOT NULL,
   swapped_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS lane_max_usage (
+  lane_id TEXT PRIMARY KEY,
+  reason TEXT,
+  until TEXT NOT NULL,
+  set_at TEXT NOT NULL
+);
 `;
 
 export type ManualOverride = "enabled" | "disabled" | null;
@@ -129,6 +135,15 @@ export interface LaneModelToggle {
   reason: string | null;
   /** ISO-8601 expiry; the toggle is deleted (back to auto) once it passes. null = until cleared. */
   until: string | null;
+  set_at: string;
+}
+
+/** heimdall#142 slice 5: an operator's time-boxed "max usage" switch for one account lane. */
+export interface LaneMaxUsage {
+  lane_id: string;
+  reason: string | null;
+  /** ISO-8601 expiry; always set. The row is deleted (back to off) once it passes. */
+  until: string;
   set_at: string;
 }
 
@@ -284,11 +299,13 @@ export class StateStore {
     // heimdall#142 slice 2: per-model toggles share this timer and the #126 expiry pattern.
     const row = this.db.prepare(`SELECT MIN(deadline) AS deadline FROM (
       SELECT MIN(override_until) AS deadline FROM lanes WHERE manual_override IS NOT NULL
-      UNION ALL SELECT MIN(until) FROM lane_model_toggles)`).get() as { deadline: string | null };
+      UNION ALL SELECT MIN(until) FROM lane_model_toggles
+      UNION ALL SELECT MIN(until) FROM lane_max_usage)`).get() as { deadline: string | null };
     const delay = row.deadline ? Math.max(1, Math.min(1000, Date.parse(row.deadline) - Date.now())) : 1000;
     this.overrideTimer = setTimeout(() => {
       this.expireOverrides();
       this.expireModelToggles();
+      this.expireMaxUsage();
       this.scheduleOverrideExpiry();
     }, delay);
     this.overrideTimer.unref();
@@ -384,6 +401,56 @@ export class StateStore {
       .prepare(`DELETE FROM lane_model_swaps WHERE lane_id = ? AND preferred_model = ? AND swapped_to = ? AND swapped_at = ?`)
       .run(expected.lane_id, expected.preferred_model, expected.swapped_to, expected.swapped_at);
     return Number(result.changes) > 0;
+  }
+
+  /** heimdall#142 slice 5: drop max-usage switches whose expiry has passed. Returns how many expired. */
+  expireMaxUsage(now: Date = new Date()): number {
+    const rows = this.db
+      .prepare(`DELETE FROM lane_max_usage WHERE until <= ? RETURNING lane_id, until`)
+      .all(now.toISOString()) as unknown as Array<{ lane_id: string; until: string }>;
+    for (const row of rows) this.recordTelemetryEvent("max_usage_expired", { laneId: row.lane_id, until: row.until }, row.until);
+    return rows.length;
+  }
+
+  /**
+   * heimdall#142 slice 5: turn an account lane's max-usage switch on until
+   * `until` (required: max usage is always time-boxed). Persisted, so it
+   * survives a restart. Touches nothing but its own row: never a limit, a
+   * credit or a spend cap.
+   */
+  setLaneMaxUsage(laneId: string, reason: string | null, until: string, now: Date = new Date()): void {
+    if (!Number.isFinite(Date.parse(until))) throw new Error("Invalid max usage expiry");
+    this.db
+      .prepare(
+        `INSERT INTO lanes (lane_id, provider, credential_ref) VALUES (?, '', '')
+         ON CONFLICT(lane_id) DO NOTHING`,
+      )
+      .run(laneId);
+    this.db
+      .prepare(
+        `INSERT INTO lane_max_usage (lane_id, reason, until, set_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(lane_id) DO UPDATE SET reason = excluded.reason, until = excluded.until, set_at = excluded.set_at`,
+      )
+      .run(laneId, reason, new Date(until).toISOString(), now.toISOString());
+    this.scheduleOverrideExpiry();
+  }
+
+  /** heimdall#142 slice 5: turn max usage off for a lane. Returns true when it was on. */
+  clearLaneMaxUsage(laneId: string): boolean {
+    const result = this.db.prepare(`DELETE FROM lane_max_usage WHERE lane_id = ?`).run(laneId);
+    this.scheduleOverrideExpiry();
+    return Number(result.changes) > 0;
+  }
+
+  /** heimdall#142 slice 5: live (unexpired) max-usage switches, for one lane or all lanes. */
+  getLaneMaxUsage(laneId?: string, now: Date = new Date()): LaneMaxUsage[] {
+    this.expireMaxUsage(now);
+    const rows = (
+      laneId === undefined
+        ? this.db.prepare(`SELECT * FROM lane_max_usage ORDER BY lane_id`).all()
+        : this.db.prepare(`SELECT * FROM lane_max_usage WHERE lane_id = ?`).all(laneId)
+    ) as unknown as LaneMaxUsage[];
+    return rows.map((row) => ({ ...row }));
   }
 
   /** heimdall#142 slice 2: live (unexpired) model toggles, for one lane or all lanes. */

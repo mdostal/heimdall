@@ -3771,3 +3771,48 @@ test("heimdall#142 slice 4: GET /model-swaps reports current swaps; /metrics cou
     store.close();
   }
 });
+
+test("PANT-1325: POST/GET /lanes/:id/max-usage set and read max usage; GET /lanes and GET /max-usage carry it; paid fields refused", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  const laneId = registry.list()[0].lane_id;
+  const url = `http://localhost:${port}/lanes/${encodeURIComponent(laneId)}/max-usage`;
+  const post = (body: unknown) => fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  try {
+    const until = new Date(Date.now() + 3_600_000).toISOString();
+    const on = await post({ enabled: true, until, reason: "release week" });
+    assert.equal(on.status, 200);
+    assert.equal((await on.json()).max_usage.enabled, true);
+
+    const one = await (await fetch(url)).json();
+    assert.equal(one.enabled, true);
+    assert.equal(one.until, until);
+    assert.equal(one.reason, "release week");
+
+    const all = await (await fetch(`http://localhost:${port}/max-usage`)).json();
+    assert.equal(all.lanes[0].lane_id, laneId);
+    const lanes = await (await fetch(`http://localhost:${port}/lanes`)).json();
+    assert.equal(lanes[0].max_usage.enabled, true);
+    assert.deepEqual(lanes[0].max_usage.paid_switches.map((sw: { kind: string }) => sw.kind), ["credits", "spend_cap"]);
+
+    const paid = await post({ enabled: true, until, spend_cap: 500 });
+    assert.equal(paid.status, 400);
+    assert.equal((await paid.json()).error, "not_a_heimdall_switch");
+    const noUntil = await post({ enabled: true });
+    assert.equal(noUntil.status, 400);
+    assert.equal((await noUntil.json()).error, "invalid_until");
+    const ghost = await fetch(`http://localhost:${port}/lanes/ghost/max-usage`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: false }) });
+    assert.equal(ghost.status, 404);
+    assert.equal((await fetch(`http://localhost:${port}/lanes/ghost/max-usage`)).status, 404);
+
+    const off = await post({ enabled: false });
+    assert.equal(off.status, 200);
+    assert.equal((await (await fetch(url)).json()).enabled, false);
+  } finally {
+    server.close();
+    store.close();
+  }
+});

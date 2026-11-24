@@ -41,6 +41,7 @@ import type { LaneAgentResolver } from "../core/actuation/lane-agent-resolver.js
 import { getLaneSignal, type SignalState } from "../core/signal-state.js";
 import { parseClaudeCapSignal } from "../core/error-parser.js";
 import { getLaneModels, listLaneModels, setLaneModelEnabled, type LaneModel } from "../core/lane-models.js";
+import { getMaxUsageReport, getMaxUsageStatus, setMaxUsage, type MaxUsageStatus } from "../core/max-usage.js";
 import { isModelScopedCap, limitFromClaudeCapSignal, type LaneLimit, type LimitObservation } from "../core/limits.js";
 import { renderDashboardHtml } from "./ui/dashboard.js";
 import { DOC_ENTRIES, getDocBySlug, renderDocMarkdown, renderDocsIndexHtml, renderDocPageHtml } from "./ui/docs-viewer.js";
@@ -229,6 +230,9 @@ export interface LaneStatusWithOverride extends LaneStatus {
    * operator toggle (`enabled`), the limit-derived `available`, and the
    * configured `tier` (null when none is configured). */
   models: LaneModel[];
+  /** heimdall#142 slice 5 — the account's max-usage switch (with expiry)
+   * and its paid switches (`credits`, `spend_cap`), reported only. */
+  max_usage: MaxUsageStatus;
 }
 
 const VALID_OVERRIDE_STATES = new Set(["enabled", "disabled", "auto"]);
@@ -729,6 +733,7 @@ export function getLaneStatuses(
       ...getLaneSignal(store, status.lane_id, { now }),
       limits: limitsByLane.get(status.lane_id) ?? [],
       models: declared ? getLaneModels(declared, store, now) : [],
+      max_usage: getMaxUsageStatus(store, status.lane_id, now),
     };
   });
 }
@@ -1698,6 +1703,41 @@ export function createHttpServer(
         const result = setLaneModelEnabled(registry, store, laneId, modelId, enabled, reason, until);
         const { ok, ...wire } = result;
         const httpStatus = ok ? 200 : result.error === "unknown_lane" || result.error === "unknown_model" ? 404 : 400;
+        res.writeHead(httpStatus, { "content-type": "application/json" });
+        res.end(JSON.stringify(wire));
+      });
+      return;
+    }
+
+    // heimdall#142 slice 5: max-usage mode per account lane.
+    // GET /max-usage lists every lane; GET /lanes/:id/max-usage one lane.
+    if (req.method === "GET" && req.url === "/max-usage") {
+      const { ok: _ok, ...wire } = getMaxUsageReport(registry, store);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(wire));
+      return;
+    }
+    const maxUsageGetMatch = req.method === "GET" && req.url?.match(/^\/lanes\/([^/]+)\/max-usage$/);
+    if (maxUsageGetMatch) {
+      const result = getMaxUsageReport(registry, store, decodeURIComponent(maxUsageGetMatch[1]));
+      const { ok, ...wire } = result;
+      res.writeHead(ok ? 200 : 404, { "content-type": "application/json" });
+      res.end(JSON.stringify(ok ? result.lanes[0] : wire));
+      return;
+    }
+    // Body: { enabled: true, until, reason? } to turn on, { enabled: false } to turn off.
+    const maxUsageSetMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/max-usage$/);
+    if (maxUsageSetMatch) {
+      const laneId = decodeURIComponent(maxUsageSetMatch[1]);
+      handleJsonBody(req, res, (body) => {
+        if (!body.ok) {
+          writeBodyError(res, body);
+          return;
+        }
+        const data = typeof body.data === "object" && body.data !== null && !Array.isArray(body.data) ? (body.data as Record<string, unknown>) : {};
+        const result = setMaxUsage(registry, store, laneId, data);
+        const { ok, ...wire } = result;
+        const httpStatus = ok ? 200 : result.error === "unknown_lane" ? 404 : result.error === "invalid_policy" ? 503 : 400;
         res.writeHead(httpStatus, { "content-type": "application/json" });
         res.end(JSON.stringify(wire));
       });

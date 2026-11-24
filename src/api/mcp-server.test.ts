@@ -18,6 +18,8 @@ import {
   callRouteSelectionTool,
   callRouteReportOutcomeTool,
   callRouteModelSwapsTool,
+  callMaxUsageGetTool,
+  callMaxUsageSetTool,
   buildToolDispatch,
   dispatchToolCall,
   LANES_LIST_TOOL_NAME,
@@ -34,6 +36,8 @@ import {
   ROUTE_SELECTION_TOOL_NAME,
   ROUTE_REPORT_OUTCOME_TOOL_NAME,
   ROUTE_MODEL_SWAPS_TOOL_NAME,
+  LANES_MAX_USAGE_GET_TOOL_NAME,
+  LANES_MAX_USAGE_SET_TOOL_NAME,
 } from "./mcp-server.js";
 import { getLaneStatuses } from "./http-server.js";
 import { LaneRegistry } from "../core/lane-registry.js";
@@ -57,9 +61,9 @@ function tmpEnvPath(): string {
   return path.join(os.tmpdir(), `heimdall-mcp-server-test-${Date.now()}-${Math.random().toString(36).slice(2)}.env`);
 }
 
-test("listLaneToolsDescriptor exposes 14 tools: list, override, setResetAt, add, lanes.models.list/setEnabled, routingStrategy.get/set, models.list/refresh/setEnabled, route_selection, route.reportOutcome (hdl-rof-02), route.modelSwaps (heimdall#142)", () => {
+test("listLaneToolsDescriptor exposes 16 tools: list, override, setResetAt, add, lanes.models.list/setEnabled, routingStrategy.get/set, models.list/refresh/setEnabled, route_selection, route.reportOutcome (hdl-rof-02), route.modelSwaps (heimdall#142), lanes.maxUsage.get/set (PANT-1325)", () => {
   const tools = listLaneToolsDescriptor();
-  assert.equal(tools.length, 14);
+  assert.equal(tools.length, 16);
   const names = tools.map((t) => t.name);
   assert.deepEqual(
     names.sort(),
@@ -78,6 +82,8 @@ test("listLaneToolsDescriptor exposes 14 tools: list, override, setResetAt, add,
       ROUTE_SELECTION_TOOL_NAME,
       ROUTE_REPORT_OUTCOME_TOOL_NAME,
       ROUTE_MODEL_SWAPS_TOOL_NAME,
+      LANES_MAX_USAGE_GET_TOOL_NAME,
+      LANES_MAX_USAGE_SET_TOOL_NAME,
     ].sort(),
   );
   assert.equal(LANES_LIST_TOOL_NAME, "heimdall.lanes.list");
@@ -423,6 +429,41 @@ test("heimdall#142 slice 4: heimdall.route.modelSwaps reports current swaps and 
     assert.ok(Array.isArray(ok.events));
     const bad = JSON.parse(callRouteModelSwapsTool(store, { limit: 0 }).content[0].text);
     assert.equal(bad.error, "invalid_limit");
+  } finally {
+    store.close();
+  }
+});
+
+test("PANT-1325: heimdall.lanes.maxUsage.set turns max usage on with an expiry and off; .get reports it with the paid switches", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  try {
+    const laneId = "claude@mathew.dostal";
+    const byName = Object.fromEntries(listLaneToolsDescriptor().map((t) => [t.name, t]));
+    assert.deepEqual(byName[LANES_MAX_USAGE_SET_TOOL_NAME].inputSchema.required, ["lane_id", "enabled"]);
+    const until = new Date(Date.now() + 3_600_000).toISOString();
+
+    const on = JSON.parse(callMaxUsageSetTool(registry, store, { lane_id: laneId, enabled: true, until, reason: "release" }).content[0].text);
+    assert.equal(on.ok, true);
+    assert.equal(on.max_usage.enabled, true);
+    assert.equal(on.max_usage.until, until);
+
+    const got = JSON.parse(callMaxUsageGetTool(registry, store, { lane_id: laneId }).content[0].text);
+    assert.equal(got.lanes[0].enabled, true);
+    assert.deepEqual(got.lanes[0].paid_switches.map((sw: { kind: string }) => sw.kind), ["credits", "spend_cap"]);
+
+    const paid = JSON.parse(callMaxUsageSetTool(registry, store, { lane_id: laneId, enabled: true, until, credits: true }).content[0].text);
+    assert.equal(paid.error, "not_a_heimdall_switch");
+    const noUntil = JSON.parse(callMaxUsageSetTool(registry, store, { lane_id: laneId, enabled: true }).content[0].text);
+    assert.equal(noUntil.error, "invalid_until");
+    const unknown = JSON.parse(callMaxUsageSetTool(registry, store, { lane_id: "ghost", enabled: false }).content[0].text);
+    assert.equal(unknown.error, "unknown_lane");
+
+    const off = JSON.parse(callMaxUsageSetTool(registry, store, { lane_id: laneId, enabled: false }).content[0].text);
+    assert.equal(off.max_usage.enabled, false);
+    const dispatch = buildToolDispatch(registry, store);
+    assert.doesNotThrow(() => dispatchToolCall(dispatch, LANES_MAX_USAGE_GET_TOOL_NAME, {}));
+    assert.doesNotThrow(() => dispatchToolCall(dispatch, LANES_MAX_USAGE_SET_TOOL_NAME, { lane_id: "ghost", enabled: true }));
   } finally {
     store.close();
   }

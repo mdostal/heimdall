@@ -45,6 +45,7 @@ import {
 import { getActiveRoutingStrategyName, getModelSwapsReport, getRoutingStrategyNames, getScoredRoute, reportRouteOutcome, parseTaskType } from "../core/route-selector.js";
 import { refreshModelCatalog, getModelCatalog, setModelEnabled } from "../core/model-catalog.js";
 import { listLaneModels, setLaneModelEnabled } from "../core/lane-models.js";
+import { getMaxUsageReport, setMaxUsage } from "../core/max-usage.js";
 import { StateStore, resolveDefaultDbPath } from "../core/state-store.js";
 import type { LaneRegistry } from "../core/lane-registry.js";
 
@@ -62,6 +63,8 @@ export const MODELS_SET_ENABLED_TOOL_NAME = "heimdall.models.setEnabled";
 export const ROUTE_SELECTION_TOOL_NAME = "route_selection";
 export const ROUTE_REPORT_OUTCOME_TOOL_NAME = "heimdall.route.reportOutcome";
 export const ROUTE_MODEL_SWAPS_TOOL_NAME = "heimdall.route.modelSwaps";
+export const LANES_MAX_USAGE_GET_TOOL_NAME = "heimdall.lanes.maxUsage.get";
+export const LANES_MAX_USAGE_SET_TOOL_NAME = "heimdall.lanes.maxUsage.set";
 
 const DEFAULT_ENV_FILE_PATH = ".env";
 
@@ -246,6 +249,30 @@ export function listLaneToolsDescriptor() {
         },
       },
     },
+    {
+      name: LANES_MAX_USAGE_GET_TOOL_NAME,
+      description:
+        "Show max-usage mode per account lane: whether it is on, until when, whether routing acts on it, and the account's paid switches (credits, spend_cap) as observed. Omit lane_id for every lane.",
+      inputSchema: {
+        type: "object" as const,
+        properties: { lane_id: { type: "string" as const } },
+      },
+    },
+    {
+      name: LANES_MAX_USAGE_SET_TOOL_NAME,
+      description:
+        "Turn max-usage mode on for one account lane until an expiry (enabled: true, until required), or off (enabled: false). While on, the lane works through every premium model it serves in preference order as each limit is reached, and takes work ahead of other lanes, then routing queues. Never below premium for code work. It never turns on paid credits or raises a spend cap; those stay human switches. Persists across restarts.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          lane_id: { type: "string" as const },
+          enabled: { type: "boolean" as const, description: "true = on (needs until), false = off." },
+          until: { type: "string" as const, description: "Required when turning on: future ISO-8601 expiry with timezone, within max_usage.max_hours." },
+          reason: { type: "string" as const, description: "Optional free-text note for why." },
+        },
+        required: ["lane_id", "enabled"],
+      },
+    },
   ];
 }
 
@@ -342,6 +369,16 @@ export function callRouteModelSwapsTool(store: StateStore, args: unknown) {
   return textResult(getModelSwapsReport(store, limit));
 }
 
+export function callMaxUsageGetTool(registry: LaneRegistry, store: StateStore, args: unknown) {
+  const input = (args ?? {}) as { lane_id?: unknown };
+  return textResult(getMaxUsageReport(registry, store, typeof input.lane_id === "string" ? input.lane_id : undefined));
+}
+
+export function callMaxUsageSetTool(registry: LaneRegistry, store: StateStore, args: unknown) {
+  const { lane_id: laneId, ...rest } = (args ?? {}) as Record<string, unknown>;
+  return textResult(setMaxUsage(registry, store, typeof laneId === "string" ? laneId : "", rest));
+}
+
 export function callRouteReportOutcomeTool(args: unknown) {
   const input = (args ?? {}) as { decision_id?: unknown; outcome?: unknown; actual_cost?: unknown };
   const decisionId = typeof input.decision_id === "string" ? input.decision_id : "";
@@ -383,6 +420,8 @@ export function buildToolDispatch(
     [ROUTE_SELECTION_TOOL_NAME]: (args) => callRouteSelectionTool(registry, store, args),
     [ROUTE_REPORT_OUTCOME_TOOL_NAME]: (args) => callRouteReportOutcomeTool(args),
     [ROUTE_MODEL_SWAPS_TOOL_NAME]: (args) => callRouteModelSwapsTool(store, args),
+    [LANES_MAX_USAGE_GET_TOOL_NAME]: (args) => callMaxUsageGetTool(registry, store, args),
+    [LANES_MAX_USAGE_SET_TOOL_NAME]: (args) => callMaxUsageSetTool(registry, store, args),
   };
 }
 

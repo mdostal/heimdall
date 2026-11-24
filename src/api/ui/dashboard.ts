@@ -795,6 +795,30 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
     }).join("") + untilInput + "</div>";
   }
 
+  // heimdall#142 slice 5: max-usage mode for this account, with its expiry,
+  // and the account's paid switches (credits / spend cap), shown read-only:
+  // Heimdall never turns those on.
+  function maxUsageBlock(lane) {
+    var mu = lane.max_usage;
+    if (!mu) return "";
+    var laneAttr = escapeHtml(lane.lane_id);
+    var state = mu.enabled
+      ? "on until " + escapeHtml(formatResetAt(mu.until)) + (mu.reason ? " (" + escapeHtml(mu.reason) + ")" : "") +
+        (mu.effective ? "" : " / not acting: " + escapeHtml(mu.ineffective_reason || ""))
+      : "off";
+    var paid = (mu.paid_switches || []).map(function (sw) {
+      return "<span class=\\"limit-chip\\">" + escapeHtml(sw.kind) + ": " +
+        (sw.reported ? escapeHtml(sw.state || "unknown") : "not reported") + "</span>";
+    }).join("");
+    return "<div class=\\"max-usage\\" data-max-usage-block=\\"" + laneAttr + "\\">" +
+      "Max usage: " + state +
+      " <label>until <input type=\\"datetime-local\\" class=\\"max-usage-until-input\\" data-max-usage-lane=\\"" + laneAttr + "\\"></label>" +
+      "<button type=\\"button\\" class=\\"" + (mu.enabled ? "active" : "") + "\\" data-lane=\\"" + laneAttr + "\\" data-max-usage=\\"on\\">On</button>" +
+      "<button type=\\"button\\" class=\\"" + (mu.enabled ? "" : "active") + "\\" data-lane=\\"" + laneAttr + "\\" data-max-usage=\\"off\\">Off</button>" +
+      "<div class=\\"paid-switches\\" title=\\"" + escapeHtml(mu.paid_switches_note || "") + "\\">Paid switches (report only): " + paid + "</div>" +
+      "</div>";
+  }
+
   function errorCodeChip(lane) {
     // hdl-error-taxonomy: the normalized code, distinct from the native
     // reason text — "degraded from X" at a glance, full detail still in the
@@ -832,7 +856,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       "<td>" + escapeHtml(lane.model || "") + priorityBadge(lane.priority) + "</td>" +
       "<td>" + statusBadge(lane) + overrideBadge(lane.manual_override) + "</td>" +
       "<td>" + tokenChip(lane) + "</td>" +
-      "<td class=\\"reason\\">" + errorCodeChip(lane) + escapeHtml(lane.reason) + limitsBlock(lane) + laneModelsBlock(lane) + "</td>" +
+      "<td class=\\"reason\\">" + errorCodeChip(lane) + escapeHtml(lane.reason) + limitsBlock(lane) + laneModelsBlock(lane) + maxUsageBlock(lane) + "</td>" +
       "<td>" + resetAtCell(lane) + "</td>" +
       "<td>" + headroomCell(lane) + "</td>" +
       "<td>" + costTierCell(lane) + "</td>" +
@@ -1033,6 +1057,34 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       })
         .then(poll)
         .catch(function () { modelBtn.disabled = false; });
+      return;
+    }
+
+    var maxUsageBtn = event.target.closest("button[data-max-usage]");
+    if (maxUsageBtn) {
+      var muLaneId = maxUsageBtn.getAttribute("data-lane");
+      var muOn = maxUsageBtn.getAttribute("data-max-usage") === "on";
+      var muUntilEl = document.querySelector('.max-usage-until-input[data-max-usage-lane="' + CSS.escape(muLaneId) + '"]');
+      if (muOn && (!muUntilEl || !muUntilEl.value)) {
+        window.alert("Max usage needs an expiry: pick an until time first.");
+        return;
+      }
+      var muBody = muOn ? { enabled: true, until: new Date(muUntilEl.value).toISOString() } : { enabled: false };
+      maxUsageBtn.disabled = true;
+      fetch("/lanes/" + encodeURIComponent(muLaneId) + "/max-usage", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(muBody)
+      })
+        .then(function (res) {
+          if (!res.ok) {
+            return res.json().then(function (payload) {
+              window.alert("Max usage not changed: " + ((payload && (payload.message || payload.error)) || res.status));
+            }, function () {});
+          }
+        })
+        .then(poll)
+        .catch(function () { maxUsageBtn.disabled = false; });
       return;
     }
 

@@ -7,7 +7,7 @@ import { resolveEffectiveModel } from "./model-catalog.js";
 import { TASK_TYPES, type TaskType, parseTaskType } from "./task-type.js";
 import type { JsonValue } from "./routing/route-ledger.js";
 import type { RouteSelectionDetail } from "./routing-strategies/types.js";
-import { DEFAULT_POLICY_PATH, PolicyLoader, PolicyValidationError } from "./routing/policy-loader.js";
+import { DEFAULT_MAX_USAGE_POLICY, DEFAULT_POLICY_PATH, PolicyLoader, PolicyValidationError, type MaxUsagePolicy } from "./routing/policy-loader.js";
 import {
   allowedLevels,
   LevelConfigError,
@@ -57,6 +57,10 @@ export interface AvailableRoute {
    * dispatch with now. */
   preferred_model?: string;
   model_swap?: ModelSwap;
+  /** heimdall#142 slice 5 — present only when the routed lane is in max-usage mode. */
+  max_usage?: true;
+  /** heimdall#142 slice 5 — present only when work was steered to max-usage lanes ahead of others. */
+  max_usage_preferred?: true;
 }
 
 /** heimdall#142 slice 3 — why the level gate withheld a lane. */
@@ -123,6 +127,8 @@ interface RoutePolicyFilters {
   levels: LevelPolicy | null;
   /** heimdall#142 slice 4 — the policy's model_swap.enabled. */
   swap: boolean;
+  /** heimdall#142 slice 5 — the policy's max_usage section (defaults when absent). */
+  maxUsage: MaxUsagePolicy;
 }
 let cachedFilters: RoutePolicyFilters | null = null;
 
@@ -137,10 +143,26 @@ let cachedFilters: RoutePolicyFilters | null = null;
 function getRoutePolicyFilters(): RoutePolicyFilters {
   if (cachedFilters) return cachedFilters;
   const path = routePolicyPath ?? DEFAULT_POLICY_PATH;
-  if (!existsSync(path)) return { excluded: new Set(), levels: null, swap: false };
+  if (!existsSync(path)) return { excluded: new Set(), levels: null, swap: false, maxUsage: { ...DEFAULT_MAX_USAGE_POLICY } };
   const policy = PolicyLoader.load(path);
-  cachedFilters = { excluded: new Set(policy.excluded_lanes), levels: policy.levels, swap: policy.model_swap.enabled };
+  cachedFilters = {
+    excluded: new Set(policy.excluded_lanes),
+    levels: policy.levels,
+    swap: policy.model_swap.enabled,
+    maxUsage: policy.max_usage,
+  };
   return cachedFilters;
+}
+
+/**
+ * heimdall#142 slice 5 — the max_usage policy and whether level routing is
+ * configured (max usage only acts with levels, like model swap, because
+ * without level bindings Heimdall can't tell a premium model from a lower
+ * one). Throws PolicyValidationError for an invalid policy file.
+ */
+export function getMaxUsagePolicy(): { policy: MaxUsagePolicy; levelsConfigured: boolean } {
+  const filters = getRoutePolicyFilters();
+  return { policy: filters.maxUsage, levelsConfigured: filters.levels !== null };
 }
 
 interface RoutingCandidates {
@@ -157,6 +179,10 @@ interface RoutingCandidates {
   queueResetsAt: string | null;
   /** heimdall#142 slice 4 — candidates routing a model other than their preferred one. */
   swaps: Map<string, ModelSwap>;
+  /** heimdall#142 slice 5 — lanes with max usage on (whether or not they are candidates). */
+  maxUsageLanes: string[];
+  /** heimdall#142 slice 5 — true when candidates were narrowed to max-usage lanes (prefer_account). */
+  maxUsagePreferred: boolean;
 }
 
 export interface RouteOptions {
@@ -202,11 +228,16 @@ function getRoutingCandidates(
   // override too — an excluded lane is never a candidate, and a decision
   // with no other candidate is "no route", never a fallback to the excluded
   // lane.
-  const { excluded, levels, swap: swapEnabled } = getRoutePolicyFilters();
+  const { excluded, levels, swap: swapEnabled, maxUsage: maxUsagePolicy } = getRoutePolicyFilters();
   const notExcluded = eligible.filter((lane) => !excluded.has(lane.lane_id));
   const excludedLanes = eligible.filter((lane) => excluded.has(lane.lane_id)).map((lane) => lane.lane_id);
   if (!levels) {
-    return { candidates: notExcluded, excludedLanes, levelGate: null, levelWithheld: [], candidateLevels: new Map(), queueResetsAt: null, swaps: new Map() };
+    // heimdall#142 slice 5: max usage needs levels, like swap; without them
+    // routing is exactly as before.
+    return {
+      candidates: notExcluded, excludedLanes, levelGate: null, levelWithheld: [], candidateLevels: new Map(),
+      queueResetsAt: null, swaps: new Map(), maxUsageLanes: [], maxUsagePreferred: false,
+    };
   }
 
   // heimdall#142 slice 3: the level gate, applied last, so like
@@ -222,6 +253,8 @@ function getRoutingCandidates(
     throw error;
   }
   const now = options.now ?? new Date();
+  // heimdall#142 slice 5: lanes the operator put in max-usage mode (unexpired).
+  const maxUsageLanes = new Set(store.getLaneMaxUsage(undefined, now).map((row) => row.lane_id));
   const gate = allowedLevels(levels, taskType, options.workClass);
   const levelGate: LevelGate = { work_class: gate.work_class, allowed_levels: gate.levels, floor: gate.floor };
   const candidates: Lane[] = [];
@@ -257,7 +290,9 @@ function getRoutingCandidates(
       // heimdall#142 slice 4: the same account may serve another model at
       // this level. Swap to it rather than withholding the lane; never to a
       // lower level (see model-swap.ts).
-      const plan = swapEnabled ? planLaneModel(lane, model, level, usability, gate.levels, levels, store, now) : null;
+      // heimdall#142 slice 5: a max-usage lane works through its premium
+      // models even when the policy turns swap off.
+      const plan = swapEnabled || maxUsageLanes.has(lane.lane_id) ? planLaneModel(lane, model, level, usability, gate.levels, levels, store, now) : null;
       swap = plan?.swap ?? null;
       if (!swap) {
         for (const at of plan?.alternatives_available_at ?? []) noteReset(at);
@@ -282,7 +317,22 @@ function getRoutingCandidates(
     if (swap) swaps.set(lane.lane_id, swap);
   }
 
-  return { candidates, excludedLanes, levelGate, levelWithheld, candidateLevels, queueResetsAt, swaps };
+  // heimdall#142 slice 5: with prefer_account, work goes to the max-usage
+  // accounts first while any of them has a usable model at an allowed level.
+  // When none does, the other lanes route as if max usage were off.
+  const preferred = maxUsagePolicy.prefer_account ? candidates.filter((lane) => maxUsageLanes.has(lane.lane_id)) : [];
+  const maxUsagePreferred = preferred.length > 0 && preferred.length < candidates.length;
+  return {
+    candidates: maxUsagePreferred ? preferred : candidates,
+    excludedLanes,
+    levelGate,
+    levelWithheld,
+    candidateLevels,
+    queueResetsAt,
+    swaps,
+    maxUsageLanes: [...maxUsageLanes].filter((laneId) => registry.get(laneId) !== undefined).sort(),
+    maxUsagePreferred,
+  };
 }
 
 function levelContext(routing: RoutingCandidates) {
@@ -323,6 +373,8 @@ export type RouteVerdict =
       resets_at: string | null;
       level_withheld: readonly LevelWithheldLane[];
       excluded_lanes: readonly string[];
+      /** heimdall#142 slice 5 — lanes in max-usage mode; present only when any is on. */
+      max_usage_lanes?: readonly string[];
     }
   | { verdict: "no_route"; task_type: TaskType };
 
@@ -349,6 +401,7 @@ export function getRouteVerdict(
       resets_at: routing.queueResetsAt,
       level_withheld: levelWithheld,
       excluded_lanes: excludedLanes,
+      ...(routing.maxUsageLanes.length > 0 ? { max_usage_lanes: routing.maxUsageLanes } : {}),
     };
   }
 
@@ -415,6 +468,8 @@ function toAvailableRoute(
         }
       : {}),
     ...(swap ? { preferred_model: swap.preferred_model, model_swap: swap } : {}),
+    ...(routing.maxUsageLanes.includes(lane.lane_id) ? { max_usage: true as const } : {}),
+    ...(routing.maxUsagePreferred ? { max_usage_preferred: true as const } : {}),
   };
 }
 
@@ -457,6 +512,10 @@ export interface RouteResult {
   preferred_model: string | null;
   /** Non-null when `model` is a swap away from `preferred_model`: the limit or toggle that caused it. */
   model_swap: ModelSwap | null;
+  /** heimdall#142 slice 5 — lanes in max-usage mode right now ([] when none). */
+  max_usage_lanes: readonly string[];
+  /** heimdall#142 slice 5 — true when candidates were narrowed to the max-usage lanes. */
+  max_usage_preferred: boolean;
 }
 
 // hdl-rr-03: one module-level ScoredStrategy instance — mirrors
@@ -590,6 +649,8 @@ export function getScoredRoute(
     chosen_level: lane ? (candidateLevels.get(lane.lane_id) ?? null) : null,
     level_withheld: levelWithheld,
     ...routedModel(lane, routing, store),
+    max_usage_lanes: routing.maxUsageLanes,
+    max_usage_preferred: routing.maxUsagePreferred,
   };
 }
 

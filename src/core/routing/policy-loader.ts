@@ -76,7 +76,22 @@ export interface Policy {
    * without level bindings Heimdall can't tell a premium model from a lower one.
    */
   model_swap: { enabled: boolean };
+  /**
+   * heimdall#142 slice 5: limits for the per-account "max usage" switch.
+   * Optional in the file. `max_hours` caps how far ahead an operator may set
+   * its expiry (default 168, one weekly window); `prefer_account` (default
+   * true) routes work to a max-usage account ahead of other lanes while it
+   * has a usable premium model.
+   */
+  max_usage: MaxUsagePolicy;
 }
+
+export interface MaxUsagePolicy {
+  max_hours: number;
+  prefer_account: boolean;
+}
+
+export const DEFAULT_MAX_USAGE_POLICY: MaxUsagePolicy = { max_hours: 168, prefer_account: true };
 
 export class PolicyLoader {
   static load(path: string = DEFAULT_POLICY_PATH): Policy {
@@ -121,7 +136,28 @@ function validatePolicy(value: unknown): Policy {
     excluded_lanes: validateExcludedLanes(policy.excluded_lanes),
     levels: validateLevels(policy.levels, policy.work_classes),
     model_swap: validateModelSwap(policy.model_swap),
+    max_usage: validateMaxUsage(policy.max_usage),
   };
+}
+
+function validateMaxUsage(value: unknown): MaxUsagePolicy {
+  if (value === undefined || value === null) return { ...DEFAULT_MAX_USAGE_POLICY };
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new PolicyValidationError(`Invalid field "max_usage": expected { max_hours, prefer_account }`);
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (key !== "max_hours" && key !== "prefer_account") {
+      throw new PolicyValidationError(`Invalid field "max_usage.${key}": expected only "max_hours" and "prefer_account"`);
+    }
+  }
+  const maxHours = record.max_hours ?? DEFAULT_MAX_USAGE_POLICY.max_hours;
+  if (typeof maxHours !== "number" || !Number.isFinite(maxHours) || maxHours <= 0) {
+    throw new PolicyValidationError(`Invalid field "max_usage.max_hours": expected a positive number`);
+  }
+  const prefer = record.prefer_account ?? DEFAULT_MAX_USAGE_POLICY.prefer_account;
+  if (typeof prefer !== "boolean") throw new PolicyValidationError(`Invalid field "max_usage.prefer_account": expected boolean`);
+  return { max_hours: maxHours, prefer_account: prefer };
 }
 
 function validateModelSwap(value: unknown): Policy["model_swap"] {
