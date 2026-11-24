@@ -143,3 +143,51 @@ test("provider catalog Create route fills the Add lane form and submits the list
     assert.deepEqual(submitted, { lane_id: provider + "@ops", provider, model, token: "secret" });
   }
 });
+
+test("PANT-1325: each lane row shows max usage (state, expiry, On/Off) and its paid switches read-only", async () => {
+  const base = {
+    provider: "claude", status: "up", signal_state: "fresh", last_probed_at: "2026-11-24T12:00:00.000Z",
+    reset_at: null, reason: null, error_code: null, last_updated: "2026-11-24T12:00:00.000Z",
+    signal_source: "active_probe", manual_override: null, override_reason: null, credential_configured: true,
+    manual_reset_at: null, model: "claude", priority: null, manual_headroom: null, manual_cost_tier: null, multica_agent_ids: [],
+  };
+  const paid = [
+    { kind: "credits", reported: true, state: "exhausted", used_percent: null, resets_at: null, source: "operator", observed_at: null, reason: null },
+    { kind: "spend_cap", reported: false, state: null, used_percent: null, resets_at: null, source: null, observed_at: null, reason: null },
+  ];
+  const lanes = [
+    { ...base, lane_id: "claude@max", credential_ref: "claude@max", max_usage: {
+      lane_id: "claude@max", enabled: true, reason: "release week", until: "2026-11-25T12:00:00.000Z", set_at: "2026-11-24T12:00:00.000Z",
+      effective: true, ineffective_reason: null, paid_switches: paid, paid_switches_note: "Reported only.",
+    } },
+    { ...base, lane_id: "claude@off", credential_ref: "claude@off", max_usage: {
+      lane_id: "claude@off", enabled: false, reason: null, until: null, set_at: null,
+      effective: false, ineffective_reason: "off", paid_switches: paid, paid_switches_note: "Reported only.",
+    } },
+  ];
+  const written = new Map<string, string>();
+  const document = new Proxy({}, {
+    get(_t, prop) {
+      if (prop === "getElementById") return (id: string) => stub(written, id);
+      return stub(written, `document.${String(prop)}`);
+    },
+  });
+  const fetch = (url: string) =>
+    url === "/lanes" ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(lanes) }) : new Promise(() => {});
+  const context = vm.createContext({
+    document, fetch, console, setTimeout, clearTimeout, setInterval: () => 0, clearInterval: () => {},
+    window: stub(written, "window"), localStorage: stub(written, "localStorage"), navigator: stub(written, "navigator"),
+  });
+  for (const script of inlineScripts(renderDashboardHtml())) new vm.Script(script).runInContext(context);
+  for (let i = 0; i < 100 && !written.has("root"); i++) await new Promise((resolve) => setImmediate(resolve));
+
+  const table = written.get("root") ?? "";
+  const rowFor = (laneId: string) => table.split("<tr>").find((row) => row.includes(`<td>${laneId}</td>`)) ?? "";
+  assert.match(rowFor("claude@max"), /Max usage: on until [^<]*\(release week\)/);
+  assert.match(rowFor("claude@max"), /class="active" data-lane="claude@max" data-max-usage="on">On</);
+  assert.match(rowFor("claude@off"), /Max usage: off/);
+  assert.match(rowFor("claude@off"), /class="active" data-lane="claude@off" data-max-usage="off">Off</);
+  assert.match(rowFor("claude@max"), /Paid switches \(report only\): .*credits: exhausted.*spend_cap: not reported/);
+  // No control to change credits or a spend cap exists.
+  assert.doesNotMatch(table, /data-(credits|spend)/);
+});
