@@ -220,6 +220,12 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
   .limit-exhausted .limit-chip { color: var(--hd-status-credit); }
   .limit-available .limit-chip { color: var(--hd-status-up); }
   .limit-unknown .limit-chip { color: var(--hd-text-muted); }
+  .lane-models { margin-top: 0.35rem; display: flex; flex-direction: column; gap: 0.2rem; }
+  .lane-model-row { font-size: 0.8rem; color: var(--hd-text-muted); }
+  .lane-model-row button { font-size: 0.7rem; padding: 0 0.35rem; margin-left: 0.2rem; }
+  .lane-model-row button.active { font-weight: 600; }
+  .lane-model-usable .limit-chip { color: var(--hd-status-up); }
+  .lane-model-off .limit-chip, .lane-model-unavailable .limit-chip { color: var(--hd-status-credit); }
   .gateway-header td {
     background: var(--hd-surface-2);
     font-size: 0.75rem;
@@ -760,6 +766,35 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
     }).join("") + "</div>";
   }
 
+  // heimdall#142 slice 2: the models this lane serves, each with its
+  // operator toggle (On / Off / Auto, optional expiry) and whether a limit
+  // currently makes it unavailable.
+  function laneModelsBlock(lane) {
+    var models = lane.models || [];
+    if (models.length === 0) return "";
+    var laneAttr = escapeHtml(lane.lane_id);
+    var untilInput = "<label>Model toggle until (optional) <input type=\\"datetime-local\\" class=\\"model-until-input\\" data-lane=\\"" + laneAttr + "\\"></label>";
+    return "<div class=\\"lane-models\\">" + models.map(function (model) {
+      var current = model.manual === "enabled" ? "on" : model.manual === "disabled" ? "off" : "auto";
+      var stateClass = !model.enabled ? "lane-model-off" : !model.available ? "lane-model-unavailable" : "lane-model-usable";
+      var availability = model.available
+        ? "available"
+        : "unavailable (" + escapeHtml(model.blocked_by.join(", ")) + ")" +
+          (model.available_at ? " until " + escapeHtml(formatResetAt(model.available_at)) : ", reset time unknown");
+      var expiry = model.override_until ? " / reverts to auto " + escapeHtml(formatResetAt(model.override_until)) : "";
+      function btn(value, label) {
+        return "<button type=\\"button\\" class=\\"" + (current === value ? "active" : "") + "\\" data-lane=\\"" + laneAttr +
+          "\\" data-model-id=\\"" + escapeHtml(model.model_id) + "\\" data-model-toggle=\\"" + value + "\\">" + label + "</button>";
+      }
+      return "<div class=\\"lane-model-row " + stateClass + "\\" title=\\"" + escapeHtml(model.override_reason || "") + "\\">" +
+        "<span class=\\"limit-chip\\">" + escapeHtml(model.model_id) + "</span>" +
+        (model.tier ? escapeHtml(model.tier) + " / " : "") +
+        (model.enabled ? "on" : "off") + " / " + availability + expiry +
+        btn("on", "On") + btn("off", "Off") + btn("auto", "Auto") +
+        "</div>";
+    }).join("") + untilInput + "</div>";
+  }
+
   function errorCodeChip(lane) {
     // hdl-error-taxonomy: the normalized code, distinct from the native
     // reason text — "degraded from X" at a glance, full detail still in the
@@ -797,7 +832,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       "<td>" + escapeHtml(lane.model || "") + priorityBadge(lane.priority) + "</td>" +
       "<td>" + statusBadge(lane) + overrideBadge(lane.manual_override) + "</td>" +
       "<td>" + tokenChip(lane) + "</td>" +
-      "<td class=\\"reason\\">" + errorCodeChip(lane) + escapeHtml(lane.reason) + limitsBlock(lane) + "</td>" +
+      "<td class=\\"reason\\">" + errorCodeChip(lane) + escapeHtml(lane.reason) + limitsBlock(lane) + laneModelsBlock(lane) + "</td>" +
       "<td>" + resetAtCell(lane) + "</td>" +
       "<td>" + headroomCell(lane) + "</td>" +
       "<td>" + costTierCell(lane) + "</td>" +
@@ -980,6 +1015,24 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       })
         .then(poll)
         .catch(function () { overrideBtn.disabled = false; });
+      return;
+    }
+
+    var modelBtn = event.target.closest("button[data-model-toggle]");
+    if (modelBtn) {
+      var modelLaneId = modelBtn.getAttribute("data-lane");
+      var modelId = modelBtn.getAttribute("data-model-id");
+      var toggle = modelBtn.getAttribute("data-model-toggle");
+      var modelUntilEl = document.querySelector('.model-until-input[data-lane="' + CSS.escape(modelLaneId) + '"]');
+      var modelUntil = toggle !== "auto" && modelUntilEl && modelUntilEl.value ? new Date(modelUntilEl.value).toISOString() : null;
+      modelBtn.disabled = true;
+      fetch("/lanes/" + encodeURIComponent(modelLaneId) + "/models/" + encodeURIComponent(modelId), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled: toggle === "on" ? true : toggle === "off" ? false : null, until: modelUntil })
+      })
+        .then(poll)
+        .catch(function () { modelBtn.disabled = false; });
       return;
     }
 
