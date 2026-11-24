@@ -95,6 +95,65 @@ excluded_lanes:
 - The list is read once per process, like the rest of the policy, so restart
   Heimdall after you change it.
 
+### Levels and the premium floor (heimdall#142, slice 3)
+
+Every model a lane routes to can be bound to a level: `premium`, `standard` or
+`economy`. Work classes then say which levels they may run on. The section is
+optional. Without `levels` and `work_classes`, routing is exactly as before.
+
+```yaml
+levels:
+  models:                       # model id -> level
+    claude-fable-5-2: premium
+    claude-opus-5-5: premium
+    claude-sonnet-5-5: standard
+    claude-haiku-5-5: economy
+  lanes: {}                     # lane id -> level, for a lane whose model has no binding
+work_classes:
+  planning:
+    levels: [premium, standard] # opt-in to a lower level
+  summaries:
+    levels: [economy]
+  migrations:
+    levels: [premium]
+    code_work: true             # held to the premium floor like build/review
+```
+
+- **Bindings come from config only.** A model's level is, most specific first:
+  the `tier` the lane declares for that model (`HEIMDALL_LANE_<N>_MODELS`
+  `id=premium`, or `models[].tier` in `HEIMDALL_LANES_JSON`), then
+  `levels.models`, then `levels.lanes`. A model nothing binds is unbound and
+  never treated as premium.
+- **Lower levels are opt-in per work class.** A request's work class defaults
+  to its task type. A class the policy doesn't list may run on premium only.
+- **The premium floor.** `build`, `review`, `release`, `code` and any class
+  with `code_work: true` never run below premium. A policy that configures one
+  of them with anything other than `[premium]` is invalid. When the task type
+  is `build` or `review`, the floor holds even if the caller names a looser
+  work class.
+- **Queue, never a silent downgrade.** A premium model is unavailable when the
+  operator turned it off for the lane, or its `weekly_model:<id>` (or
+  account-wide) limit is exhausted. If no lane can serve an allowed level, the
+  verdict is `queue` with the earliest known `resets_at` (`null` when no reset
+  time is known). Heimdall does not fall back to Sonnet or Haiku.
+- **Invalid config blocks routing.** An invalid `levels` / `work_classes`
+  section, or a lane `tier` that is not a level, answers
+  `503 routing_policy_unavailable` under every strategy, the same as a broken
+  `excluded_lanes`.
+- **Reported everywhere.** Pass the work class as `work_class` on `POST /route`
+  and the MCP `heimdall.route_selection` tool, `?work-class=` on
+  `GET /available-route`, or `--work-class` on `heimdall route`. Routes then
+  carry `level`, `work_class`, `allowed_levels` and `level_withheld` (lanes
+  skipped and why: `level_not_allowed`, `unbound`, `model_disabled`,
+  `model_unavailable`). `POST /route` adds `verdict` (`route`, `queue` or
+  `no_route`), `resets_at` and `chosen_level`. On a queue,
+  `GET /available-route` answers `404` with `verdict: "queue"`, `resets_at`,
+  `allowed_levels` and `level_withheld`. The scored rationale and the ledger's
+  `request_summary.constraints` record the gate too.
+- Before you turn levels on, bind every lane's model. A lane on an unbound
+  model (for example the placeholder ids in `.env.example`) can only serve a
+  work class once something binds it.
+
 ## Requesting a route
 
 ```bash
