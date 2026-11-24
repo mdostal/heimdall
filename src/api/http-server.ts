@@ -39,6 +39,7 @@ import { LANE_STATUS_VALUES } from "../core/status-model.js";
 import type { LaneAgentResolver } from "../core/actuation/lane-agent-resolver.js";
 import { getLaneSignal, type SignalState } from "../core/signal-state.js";
 import { parseClaudeCapSignal } from "../core/error-parser.js";
+import { getLaneModels, listLaneModels, setLaneModelEnabled, type LaneModel } from "../core/lane-models.js";
 import { isModelScopedCap, limitFromClaudeCapSignal, type LaneLimit, type LimitObservation } from "../core/limits.js";
 import { renderDashboardHtml } from "./ui/dashboard.js";
 import { DOC_ENTRIES, getDocBySlug, renderDocMarkdown, renderDocsIndexHtml, renderDocPageHtml } from "./ui/docs-viewer.js";
@@ -223,6 +224,10 @@ export interface LaneStatusWithOverride extends LaneStatus {
    * `used_percent`/`resets_at` are null when unknown, never estimated.
    * Always an array, [] when nothing has been observed. */
   limits: LaneLimit[];
+  /** heimdall#142 slice 2 — the models this lane serves, each with the
+   * operator toggle (`enabled`), the limit-derived `available`, and the
+   * configured `tier` (null when none is configured). */
+  models: LaneModel[];
 }
 
 const VALID_OVERRIDE_STATES = new Set(["enabled", "disabled", "auto"]);
@@ -722,6 +727,7 @@ export function getLaneStatuses(
       multica_agent_ids: resolver?.resolve(status.lane_id) ?? [],
       ...getLaneSignal(store, status.lane_id, { now }),
       limits: limitsByLane.get(status.lane_id) ?? [],
+      models: declared ? getLaneModels(declared, store, now) : [],
     };
   });
 }
@@ -1636,6 +1642,37 @@ export function createHttpServer(
       const { ok: _ok, ...wire } = result;
       res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify(wire));
+      return;
+    }
+
+    // heimdall#142 slice 2: a lane's models (enabled / available / tier).
+    const laneModelsMatch = req.method === "GET" && req.url?.match(/^\/lanes\/([^/]+)\/models$/);
+    if (laneModelsMatch) {
+      const result = listLaneModels(registry, store, decodeURIComponent(laneModelsMatch[1]));
+      const { ok, ...wire } = result;
+      res.writeHead(ok ? 200 : 404, { "content-type": "application/json" });
+      res.end(JSON.stringify(wire));
+      return;
+    }
+
+    // heimdall#142 slice 2: turn one model in a lane off or on, with an
+    // optional expiry. Body: { enabled: true | false | null, reason?, until? }.
+    const laneModelToggleMatch = req.method === "POST" && req.url?.match(/^\/lanes\/([^/]+)\/models\/([^/]+)$/);
+    if (laneModelToggleMatch) {
+      const laneId = decodeURIComponent(laneModelToggleMatch[1]);
+      const modelId = decodeURIComponent(laneModelToggleMatch[2]);
+      handleJsonBody(req, res, (body) => {
+        if (!body.ok) {
+          writeBodyError(res, body);
+          return;
+        }
+        const { enabled, reason, until } = body.data as { enabled?: unknown; reason?: unknown; until?: unknown };
+        const result = setLaneModelEnabled(registry, store, laneId, modelId, enabled, reason, until);
+        const { ok, ...wire } = result;
+        const httpStatus = ok ? 200 : result.error === "unknown_lane" || result.error === "unknown_model" ? 404 : 400;
+        res.writeHead(httpStatus, { "content-type": "application/json" });
+        res.end(JSON.stringify(wire));
+      });
       return;
     }
 
