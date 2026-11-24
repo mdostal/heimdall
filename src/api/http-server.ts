@@ -9,6 +9,7 @@ import { EnvCredentialSource, resolveCredential, type CredentialSource } from ".
 import { PantheonSecretCredentialSource } from "../core/pantheon-secret-credential-source.js";
 import { loadLaneDeclarations, LaneRegistry, type CredentialState, type LaneCostTier } from "../core/lane-registry.js";
 import {
+  getModelSwapsReport,
   getRouteVerdict,
   getScoredRoute,
   reportRouteOutcome,
@@ -1097,6 +1098,22 @@ export function createHttpServer(
     // to (priority | round-robin | off — see src/core/routing-strategies/).
     // A global setting, not per-lane — unset defaults to "priority",
     // byte-identical to every caller that never touches this route.
+    // heimdall#142 slice 4: current model swaps per lane, and the recent
+    // swap / swap-back log with the limit that caused each one.
+    if (req.method === "GET" && (req.url === "/model-swaps" || req.url?.startsWith("/model-swaps?"))) {
+      const url = new URL(req.url, "http://localhost");
+      const rawLimit = url.searchParams.get("limit");
+      const limit = rawLimit === null ? 50 : Number(rawLimit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_limit", message: "limit must be an integer from 1 to 500" }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(getModelSwapsReport(store, limit)));
+      return;
+    }
+
     if (req.method === "GET" && req.url === "/routing-strategy") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(

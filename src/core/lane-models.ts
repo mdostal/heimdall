@@ -52,7 +52,8 @@ export interface LaneModel {
   usable: boolean;
 }
 
-function blockingLimits(modelId: string, limits: LaneLimit[]): LaneLimit[] {
+/** The exhausted limits that stop `modelId`: its own weekly_model limit or an account-wide one. */
+export function blockingLimits(modelId: string, limits: LaneLimit[]): LaneLimit[] {
   return limits.filter(
     (limit) => limit.state === "exhausted" && (limit.model === modelId || ACCOUNT_BLOCKING_KINDS.has(limit.kind)),
   );

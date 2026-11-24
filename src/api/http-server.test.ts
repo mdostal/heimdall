@@ -3743,3 +3743,31 @@ test("heimdall#142: PATCH with error, GET /lanes limits, POST /lanes/:id/limits/
     store.close();
   }
 });
+
+test("heimdall#142 slice 4: GET /model-swaps reports current swaps; /metrics counts swaps by causing limit", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  store.startLaneModelSwap("lane-a", "claude-fable-5-2", "claude-opus-5-5", JSON.stringify({ type: "limit", limits: [{ kind: "weekly_model:claude-fable-5-2" }] }), new Date());
+  store.recordTelemetryEvent("model_swap", { provider: "claude", laneId: "lane-a", fromModel: "claude-fable-5-2", toModel: "claude-opus-5-5", cause: "weekly_model:claude-fable-5-2" });
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/model-swaps?limit=10`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body.current.map((row: { lane_id: string; preferred_model: string; model: string }) => [row.lane_id, row.preferred_model, row.model]), [["lane-a", "claude-fable-5-2", "claude-opus-5-5"]]);
+    assert.equal(body.current[0].cause.limits[0].kind, "weekly_model:claude-fable-5-2");
+    assert.ok(Array.isArray(body.events));
+
+    const bad = await fetch(`http://localhost:${port}/model-swaps?limit=abc`);
+    assert.equal(bad.status, 400);
+
+    const metrics = await (await fetch(`http://localhost:${port}/metrics`)).text();
+    assert.match(metrics, /heimdall_model_swaps_total\{[^}]*event="swap"[^}]*cause="weekly_model:claude-fable-5-2"[^}]*\} 1/);
+  } finally {
+    server.close();
+    store.close();
+  }
+});

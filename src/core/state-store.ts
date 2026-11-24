@@ -110,6 +110,13 @@ CREATE TABLE IF NOT EXISTS lane_model_toggles (
   set_at TEXT NOT NULL,
   PRIMARY KEY (lane_id, model_id)
 );
+CREATE TABLE IF NOT EXISTS lane_model_swaps (
+  lane_id TEXT PRIMARY KEY,
+  preferred_model TEXT NOT NULL,
+  swapped_to TEXT NOT NULL,
+  cause TEXT NOT NULL,
+  swapped_at TEXT NOT NULL
+);
 `;
 
 export type ManualOverride = "enabled" | "disabled" | null;
@@ -123,6 +130,19 @@ export interface LaneModelToggle {
   /** ISO-8601 expiry; the toggle is deleted (back to auto) once it passes. null = until cleared. */
   until: string | null;
   set_at: string;
+}
+
+/**
+ * heimdall#142 slice 4: a lane currently routing a model other than its
+ * preferred one. `cause` is the JSON-encoded ModelSwapCause (see
+ * model-swap.ts); the store keeps it opaque.
+ */
+export interface LaneModelSwapRow {
+  lane_id: string;
+  preferred_model: string;
+  swapped_to: string;
+  cause: string;
+  swapped_at: string;
 }
 
 interface LaneRow {
@@ -319,6 +339,51 @@ export class StateStore {
         .run(laneId, modelId, enabled ? 1 : 0, reason, until === null ? null : new Date(until).toISOString(), now.toISOString());
     }
     this.scheduleOverrideExpiry();
+  }
+
+  /**
+   * heimdall#142 slice 4: records that `laneId` now routes `swappedTo` instead
+   * of `preferredModel`. Returns true only when this changed the stored swap,
+   * so a transition is logged once even when several processes (HTTP, MCP,
+   * CLI) share the database and route at the same moment.
+   */
+  startLaneModelSwap(laneId: string, preferredModel: string, swappedTo: string, cause: string, now: Date = new Date()): boolean {
+    const result = this.db
+      .prepare(
+        `INSERT INTO lane_model_swaps (lane_id, preferred_model, swapped_to, cause, swapped_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(lane_id) DO UPDATE SET
+           preferred_model = excluded.preferred_model, swapped_to = excluded.swapped_to,
+           cause = excluded.cause, swapped_at = excluded.swapped_at
+         WHERE lane_model_swaps.preferred_model <> excluded.preferred_model
+            OR lane_model_swaps.swapped_to <> excluded.swapped_to`,
+      )
+      .run(laneId, preferredModel, swappedTo, cause, now.toISOString());
+    return Number(result.changes) > 0;
+  }
+
+  /** heimdall#142 slice 4: the lane's current swap, or null when it routes its preferred model. */
+  getLaneModelSwap(laneId: string): LaneModelSwapRow | null {
+    const row = this.db.prepare(`SELECT * FROM lane_model_swaps WHERE lane_id = ?`).get(laneId) as unknown as LaneModelSwapRow | undefined;
+    return row ? { ...row } : null;
+  }
+
+  /** heimdall#142 slice 4: every lane's current swap. */
+  getLaneModelSwaps(): LaneModelSwapRow[] {
+    const rows = this.db.prepare(`SELECT * FROM lane_model_swaps ORDER BY lane_id`).all() as unknown as LaneModelSwapRow[];
+    return rows.map((row) => ({ ...row }));
+  }
+
+  /**
+   * heimdall#142 slice 4: ends exactly the swap `expected` describes. Returns
+   * false when another process already ended or replaced it, so the
+   * swap-back is logged once.
+   */
+  endLaneModelSwap(expected: LaneModelSwapRow): boolean {
+    const result = this.db
+      .prepare(`DELETE FROM lane_model_swaps WHERE lane_id = ? AND preferred_model = ? AND swapped_to = ? AND swapped_at = ?`)
+      .run(expected.lane_id, expected.preferred_model, expected.swapped_to, expected.swapped_at);
+    return Number(result.changes) > 0;
   }
 
   /** heimdall#142 slice 2: live (unexpired) model toggles, for one lane or all lanes. */

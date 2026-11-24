@@ -87,7 +87,8 @@ test("route-command: space-separated flags route to the eligible lane in human-r
     );
     assert.equal(exitCode, undefined);
     assert.equal(out[0], "Chosen Lane: codex-a");
-    assert.match(out[1], /^Rationale: /);
+    assert.equal(out[1], "Model: codex");
+    assert.match(out[2], /^Rationale: /);
   });
 });
 

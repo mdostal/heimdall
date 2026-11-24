@@ -105,6 +105,25 @@ export function renderMetrics(
     })),
   };
 
+  // heimdall#142 slice 4: swaps and swap-backs, labelled by the causing limit.
+  const swapFamily: MetricFamily = {
+    name: "heimdall_model_swaps_total",
+    help: "Total model swaps (event=swap) and swap-backs (event=swap_back) by provider, lane and causing limit.",
+    type: "counter",
+    samples: [
+      ...store.getTelemetryEventCounts("model_swap").map((row) => ({ row, event: "swap" })),
+      ...store.getTelemetryEventCounts("model_swap_back").map((row) => ({ row, event: "swap_back" })),
+    ].map(({ row, event }) => ({
+      labels: {
+        event,
+        provider: row.labels.provider ?? "unknown",
+        lane_id: row.labels.laneId ?? "unknown",
+        cause: row.labels.cause ?? "unknown",
+      },
+      value: row.count,
+    })),
+  };
+
   const routingFamily: MetricFamily = {
     name: "heimdall_routing_decisions_total",
     help: "Total scored-strategy routing decisions by result (lane|no_route).",
@@ -216,6 +235,7 @@ export function renderMetrics(
     schedulerFailuresFamily,
     rotationFamily,
     substitutionFamily,
+    swapFamily,
     routingFamily,
     catalogFamily,
   ]

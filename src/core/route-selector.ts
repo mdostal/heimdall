@@ -17,6 +17,7 @@ import {
   type LevelPolicy,
 } from "./routing/levels.js";
 import { getModelUsability } from "./lane-models.js";
+import { describeCause, planLaneModel, recordSwapState, type ModelSwap } from "./model-swap.js";
 
 export { TASK_TYPES, type TaskType, parseTaskType };
 
@@ -51,6 +52,11 @@ export interface AvailableRoute {
   work_class?: string;
   allowed_levels?: readonly Level[];
   level_withheld?: readonly LevelWithheldLane[];
+  /** heimdall#142 slice 4 — present only on a swap: the lane's preferred
+   * model (what it returns to by itself), while `model` above is the one to
+   * dispatch with now. */
+  preferred_model?: string;
+  model_swap?: ModelSwap;
 }
 
 /** heimdall#142 slice 3 — why the level gate withheld a lane. */
@@ -115,6 +121,8 @@ let routePolicyPath: string | undefined;
 interface RoutePolicyFilters {
   excluded: ReadonlySet<string>;
   levels: LevelPolicy | null;
+  /** heimdall#142 slice 4 — the policy's model_swap.enabled. */
+  swap: boolean;
 }
 let cachedFilters: RoutePolicyFilters | null = null;
 
@@ -129,9 +137,9 @@ let cachedFilters: RoutePolicyFilters | null = null;
 function getRoutePolicyFilters(): RoutePolicyFilters {
   if (cachedFilters) return cachedFilters;
   const path = routePolicyPath ?? DEFAULT_POLICY_PATH;
-  if (!existsSync(path)) return { excluded: new Set(), levels: null };
+  if (!existsSync(path)) return { excluded: new Set(), levels: null, swap: false };
   const policy = PolicyLoader.load(path);
-  cachedFilters = { excluded: new Set(policy.excluded_lanes), levels: policy.levels };
+  cachedFilters = { excluded: new Set(policy.excluded_lanes), levels: policy.levels, swap: policy.model_swap.enabled };
   return cachedFilters;
 }
 
@@ -147,6 +155,8 @@ interface RoutingCandidates {
   candidateLevels: Map<string, Level>;
   /** Earliest time a lane at an allowed level could become routable, when any reported one. */
   queueResetsAt: string | null;
+  /** heimdall#142 slice 4 — candidates routing a model other than their preferred one. */
+  swaps: Map<string, ModelSwap>;
 }
 
 export interface RouteOptions {
@@ -192,11 +202,11 @@ function getRoutingCandidates(
   // override too — an excluded lane is never a candidate, and a decision
   // with no other candidate is "no route", never a fallback to the excluded
   // lane.
-  const { excluded, levels } = getRoutePolicyFilters();
+  const { excluded, levels, swap: swapEnabled } = getRoutePolicyFilters();
   const notExcluded = eligible.filter((lane) => !excluded.has(lane.lane_id));
   const excludedLanes = eligible.filter((lane) => excluded.has(lane.lane_id)).map((lane) => lane.lane_id);
   if (!levels) {
-    return { candidates: notExcluded, excludedLanes, levelGate: null, levelWithheld: [], candidateLevels: new Map(), queueResetsAt: null };
+    return { candidates: notExcluded, excludedLanes, levelGate: null, levelWithheld: [], candidateLevels: new Map(), queueResetsAt: null, swaps: new Map() };
   }
 
   // heimdall#142 slice 3: the level gate, applied last, so like
@@ -217,6 +227,7 @@ function getRoutingCandidates(
   const candidates: Lane[] = [];
   const levelWithheld: LevelWithheldLane[] = [];
   const candidateLevels = new Map<string, Level>();
+  const swaps = new Map<string, ModelSwap>();
   let queueResetsAt: string | null = null;
   const noteReset = (at: string | null): void => {
     if (at !== null && Date.parse(at) > now.getTime() && (queueResetsAt === null || Date.parse(at) < Date.parse(queueResetsAt))) {
@@ -241,24 +252,37 @@ function getRoutingCandidates(
       continue;
     }
     const usability = getModelUsability(lane, model, store, now);
-    if (!usability.enabled) {
-      withhold("model_disabled");
-      continue;
-    }
-    if (!usability.available) {
-      noteReset(usability.available_at);
-      withhold("model_unavailable", usability.available_at);
-      continue;
+    let swap: ModelSwap | null = null;
+    if (!usability.enabled || !usability.available) {
+      // heimdall#142 slice 4: the same account may serve another model at
+      // this level. Swap to it rather than withholding the lane; never to a
+      // lower level (see model-swap.ts).
+      const plan = swapEnabled ? planLaneModel(lane, model, level, usability, gate.levels, levels, store, now) : null;
+      swap = plan?.swap ?? null;
+      if (!swap) {
+        for (const at of plan?.alternatives_available_at ?? []) noteReset(at);
+        if (!usability.enabled) {
+          withhold("model_disabled");
+        } else {
+          noteReset(usability.available_at);
+          withhold("model_unavailable", usability.available_at);
+        }
+        continue;
+      }
     }
     if (!routable) {
       noteReset(store.getManualResetAt(lane.lane_id) ?? statuses.get(lane.lane_id)?.reset_at ?? null);
       continue;
     }
+    // A transition (swap, or swap-back to the preferred model) is logged
+    // once, whichever routing surface observes it first.
+    recordSwapState(store, recordSwapEvent, lane, model, swap, swap === null, now);
     candidates.push(lane);
-    candidateLevels.set(lane.lane_id, level);
+    candidateLevels.set(lane.lane_id, swap ? swap.level : level);
+    if (swap) swaps.set(lane.lane_id, swap);
   }
 
-  return { candidates, excludedLanes, levelGate, levelWithheld, candidateLevels, queueResetsAt };
+  return { candidates, excludedLanes, levelGate, levelWithheld, candidateLevels, queueResetsAt, swaps };
 }
 
 function levelContext(routing: RoutingCandidates) {
@@ -266,6 +290,17 @@ function levelContext(routing: RoutingCandidates) {
     ? {
         levelGate: { ...routing.levelGate, resets_at: routing.queueResetsAt },
         levelWithheld: routing.levelWithheld.map(({ lane_id, reason }) => ({ lane_id, reason })),
+        ...(routing.swaps.size > 0
+          ? {
+              modelSwaps: [...routing.swaps.values()].map((swap) => ({
+                lane_id: swap.lane_id,
+                preferred_model: swap.preferred_model,
+                model: swap.model,
+                cause: describeCause(swap.cause),
+                preferred_available_at: swap.cause.preferred_available_at,
+              })),
+            }
+          : {}),
       }
     : {};
 }
@@ -342,7 +377,9 @@ function toAvailableRoute(
   routing: RoutingCandidates,
 ): AvailableRoute {
   const { excludedLanes, levelGate, levelWithheld, candidateLevels } = routing;
-  const { model, substituted } = resolveEffectiveModel(store, lane.provider, lane.model);
+  const { model: preferredModel, substituted } = resolveEffectiveModel(store, lane.provider, lane.model);
+  const swap = routing.swaps.get(lane.lane_id) ?? null;
+  const model = swap ? swap.model : preferredModel;
   if (substituted) {
     // hdl-ot-02: Heimdall's own local record — this fact previously existed
     // only as the response's model_substituted:true field for whoever
@@ -351,7 +388,7 @@ function toAvailableRoute(
       provider: lane.provider,
       laneId: lane.lane_id,
       declaredModel: lane.model,
-      effectiveModel: model,
+      effectiveModel: preferredModel,
     });
   }
 
@@ -377,6 +414,7 @@ function toAvailableRoute(
           ...(levelWithheld.length > 0 ? { level_withheld: levelWithheld } : {}),
         }
       : {}),
+    ...(swap ? { preferred_model: swap.preferred_model, model_swap: swap } : {}),
   };
 }
 
@@ -412,6 +450,13 @@ export interface RouteResult {
   chosen_level: Level | null;
   /** Lanes withheld by the level gate ([] when none). */
   level_withheld: readonly LevelWithheldLane[];
+  /** heimdall#142 slice 4 — the model to dispatch with on chosen_lane (a
+   * per-task override; the agent row stays the preference). null with no lane. */
+  model: string | null;
+  /** The chosen lane's preferred model; equals `model` unless swapped. null with no lane. */
+  preferred_model: string | null;
+  /** Non-null when `model` is a swap away from `preferred_model`: the limit or toggle that caused it. */
+  model_swap: ModelSwap | null;
 }
 
 // hdl-rr-03: one module-level ScoredStrategy instance — mirrors
@@ -544,5 +589,49 @@ export function getScoredRoute(
     allowed_levels: levelGate?.allowed_levels ?? null,
     chosen_level: lane ? (candidateLevels.get(lane.lane_id) ?? null) : null,
     level_withheld: levelWithheld,
+    ...routedModel(lane, routing, store),
   };
+}
+
+function routedModel(
+  lane: Lane | null,
+  routing: RoutingCandidates,
+  store: StateStore,
+): Pick<RouteResult, "model" | "preferred_model" | "model_swap"> {
+  if (!lane) return { model: null, preferred_model: null, model_swap: null };
+  const preferred = resolveEffectiveModel(store, lane.provider, lane.model).model;
+  const swap = routing.swaps.get(lane.lane_id) ?? null;
+  return { model: swap ? swap.model : preferred, preferred_model: preferred, model_swap: swap };
+}
+
+/** heimdall#142 slice 4 — the most recent swaps and swap-backs from the route ledger, newest first. */
+export function listModelSwapEvents(limit?: number): ReturnType<ScoredStrategy["listModelSwapEvents"]> {
+  return scoredStrategyForRouteEndpoint.listModelSwapEvents(limit);
+}
+
+export interface ModelSwapsReport {
+  /** Lanes routing a model other than their preferred one right now. */
+  current: Array<{ lane_id: string; preferred_model: string; model: string; cause: JsonValue; swapped_at: string }>;
+  /** Recent swaps and swap-backs from the route ledger, newest first, each with its causing limit. */
+  events: ReturnType<ScoredStrategy["listModelSwapEvents"]>;
+}
+
+/** heimdall#142 slice 4 — what GET /model-swaps and MCP heimdall.route.modelSwaps report. */
+export function getModelSwapsReport(store: StateStore, limit: number = 50): ModelSwapsReport {
+  return {
+    current: store.getLaneModelSwaps().map((row) => {
+      let cause: JsonValue = null;
+      try {
+        cause = JSON.parse(row.cause) as JsonValue;
+      } catch {
+        cause = null;
+      }
+      return { lane_id: row.lane_id, preferred_model: row.preferred_model, model: row.swapped_to, cause, swapped_at: row.swapped_at };
+    }),
+    events: listModelSwapEvents(limit),
+  };
+}
+
+function recordSwapEvent(event: Parameters<ScoredStrategy["recordModelSwapEvent"]>[0]): void {
+  scoredStrategyForRouteEndpoint.recordModelSwapEvent(event);
 }
