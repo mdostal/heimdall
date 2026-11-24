@@ -44,6 +44,16 @@ export interface RouteSelectionContext {
   };
   /** heimdall#142 slice 3 — lanes the level gate withheld, and why. */
   readonly levelWithheld?: ReadonlyArray<{ readonly lane_id: string; readonly reason: string }>;
+  /** heimdall#142 slice 4 — candidates that route a model other than their
+   * preferred one, and the limit (or toggle) that caused it. Already decided
+   * upstream; only the scored strategy reads it, for its rationale and ledger. */
+  readonly modelSwaps?: ReadonlyArray<{
+    readonly lane_id: string;
+    readonly preferred_model: string;
+    readonly model: string;
+    readonly cause: string;
+    readonly preferred_available_at: string | null;
+  }>;
 }
 
 export interface RouteSelectionDetail {

@@ -128,7 +128,7 @@ export class ScoredStrategy implements RoutingStrategy {
     return this.getLedger().listModelSwapEvents(limit);
   }
 
-  selectRoute({ taskType, candidates, taskId, store, excludedLanes = [], levelGate, levelWithheld = [] }: RouteSelectionContext): RouteSelectionResult {
+  selectRoute({ taskType, candidates, taskId, store, excludedLanes = [], levelGate, levelWithheld = [], modelSwaps = [] }: RouteSelectionContext): RouteSelectionResult {
     const policy = this.getPolicy();
     const now = this.options.now ?? (() => new Date());
     const generateDecisionId = this.options.generateDecisionId ?? randomUUID;
@@ -172,8 +172,13 @@ export class ScoredStrategy implements RoutingStrategy {
       levelGate && candidates.length === 0
         ? `No ${levelGate.allowed_levels.join("/")} model is available; queued until ${levelGate.resets_at ?? "an unknown reset"}, never routed to a lower level.`
         : `No candidate lane meets the headroom floor (${policy.headroom_floor}); no route chosen.`;
+    // heimdall#142 slice 4: say when the chosen lane routes a swapped model, and why.
+    const chosenSwap = chosenScore ? modelSwaps.find((swap) => swap.lane_id === chosenScore.lane_id) : undefined;
+    const swapText = chosenSwap
+      ? ` Model swapped on ${chosenSwap.lane_id}: ${chosenSwap.preferred_model} -> ${chosenSwap.model} (${chosenSwap.cause}; preferred back ${chosenSwap.preferred_available_at ?? "at an unknown time"}).`
+      : "";
     const rationale =
-      (chosenScore ? generateRationale(chosenScore, ranked) : noRouteText) + levelsText + withheldText + levelWithheldText;
+      (chosenScore ? generateRationale(chosenScore, ranked) : noRouteText) + swapText + levelsText + withheldText + levelWithheldText;
     const constraints = {
       ...(excludedLanes.length > 0 ? { excluded_lanes: [...excludedLanes] } : {}),
       ...(levelGate
@@ -181,6 +186,7 @@ export class ScoredStrategy implements RoutingStrategy {
             work_class: levelGate.work_class,
             allowed_levels: [...levelGate.allowed_levels],
             ...(levelWithheld.length > 0 ? { level_withheld: levelWithheld.map((entry) => ({ ...entry })) } : {}),
+            ...(modelSwaps.length > 0 ? { model_swaps: modelSwaps.map((entry) => ({ ...entry })) } : {}),
           }
         : {}),
     };
