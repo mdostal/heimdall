@@ -3,6 +3,7 @@ import { homedir as osHomedir } from "node:os";
 import { join } from "node:path";
 import { parseDocument } from "yaml";
 import { TASK_TYPES, type TaskType } from "../task-type.js";
+import { LevelConfigError, validateLevelPolicy, type LevelPolicy } from "./levels.js";
 
 // HEIMDALL_REPO_ROOT (introduced for the docs viewer, see http-server.ts's
 // docsRepoRoot) takes precedence over cwd for the same reason here: the
@@ -62,6 +63,12 @@ export interface Policy {
   experiments: PolicyExperiments;
   /** heimdall#123: lane ids that must never be routed to, under any strategy. Optional in the file; [] when absent. */
   excluded_lanes: string[];
+  /**
+   * heimdall#142 slice 3: level bindings and work-class levels, from the
+   * optional `levels` and `work_classes` sections. null when neither is
+   * present: level routing is off. See levels.ts.
+   */
+  levels: LevelPolicy | null;
 }
 
 export class PolicyLoader {
@@ -105,7 +112,17 @@ function validatePolicy(value: unknown): Policy {
     cost_preference: validateCostPreference(requireString(policy, "cost_preference")),
     experiments: validateExperiments(requireRecord(policy.experiments, "experiments")),
     excluded_lanes: validateExcludedLanes(policy.excluded_lanes),
+    levels: validateLevels(policy.levels, policy.work_classes),
   };
+}
+
+function validateLevels(levels: unknown, workClasses: unknown): LevelPolicy | null {
+  try {
+    return validateLevelPolicy(levels, workClasses);
+  } catch (error) {
+    if (error instanceof LevelConfigError) throw new PolicyValidationError(error.message);
+    throw error;
+  }
 }
 
 function validateTaskTypeWeights(value: Record<string, unknown>): Policy["task_type_weights"] {
