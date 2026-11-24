@@ -16,6 +16,7 @@ import {
   setBackoffPolicyOverride,
   pushLaneStatus,
   MAX_REQUEST_BODY_BYTES,
+  endEventStreams,
 } from "./http-server.js";
 import { LaneRegistry } from "../core/lane-registry.js";
 import { StateStore } from "../core/state-store.js";
@@ -3813,6 +3814,58 @@ test("PANT-1325: POST/GET /lanes/:id/max-usage set and read max usage; GET /lane
     assert.equal((await (await fetch(url)).json()).enabled, false);
   } finally {
     server.close();
+    store.close();
+  }
+});
+
+test("PANT-1326: GET /status reports limits, models, mode and swaps; GET /events streams operator.alert", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const laneId = "claude@mathew.dostal";
+  const resetsAt = new Date(Date.now() + 3_600_000).toISOString();
+  store.upsertLane({ lane_id: laneId, provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+  store.recordLimit(laneId, { kind: "weekly_all_models", scope: "account", model: null, state: "exhausted", used_percent: 100, resets_at: resetsAt, reason: "weekly limit" }, "passive", new Date().toISOString());
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  const controller = new AbortController();
+
+  try {
+    const res = await fetch(`http://localhost:${port}/status`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    const account = body.accounts.find((a: { lane_id: string }) => a.lane_id === laneId);
+    assert.deepEqual(
+      account.limits.map((l: { kind: string; state: string; used_percent: unknown; resets_at: unknown }) => [l.kind, l.state, l.used_percent, l.resets_at]),
+      [["weekly_all_models", "exhausted", 100, resetsAt]],
+    );
+    assert.equal(account.mode.max_usage, false);
+    assert.ok(Array.isArray(body.last_swaps));
+    assert.ok(Array.isArray(body.alerts.open));
+    assert.ok(!JSON.stringify(body).includes("secret"), "no credential in GET /status");
+    assert.equal((await fetch(`http://localhost:${port}/status?swaps=abc`)).status, 400);
+
+    const stream = await fetch(`http://localhost:${port}/events`, { signal: controller.signal });
+    const reader = stream.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (!buffer.includes(": connected")) buffer += decoder.decode((await reader.read()).value, { stream: true });
+    store.events.emitOperatorAlert({ id: 42, type: "premium_unavailable" });
+    const deadline = setTimeout(() => controller.abort(), 1000);
+    try {
+      while (!/event: operator\.alert\ndata: .*\n\n/.test(buffer)) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+      }
+    } finally {
+      clearTimeout(deadline);
+    }
+    assert.equal(JSON.parse(buffer.match(/event: operator\.alert\ndata: (.*)\n\n/)![1]).id, 42);
+  } finally {
+    controller.abort();
+    endEventStreams(server);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     store.close();
   }
 });

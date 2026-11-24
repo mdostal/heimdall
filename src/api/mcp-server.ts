@@ -46,6 +46,7 @@ import { getActiveRoutingStrategyName, getModelSwapsReport, getRoutingStrategyNa
 import { refreshModelCatalog, getModelCatalog, setModelEnabled } from "../core/model-catalog.js";
 import { listLaneModels, setLaneModelEnabled } from "../core/lane-models.js";
 import { getMaxUsageReport, setMaxUsage } from "../core/max-usage.js";
+import { DEFAULT_STATUS_SWAPS, getStatusView } from "../core/status-view.js";
 import { StateStore, resolveDefaultDbPath } from "../core/state-store.js";
 import type { LaneRegistry } from "../core/lane-registry.js";
 
@@ -64,6 +65,7 @@ export const ROUTE_SELECTION_TOOL_NAME = "route_selection";
 export const ROUTE_REPORT_OUTCOME_TOOL_NAME = "heimdall.route.reportOutcome";
 export const ROUTE_MODEL_SWAPS_TOOL_NAME = "heimdall.route.modelSwaps";
 export const LANES_MAX_USAGE_GET_TOOL_NAME = "heimdall.lanes.maxUsage.get";
+export const STATUS_TOOL_NAME = "heimdall.status";
 export const LANES_MAX_USAGE_SET_TOOL_NAME = "heimdall.lanes.maxUsage.set";
 
 const DEFAULT_ENV_FILE_PATH = ".env";
@@ -250,6 +252,17 @@ export function listLaneToolsDescriptor() {
       },
     },
     {
+      name: STATUS_TOOL_NAME,
+      description:
+        "Read-only status view: per account lane each limit (type, state, percent, reset time), its models (enabled, available, level), the max-usage mode with expiry, the last model swaps, and open premium-unavailable alerts with their choices. Numbers the provider did not report read \"unknown\".",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          swaps: { type: "number" as const, description: "How many recent swaps to include (1-500, default 10)." },
+        },
+      },
+    },
+    {
       name: LANES_MAX_USAGE_GET_TOOL_NAME,
       description:
         "Show max-usage mode per account lane: whether it is on, until when, whether routing acts on it, and the account's paid switches (credits, spend_cap) as observed. Omit lane_id for every lane.",
@@ -369,6 +382,15 @@ export function callRouteModelSwapsTool(store: StateStore, args: unknown) {
   return textResult(getModelSwapsReport(store, limit));
 }
 
+export function callStatusTool(registry: LaneRegistry, store: StateStore, args: unknown) {
+  const input = (args ?? {}) as { swaps?: unknown };
+  const swaps = input.swaps === undefined ? DEFAULT_STATUS_SWAPS : input.swaps;
+  if (typeof swaps !== "number" || !Number.isInteger(swaps) || swaps < 1 || swaps > 500) {
+    return textResult({ ok: false, error: "invalid_swaps", message: "swaps must be an integer from 1 to 500" });
+  }
+  return textResult(getStatusView(registry, store, { swaps }));
+}
+
 export function callMaxUsageGetTool(registry: LaneRegistry, store: StateStore, args: unknown) {
   const input = (args ?? {}) as { lane_id?: unknown };
   return textResult(getMaxUsageReport(registry, store, typeof input.lane_id === "string" ? input.lane_id : undefined));
@@ -421,6 +443,7 @@ export function buildToolDispatch(
     [ROUTE_REPORT_OUTCOME_TOOL_NAME]: (args) => callRouteReportOutcomeTool(args),
     [ROUTE_MODEL_SWAPS_TOOL_NAME]: (args) => callRouteModelSwapsTool(store, args),
     [LANES_MAX_USAGE_GET_TOOL_NAME]: (args) => callMaxUsageGetTool(registry, store, args),
+    [STATUS_TOOL_NAME]: (args) => callStatusTool(registry, store, args),
     [LANES_MAX_USAGE_SET_TOOL_NAME]: (args) => callMaxUsageSetTool(registry, store, args),
   };
 }

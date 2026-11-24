@@ -10,6 +10,7 @@ import type { LaneStatus } from "../core/status-model.js";
 import type { SignalState } from "../core/signal-state.js";
 import { runRouteCommand, runRouteOutcomeCommand } from "../cli/route-command.js";
 import { runAgentCommand } from "../cli/agent-command.js";
+import { getStatusView, renderStatusText } from "../core/status-view.js";
 
 // PANT-823: getLaneStatuses() always sets signal_state; optional here so a
 // bare LaneStatus (tests, older callers) still renders, as "-".
@@ -70,6 +71,10 @@ if (isMainModule) {
       runRouteOutcomeCommand(args.slice(1));
     } else if (command === "agent") {
       runAgentCommand(args.slice(1));
+    } else if (command === "status") {
+      // heimdall#142 slice 6: limits / models / mode / swaps / alerts.
+      const view = getStatusView(registry, store);
+      console.log(parseFormatFlag(args) === "table" ? renderStatusText(view) : JSON.stringify(view, null, 2));
     } else {
       const lanes = getLaneStatuses(registry, store);
       console.log(renderLanes(lanes, parseFormatFlag(args)));

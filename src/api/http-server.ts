@@ -34,7 +34,8 @@ import {
 } from "../core/scheduler/backoff-policies/registry.js";
 import { DEFAULT_INTERVAL_MS as BACKOFF_BASE_INTERVAL_MS } from "../core/scheduler/in-process-scheduler.js";
 import { StateStore, resolveDefaultDbPath, type ManualOverride } from "../core/state-store.js";
-import { LANE_STATUS_CHANGED } from "../core/lane-events.js";
+import { LANE_STATUS_CHANGED, OPERATOR_ALERT } from "../core/lane-events.js";
+import { DEFAULT_STATUS_SWAPS, getStatusView } from "../core/status-view.js";
 import type { LaneStatus, LaneStatusValue } from "../core/status-model.js";
 import { LANE_STATUS_VALUES } from "../core/status-model.js";
 import type { LaneAgentResolver } from "../core/actuation/lane-agent-resolver.js";
@@ -907,9 +908,14 @@ export function createHttpServer(
       const unsubscribe = store.events.onStatusChanged((event) => {
         res.write(`event: ${LANE_STATUS_CHANGED}\ndata: ${JSON.stringify(event)}\n\n`);
       });
+      // heimdall#142 slice 6: premium-unavailable alerts, once per limit.
+      const unsubscribeAlerts = store.events.onOperatorAlert((alert) => {
+        res.write(`event: ${OPERATOR_ALERT}\ndata: ${JSON.stringify(alert)}\n\n`);
+      });
       eventStreams.add(res);
       res.on("close", () => {
         unsubscribe();
+        unsubscribeAlerts();
         eventStreams.delete(res);
       });
       return;
@@ -1105,6 +1111,24 @@ export function createHttpServer(
     // byte-identical to every caller that never touches this route.
     // heimdall#142 slice 4: current model swaps per lane, and the recent
     // swap / swap-back log with the limit that caused each one.
+    // heimdall#142 slice 6: the status view — per account limits (type,
+    // state, percent, reset), models with enabled/available/level, the
+    // max-usage mode, the last swaps and the operator alerts. Every number
+    // is observed or "unknown".
+    if (req.method === "GET" && (req.url === "/status" || req.url?.startsWith("/status?"))) {
+      const url = new URL(req.url, "http://localhost");
+      const rawSwaps = url.searchParams.get("swaps");
+      const swaps = rawSwaps === null ? DEFAULT_STATUS_SWAPS : Number(rawSwaps);
+      if (!Number.isInteger(swaps) || swaps < 1 || swaps > 500) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_swaps", message: "swaps must be an integer from 1 to 500" }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(getStatusView(registry, store, { swaps })));
+      return;
+    }
+
     if (req.method === "GET" && (req.url === "/model-swaps" || req.url?.startsWith("/model-swaps?"))) {
       const url = new URL(req.url, "http://localhost");
       const rawLimit = url.searchParams.get("limit");
