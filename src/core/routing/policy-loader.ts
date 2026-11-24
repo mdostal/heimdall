@@ -69,6 +69,13 @@ export interface Policy {
    * present: level routing is off. See levels.ts.
    */
   levels: LevelPolicy | null;
+  /**
+   * heimdall#142 slice 4: whether a lane whose preferred model is blocked may
+   * route another model it serves at the same or a higher level. Optional in
+   * the file; on when absent. Only acts when `levels` is configured, because
+   * without level bindings Heimdall can't tell a premium model from a lower one.
+   */
+  model_swap: { enabled: boolean };
 }
 
 export class PolicyLoader {
@@ -113,7 +120,22 @@ function validatePolicy(value: unknown): Policy {
     experiments: validateExperiments(requireRecord(policy.experiments, "experiments")),
     excluded_lanes: validateExcludedLanes(policy.excluded_lanes),
     levels: validateLevels(policy.levels, policy.work_classes),
+    model_swap: validateModelSwap(policy.model_swap),
   };
+}
+
+function validateModelSwap(value: unknown): Policy["model_swap"] {
+  if (value === undefined || value === null) return { enabled: true };
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new PolicyValidationError(`Invalid field "model_swap": expected { enabled: true | false }`);
+  }
+  for (const key of Object.keys(value)) {
+    if (key !== "enabled") throw new PolicyValidationError(`Invalid field "model_swap.${key}": expected only "enabled"`);
+  }
+  const enabled = (value as Record<string, unknown>).enabled;
+  if (enabled === undefined) return { enabled: true };
+  if (typeof enabled !== "boolean") throw new PolicyValidationError(`Invalid field "model_swap.enabled": expected boolean`);
+  return { enabled };
 }
 
 function validateLevels(levels: unknown, workClasses: unknown): LevelPolicy | null {

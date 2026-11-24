@@ -22,6 +22,18 @@ CREATE TABLE IF NOT EXISTS routing_outcomes (
 );
 CREATE INDEX IF NOT EXISTS idx_routing_decisions_recorded_at
   ON routing_decisions(recorded_at DESC);
+CREATE TABLE IF NOT EXISTS model_swap_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event TEXT NOT NULL CHECK (event IN ('swap','swap_back')),
+  lane_id TEXT NOT NULL,
+  from_model TEXT NOT NULL,
+  to_model TEXT NOT NULL,
+  cause TEXT NOT NULL,
+  resolution TEXT,
+  recorded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_model_swap_events_recorded_at
+  ON model_swap_events(recorded_at DESC);
 `;
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -86,6 +98,32 @@ export interface RouteOutcomeEntry {
   actualCost: number | null;
   metadata: JsonObject;
   reportedAt: string;
+}
+
+/**
+ * heimdall#142 slice 4: one swap (preferred model -> another premium model on
+ * the same lane) or swap-back, with the limit or toggle that caused it.
+ */
+export interface ModelSwapEventInput {
+  event: "swap" | "swap_back";
+  laneId: string;
+  fromModel: string;
+  toModel: string;
+  /** The cause (limits or toggle) that started the swap; a swap-back carries the swap's cause. */
+  cause: Record<string, JsonValue>;
+  /** For a swap-back: why the preferred model is usable again. null for a swap. */
+  resolution: string | null;
+  recordedAt?: string;
+}
+
+export interface ModelSwapEventEntry {
+  event: "swap" | "swap_back";
+  laneId: string;
+  fromModel: string;
+  toModel: string;
+  cause: JsonObject;
+  resolution: string | null;
+  recordedAt: string;
 }
 
 export interface RouteLedgerOptions {
@@ -266,6 +304,51 @@ export class RouteLedger {
       .prepare(`SELECT result, COUNT(*) as count FROM routing_decisions GROUP BY result`)
       .all() as unknown as Array<{ result: RouteDecisionResult; count: number }>;
     return rows;
+  }
+
+  /** heimdall#142 slice 4: logs one swap or swap-back. */
+  recordModelSwapEvent(input: ModelSwapEventInput): void {
+    this.db
+      .prepare(
+        `INSERT INTO model_swap_events (event, lane_id, from_model, to_model, cause, resolution, recorded_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.event,
+        input.laneId,
+        input.fromModel,
+        input.toModel,
+        stringifyJson(sanitizeJsonValue(input.cause) ?? {}),
+        input.resolution,
+        input.recordedAt ?? this.now().toISOString(),
+      );
+  }
+
+  /** heimdall#142 slice 4: the most recent swaps and swap-backs, newest first. */
+  listModelSwapEvents(limit: number = 50): ModelSwapEventEntry[] {
+    const rows = this.db
+      .prepare(
+        `SELECT event, lane_id, from_model, to_model, cause, resolution, recorded_at
+         FROM model_swap_events ORDER BY recorded_at DESC, id DESC LIMIT ?`,
+      )
+      .all(limit) as unknown as Array<{
+        event: "swap" | "swap_back";
+        lane_id: string;
+        from_model: string;
+        to_model: string;
+        cause: string;
+        resolution: string | null;
+        recorded_at: string;
+      }>;
+    return rows.map((row) => ({
+      event: row.event,
+      laneId: row.lane_id,
+      fromModel: row.from_model,
+      toModel: row.to_model,
+      cause: parseJson(row.cause) as JsonObject,
+      resolution: row.resolution,
+      recordedAt: row.recorded_at,
+    }));
   }
 
   close(): void {

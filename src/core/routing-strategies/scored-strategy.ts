@@ -118,6 +118,16 @@ export class ScoredStrategy implements RoutingStrategy {
     return this.getLedger().reportOutcome(input);
   }
 
+  /** heimdall#142 slice 4: logs a model swap or swap-back on the same ledger connection decisions use. */
+  recordModelSwapEvent(input: Parameters<RouteLedger["recordModelSwapEvent"]>[0]): void {
+    this.getLedger().recordModelSwapEvent(input);
+  }
+
+  /** heimdall#142 slice 4: the most recent swaps and swap-backs, newest first. */
+  listModelSwapEvents(limit?: number): ReturnType<RouteLedger["listModelSwapEvents"]> {
+    return this.getLedger().listModelSwapEvents(limit);
+  }
+
   selectRoute({ taskType, candidates, taskId, store, excludedLanes = [], levelGate, levelWithheld = [] }: RouteSelectionContext): RouteSelectionResult {
     const policy = this.getPolicy();
     const now = this.options.now ?? (() => new Date());
