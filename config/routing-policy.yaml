@@ -40,3 +40,52 @@ experiments:
 #
 # excluded_lanes:
 #   - claude@mathew.dostal
+
+# levels and work_classes (heimdall#142 slice 3): bind models and lanes to a
+# level -- premium, standard or economy -- and say which levels each work
+# class may run on. Applied to the candidate list before any strategy runs
+# (priority, round-robin and scored alike), after excluded_lanes, and like
+# excluded_lanes it wins over a manual "enabled" override.
+#
+# A lane's routed model (its HEIMDALL_LANE_<N>_MODEL, after any catalog
+# substitution) gets its level from, most specific first:
+#   1. the tier the lane declares on that model (HEIMDALL_LANE_<N>_MODELS
+#      `model_id=premium`, or models[].tier in HEIMDALL_LANES_JSON);
+#   2. levels.models below;
+#   3. levels.lanes below (for a lane whose model field isn't a model id).
+# A model nothing binds is "unbound" and is never treated as premium.
+#
+# Hard floor: build, review, release, code, and any class marked
+# `code_work: true`, run on premium only. Configuring anything else for them
+# is an invalid policy, and an invalid policy blocks routing (503). A class
+# not listed here runs on premium only too: a lower level is opt-in, per
+# class. When no lane at an allowed level is usable (unbound, toggled off,
+# limit exhausted, or the lane is down) the verdict is `queue` with the
+# earliest known `resets_at`, never a step down to a lower level.
+#
+# Off by default: with neither section present, routing behaves exactly as
+# before slice 3. Turning it on is a deploy decision, because every lane whose
+# HEIMDALL_LANE_<N>_MODEL isn't a model id bound below (e.g. a placeholder
+# like "claude-sonnet" or "gpt-codex") becomes "unbound" and stops taking
+# build/review work: bind those lanes under levels.lanes, or declare their
+# models with tiers, before uncommenting. Example:
+# levels:
+#   models:
+#     claude-fable-5-2: premium
+#     claude-opus-5-5: premium
+#     gpt-6-astra-high: premium
+#     gemini-4-argon: premium
+#     claude-sonnet-5-5: standard
+#     claude-haiku-5-5: economy
+#   lanes: {}
+# work_classes:
+#   build:
+#     levels: [premium]
+#   review:
+#     levels: [premium]
+#   release:
+#     levels: [premium]
+#   code:
+#     levels: [premium]
+#   planning:
+#     levels: [premium]

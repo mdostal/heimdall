@@ -147,3 +147,31 @@ test("load rejects an excluded_lanes that is not a list of non-empty lane ids", 
     );
   }
 });
+
+// heimdall#142 slice 3: levels and work classes.
+test("load leaves levels null when neither levels nor work_classes is configured", () => {
+  assert.equal(PolicyLoader.load(writePolicy(VALID_POLICY)).levels, null);
+});
+
+test("load parses level bindings and work classes", () => {
+  const policy = PolicyLoader.load(
+    writePolicy(
+      `${VALID_POLICY}levels:\n  models:\n    claude-opus-5-5: premium\n  lanes:\n    legacy: standard\nwork_classes:\n  planning:\n    levels: [premium, standard]\n  build:\n    levels: [premium]\n`,
+    ),
+  );
+  assert.deepEqual(policy.levels, {
+    models: { "claude-opus-5-5": "premium" },
+    lanes: { legacy: "standard" },
+    work_classes: {
+      planning: { levels: ["premium", "standard"], code_work: false },
+      build: { levels: ["premium"], code_work: false },
+    },
+  });
+});
+
+test("load rejects a floor work class configured below premium as a PolicyValidationError", () => {
+  assert.throws(
+    () => PolicyLoader.load(writePolicy(`${VALID_POLICY}levels:\n  models: {}\nwork_classes:\n  review:\n    levels: [premium, economy]\n`)),
+    (error: unknown) => error instanceof PolicyValidationError && /may only run on premium/.test(error.message),
+  );
+});

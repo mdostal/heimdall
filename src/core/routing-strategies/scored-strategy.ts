@@ -118,7 +118,7 @@ export class ScoredStrategy implements RoutingStrategy {
     return this.getLedger().reportOutcome(input);
   }
 
-  selectRoute({ taskType, candidates, taskId, store, excludedLanes = [] }: RouteSelectionContext): RouteSelectionResult {
+  selectRoute({ taskType, candidates, taskId, store, excludedLanes = [], levelGate, levelWithheld = [] }: RouteSelectionContext): RouteSelectionResult {
     const policy = this.getPolicy();
     const now = this.options.now ?? (() => new Date());
     const generateDecisionId = this.options.generateDecisionId ?? randomUUID;
@@ -151,17 +151,36 @@ export class ScoredStrategy implements RoutingStrategy {
     // heimdall#123: a withheld lane never reaches `ranked`, so without this
     // the rationale would read as if it had simply not been registered.
     const withheldText = excludedLanes.length > 0 ? ` Withheld by policy excluded_lanes: ${excludedLanes.join(", ")}.` : "";
+    // heimdall#142 slice 3: the level gate, likewise, or a queue would read
+    // as a missing lane rather than a floor that held.
+    const levelsText = levelGate ? ` Work class ${levelGate.work_class} allows ${levelGate.allowed_levels.join(", ")}.` : "";
+    const levelWithheldText =
+      levelWithheld.length > 0
+        ? ` Withheld by level gate: ${levelWithheld.map((entry) => `${entry.lane_id} (${entry.reason})`).join(", ")}.`
+        : "";
+    const noRouteText =
+      levelGate && candidates.length === 0
+        ? `No ${levelGate.allowed_levels.join("/")} model is available; queued until ${levelGate.resets_at ?? "an unknown reset"}, never routed to a lower level.`
+        : `No candidate lane meets the headroom floor (${policy.headroom_floor}); no route chosen.`;
     const rationale =
-      (chosenScore
-        ? generateRationale(chosenScore, ranked)
-        : `No candidate lane meets the headroom floor (${policy.headroom_floor}); no route chosen.`) + withheldText;
+      (chosenScore ? generateRationale(chosenScore, ranked) : noRouteText) + levelsText + withheldText + levelWithheldText;
+    const constraints = {
+      ...(excludedLanes.length > 0 ? { excluded_lanes: [...excludedLanes] } : {}),
+      ...(levelGate
+        ? {
+            work_class: levelGate.work_class,
+            allowed_levels: [...levelGate.allowed_levels],
+            ...(levelWithheld.length > 0 ? { level_withheld: levelWithheld.map((entry) => ({ ...entry })) } : {}),
+          }
+        : {}),
+    };
 
     try {
       this.getLedger().recordDecision({
         decisionId,
         requestSummary: {
           task_type: taskType,
-          ...(excludedLanes.length > 0 ? { constraints: { excluded_lanes: [...excludedLanes] } } : {}),
+          ...(Object.keys(constraints).length > 0 ? { constraints } : {}),
         },
         candidateScores: ranked,
         result: chosenScore ? "lane" : "no_route",

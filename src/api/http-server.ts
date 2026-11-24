@@ -9,7 +9,7 @@ import { EnvCredentialSource, resolveCredential, type CredentialSource } from ".
 import { PantheonSecretCredentialSource } from "../core/pantheon-secret-credential-source.js";
 import { loadLaneDeclarations, LaneRegistry, type CredentialState, type LaneCostTier } from "../core/lane-registry.js";
 import {
-  getAvailableRoute,
+  getRouteVerdict,
   getScoredRoute,
   reportRouteOutcome,
   parseTaskType,
@@ -1071,15 +1071,25 @@ export function createHttpServer(
         return;
       }
 
-      const route = getAvailableRoute(taskType, registry, store);
-      if (!route) {
+      // heimdall#142 slice 3: optional work class for the level gate
+      // (defaults to the task type). A queue is still a 404 for callers that
+      // only know "no route", with verdict/resets_at for those that wait.
+      const workClass = url.searchParams.get("work-class")?.trim() || undefined;
+      const verdict = getRouteVerdict(taskType, registry, store, { workClass });
+      if (verdict.verdict === "queue") {
+        const { verdict: _kind, task_type: _taskType, ...rest } = verdict;
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "no_available_route", task_type: taskType, verdict: "queue", ...rest }));
+        return;
+      }
+      if (verdict.verdict === "no_route") {
         res.writeHead(404, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: "no_available_route", task_type: taskType }));
         return;
       }
 
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(route));
+      res.end(JSON.stringify(verdict.route));
       return;
     }
 
@@ -1370,7 +1380,7 @@ export function createHttpServer(
           writeBodyError(res, body);
           return;
         }
-        const data = body.data as { task_id?: unknown; task_type?: unknown; estimated_cost?: unknown };
+        const data = body.data as { task_id?: unknown; task_type?: unknown; estimated_cost?: unknown; work_class?: unknown };
         const taskId = typeof data.task_id === "string" ? data.task_id : null;
         const taskType = parseTaskType(typeof data.task_type === "string" ? data.task_type : null);
         if (!taskId || !taskType) {
@@ -1385,7 +1395,8 @@ export function createHttpServer(
           return;
         }
         const estimatedCost = typeof data.estimated_cost === "number" ? data.estimated_cost : undefined;
-        const result = getScoredRoute({ task_id: taskId, task_type: taskType, estimated_cost: estimatedCost }, registry, store);
+        const workClass = typeof data.work_class === "string" && data.work_class.trim() !== "" ? data.work_class.trim() : undefined;
+        const result = getScoredRoute({ task_id: taskId, task_type: taskType, estimated_cost: estimatedCost, work_class: workClass }, registry, store);
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(result));
       });
