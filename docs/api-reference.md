@@ -150,6 +150,23 @@ Every lane in `GET /lanes` (and `heimdall.lanes.list`) carries `models`: the mod
 
 "Turn Fable off" is one call: `POST /lanes/:id/models/claude-fable-5-2 { "enabled": false }`, the MCP tool `heimdall.lanes.models.setEnabled`, or the dashboard's per-model On / Off / Auto buttons. An optional `until` makes the toggle time-boxed (the #126 override pattern): after it passes the model returns to auto. Toggles persist in SQLite (`lane_model_toggles`) and survive a restart. This slice only reports: routing and spend do not read these fields yet, and a toggle change does not emit `lane.status_changed` (the dashboard re-polls after a click).
 
+### Status view and operator alerts (heimdall#142, slice 6)
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/status[?swaps=N]` | One read-only view: per account lane each limit (`kind`, `state`, `used_percent`, `resets_at`), its models (`enabled`, `available`, `level`), the max-usage `mode` with its expiry, `current_swap`, the last `N` swaps (default 10, 1-500; else 400 `invalid_swaps`) and `alerts` (`open`, `recent`). |
+
+No estimates: a percent or reset time the provider did not report reads `"unknown"`. A model's `level` is `"unbound"` when the policy has no `levels` section for it.
+
+When a model at an alert level (`HEIMDALL_ALERT_LEVELS`, default `premium`) becomes unavailable on an enabled lane, Heimdall raises one `premium_unavailable` operator alert for the limit that caused it. The same limit reported again never raises a second alert; it closes itself (`limit_reset`, `limit_cleared` or `limit_available`) and a later exhaustion is a new alert. Each alert carries `choices`:
+
+- `swap`: other usable models at the same level, on this account first (`same_account: true`) then on other lanes;
+- `wait`: `until` the limit's `resets_at`, or `"unknown"`;
+- `human_reset`: `POST /lanes/:id/limits/clear` with the limit `kind`, once a person has lifted it;
+- `credits`: only when the account reports a `credits` limit. Heimdall never turns credits on itself.
+
+Alerts are evaluated on every limit change and every `HEIMDALL_ALERT_EVAL_INTERVAL_MS`, stored in SQLite (`operator_alerts`), recorded as `operator_alert` telemetry, streamed on `GET /events` as `event: operator.alert`, shown as a banner on the dashboard and, when `HEIMDALL_ALERT_WEBHOOK_URL` is set, POSTed there as JSON. The webhook URL is never logged.
+
 ### Routing
 
 | Method | Path | Description |
@@ -265,6 +282,7 @@ npx heimdall agent init
 | `heimdall.lanes.maxUsage.get` | Max-usage status per lane, with its credits / spend-cap state (report only) (`{ lane_id? }`) |
 | `heimdall.lanes.maxUsage.set` | Turn max usage on until an expiry, or off (`{ lane_id, enabled, until?, reason? }`) |
 | `heimdall.lanes.models.setEnabled` | Turn one model on a lane on, off, or back to auto (`{ lane_id, model_id, enabled: true\|false\|null, until?, reason? }`) |
+| `heimdall.status` | The slice-6 status view (same shape as `GET /status`): limits, models with level, mode, last swaps and open alerts (`{ swaps? }`) |
 | `heimdall.routingStrategy.get` | Get the current strategy and available options |
 | `heimdall.routingStrategy.set` | Change the active routing strategy |
 | `heimdall.models.list` | List known models (optionally filter by provider) |
@@ -283,6 +301,9 @@ The `heimdall` CLI surfaces a subset of the HTTP API for shell use.
 # Agent setup — register heimdall as MCP server with detected harnesses
 heimdall agent init [--harness <claude|codex>]
 heimdall agent status
+
+# Status view: limits, models, mode, last swaps and alerts (JSON, or text with --format table)
+heimdall status [--format table]
 
 # Route selection
 heimdall route --task-type=<type> --task-id=<id> [--estimated-cost=<n>] [--json]
