@@ -609,6 +609,29 @@ export function listModelSwapEvents(limit?: number): ReturnType<ScoredStrategy["
   return scoredStrategyForRouteEndpoint.listModelSwapEvents(limit);
 }
 
+export interface ModelSwapsReport {
+  /** Lanes routing a model other than their preferred one right now. */
+  current: Array<{ lane_id: string; preferred_model: string; model: string; cause: JsonValue; swapped_at: string }>;
+  /** Recent swaps and swap-backs from the route ledger, newest first, each with its causing limit. */
+  events: ReturnType<ScoredStrategy["listModelSwapEvents"]>;
+}
+
+/** heimdall#142 slice 4 — what GET /model-swaps and MCP heimdall.route.modelSwaps report. */
+export function getModelSwapsReport(store: StateStore, limit: number = 50): ModelSwapsReport {
+  return {
+    current: store.getLaneModelSwaps().map((row) => {
+      let cause: JsonValue = null;
+      try {
+        cause = JSON.parse(row.cause) as JsonValue;
+      } catch {
+        cause = null;
+      }
+      return { lane_id: row.lane_id, preferred_model: row.preferred_model, model: row.swapped_to, cause, swapped_at: row.swapped_at };
+    }),
+    events: listModelSwapEvents(limit),
+  };
+}
+
 function recordSwapEvent(event: Parameters<ScoredStrategy["recordModelSwapEvent"]>[0]): void {
   scoredStrategyForRouteEndpoint.recordModelSwapEvent(event);
 }

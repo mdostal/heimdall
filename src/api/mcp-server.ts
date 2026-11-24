@@ -42,7 +42,7 @@ import {
   setRoutingStrategy,
   type AddLaneInput,
 } from "./http-server.js";
-import { getActiveRoutingStrategyName, getRoutingStrategyNames, getScoredRoute, reportRouteOutcome, parseTaskType } from "../core/route-selector.js";
+import { getActiveRoutingStrategyName, getModelSwapsReport, getRoutingStrategyNames, getScoredRoute, reportRouteOutcome, parseTaskType } from "../core/route-selector.js";
 import { refreshModelCatalog, getModelCatalog, setModelEnabled } from "../core/model-catalog.js";
 import { listLaneModels, setLaneModelEnabled } from "../core/lane-models.js";
 import { StateStore, resolveDefaultDbPath } from "../core/state-store.js";
@@ -61,6 +61,7 @@ export const MODELS_REFRESH_TOOL_NAME = "heimdall.models.refresh";
 export const MODELS_SET_ENABLED_TOOL_NAME = "heimdall.models.setEnabled";
 export const ROUTE_SELECTION_TOOL_NAME = "route_selection";
 export const ROUTE_REPORT_OUTCOME_TOOL_NAME = "heimdall.route.reportOutcome";
+export const ROUTE_MODEL_SWAPS_TOOL_NAME = "heimdall.route.modelSwaps";
 
 const DEFAULT_ENV_FILE_PATH = ".env";
 
@@ -234,6 +235,17 @@ export function listLaneToolsDescriptor() {
         required: ["decision_id"],
       },
     },
+    {
+      name: ROUTE_MODEL_SWAPS_TOOL_NAME,
+      description:
+        "Show model swaps: lanes currently routing another premium model because their preferred one hit a limit (or was turned off), and the recent swap / swap-back log with the limit that caused each.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          limit: { type: "number" as const, description: "How many recent events to return (1-500, default 50)." },
+        },
+      },
+    },
   ];
 }
 
@@ -321,6 +333,15 @@ export function callRouteSelectionTool(registry: LaneRegistry, store: StateStore
   return textResult(getScoredRoute({ task_id: taskId, task_type: taskType, estimated_cost: estimatedCost, work_class: workClass }, registry, store));
 }
 
+export function callRouteModelSwapsTool(store: StateStore, args: unknown) {
+  const input = (args ?? {}) as { limit?: unknown };
+  const limit = input.limit === undefined ? 50 : input.limit;
+  if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 500) {
+    return textResult({ ok: false, error: "invalid_limit", message: "limit must be an integer from 1 to 500" });
+  }
+  return textResult(getModelSwapsReport(store, limit));
+}
+
 export function callRouteReportOutcomeTool(args: unknown) {
   const input = (args ?? {}) as { decision_id?: unknown; outcome?: unknown; actual_cost?: unknown };
   const decisionId = typeof input.decision_id === "string" ? input.decision_id : "";
@@ -361,6 +382,7 @@ export function buildToolDispatch(
     [MODELS_SET_ENABLED_TOOL_NAME]: (args) => callModelsSetEnabledTool(store, args),
     [ROUTE_SELECTION_TOOL_NAME]: (args) => callRouteSelectionTool(registry, store, args),
     [ROUTE_REPORT_OUTCOME_TOOL_NAME]: (args) => callRouteReportOutcomeTool(args),
+    [ROUTE_MODEL_SWAPS_TOOL_NAME]: (args) => callRouteModelSwapsTool(store, args),
   };
 }
 
