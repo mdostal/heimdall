@@ -293,5 +293,5 @@ test("PANT-1322: the dashboard renders per-model On/Off/Auto toggles posting to 
   assert.match(html, /function laneModelsBlock\(lane\)/);
   assert.match(html, /data-model-toggle/);
   assert.match(html, /"\/lanes\/" \+ encodeURIComponent\(modelLaneId\) \+ "\/models\/" \+ encodeURIComponent\(modelId\)/);
-  assert.match(html, /laneModelsBlock\(lane\) \+ "<\/td>"/);
+  assert.match(html, /laneModelsBlock\(lane\) \+ (?:maxUsageBlock\(lane\) \+ )?"<\/td>"/);
 });
