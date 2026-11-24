@@ -170,12 +170,17 @@ export function getMaxUsagePolicy(): { policy: MaxUsagePolicy; levelsConfigured:
  * premium-unavailable alerts). Never throws: an invalid policy file reports
  * `invalid` with its message, so a status read still answers.
  */
-export function getLevelPolicyState(): { policy: LevelPolicy | null; state: "configured" | "not_configured" | "invalid"; error: string | null } {
+export function getLevelPolicyState(): {
+  policy: LevelPolicy | null;
+  state: "configured" | "not_configured" | "invalid";
+  error: string | null;
+  excluded: ReadonlySet<string>;
+} {
   try {
-    const levels = getRoutePolicyFilters().levels;
-    return { policy: levels, state: levels ? "configured" : "not_configured", error: null };
+    const { levels, excluded } = getRoutePolicyFilters();
+    return { policy: levels, state: levels ? "configured" : "not_configured", error: null, excluded };
   } catch (error) {
-    if (error instanceof PolicyValidationError) return { policy: null, state: "invalid", error: error.message };
+    if (error instanceof PolicyValidationError) return { policy: null, state: "invalid", error: error.message, excluded: new Set() };
     throw error;
   }
 }
