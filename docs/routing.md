@@ -154,6 +154,59 @@ work_classes:
   model (for example the placeholder ids in `.env.example`) can only serve a
   work class once something binds it.
 
+### Model swap within an account (heimdall#142, slice 4)
+
+A lane is an account, and one account often serves several premium models (a
+Claude subscription serves Fable and Opus). When the lane's preferred model is
+blocked, Heimdall routes the lane's next premium model instead of queueing.
+When the block lifts it routes the preferred model again, with no manual step.
+
+- **Preference and order come from config.** The preferred model is the lane's
+  `model` (after any catalog substitution). The swap candidates are the lane's
+  declared `models` (`HEIMDALL_LANE_<N>_MODELS` or `models` in
+  `HEIMDALL_LANES_JSON`), tried in the order you list them.
+- **When it swaps.** The preferred model's `weekly_model:<id>` limit is
+  exhausted, or the operator turned the model off for the lane. An account-wide
+  limit (`five_hour`, `weekly_all_models`) blocks every model on the lane, so it
+  never causes a swap.
+- **Where it swaps to.** The first declared model that is enabled, available,
+  at a level the work class allows, and no lower than the preferred model's
+  level. **A swap never goes below premium**, and never below the preferred
+  model's level for any work class. If no model qualifies, slice 3 applies: the
+  lane is withheld, and the queue's `resets_at` also counts the lane's
+  alternatives.
+- **Swap-back is automatic.** Every decision is recomputed. Once `resets_at`
+  passes, or `POST /lanes/:id/limits/clear` removes the limit, or the model is
+  turned back on, the next route names the preferred model again.
+- **Needs levels.** A swap only happens when the policy configures `levels`,
+  because Heimdall can't tell a premium model from a lower one without them.
+  To keep slice 3 behavior (queue, no swap), set:
+
+  ```yaml
+  model_swap:
+    enabled: false   # default true
+  ```
+
+- **The verdict names the model.** `POST /route`, MCP
+  `heimdall.route_selection` and `heimdall route` return `model` (dispatch
+  with this), `preferred_model` and `model_swap` (`null` unless swapped; it
+  holds the swapped-to `level` and the `cause`: `type` `limit` or
+  `model_disabled`, the blocking `limits` with `kind`, `resets_at` and the
+  provider's own `reason`, and `preferred_available_at`). `GET /available-route`
+  carries `model`, plus `preferred_model` and `model_swap` when swapped. The
+  agent's own model setting stays the preference. A dispatcher such as Auriga
+  passes `model` as a per-task override. The scored rationale and the ledger's
+  `request_summary.constraints.model_swaps` record the swap too.
+- **Every swap and swap-back is logged once,** with the limit that caused it:
+  in the route ledger (`model_swap_events`), as telemetry events `model_swap` /
+  `model_swap_back` (labels `provider`, `laneId`, `fromModel`, `toModel`,
+  `cause`, and `resolution` on swap-back: `limit_reset`, `limit_cleared`,
+  `limit_available`, `model_enabled` or `preference_changed`), and in
+  `/metrics` as `heimdall_model_swaps_total{event,provider,lane_id,cause}`.
+  `GET /model-swaps[?limit=N]` and the MCP tool `heimdall.route.modelSwaps`
+  list the lanes swapped right now (`current`) and the recent events
+  (`events`, newest first).
+
 ## Requesting a route
 
 ```bash
@@ -228,6 +281,7 @@ curl -X POST http://localhost:4870/route/dec-abc123/outcome \
 |---|---|
 | `route_selection` | Select the best available route for a task |
 | `heimdall.route.reportOutcome` | Report the result of a routed task |
+| `heimdall.route.modelSwaps` | Current model swaps per lane and the recent swap / swap-back log |
 | `heimdall.routingStrategy.get` | Get the current strategy and available options |
 | `heimdall.routingStrategy.set` | Change the active strategy |
 

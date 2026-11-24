@@ -89,3 +89,12 @@ experiments:
 #     levels: [premium]
 #   planning:
 #     levels: [premium]
+#
+# model_swap (heimdall#142 slice 4): with levels configured, a lane whose
+# preferred model hits its own limit (or is turned off) routes the next model
+# it declares in HEIMDALL_LANE_<N>_MODELS at the same level or higher, e.g.
+# Fable -> Opus on one Claude subscription, and swaps back by itself once the
+# limit resets or is cleared. Never below premium. On by default; to queue
+# instead:
+# model_swap:
+#   enabled: false

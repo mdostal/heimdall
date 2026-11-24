@@ -6,6 +6,7 @@
 import { getScoredRoute, reportRouteOutcome, parseTaskType } from "../core/route-selector.js";
 import type { LaneRegistry } from "../core/lane-registry.js";
 import type { StateStore } from "../core/state-store.js";
+import { describeCause } from "../core/model-swap.js";
 
 export function runRouteCommand(args: string[], registry: LaneRegistry, store: StateStore): void {
   let taskId = "";
@@ -55,6 +56,10 @@ export function runRouteCommand(args: string[], registry: LaneRegistry, store: S
     console.log(result.chosen_lane ?? "null");
   } else {
     console.log(`Chosen Lane: ${result.chosen_lane ?? "None"}`);
+    if (result.model) {
+      const swap = result.model_swap ? ` (swapped from ${result.preferred_model}: ${describeCause(result.model_swap.cause)})` : "";
+      console.log(`Model: ${result.model}${swap}`);
+    }
     if (result.verdict === "queue") console.log(`Verdict: queue until ${result.resets_at ?? "unknown"}`);
     console.log(`Rationale: ${result.rationale}`);
   }
