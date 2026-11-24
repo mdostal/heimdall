@@ -33,8 +33,26 @@ export interface LaneStatusChangedEvent {
 
 export type LaneStatusChangedListener = (event: LaneStatusChangedEvent) => void;
 
+/** heimdall#142 slice 6: a lane's recorded limits changed (a new observation or an operator clear). */
+export const LANE_LIMITS_CHANGED = "lane.limits_changed";
+
+export interface LaneLimitsChangedEvent {
+  lane_id: string;
+  kind: string;
+  cause: "observed" | "cleared";
+}
+
+export type LaneLimitsChangedListener = (event: LaneLimitsChangedEvent) => void;
+
+/** heimdall#142 slice 6: an operator alert was raised (once per limit, see premium-alerts.ts). */
+export const OPERATOR_ALERT = "operator.alert";
+
+export type OperatorAlertListener = (alert: unknown) => void;
+
 export class LaneEvents {
   private readonly listeners = new Set<LaneStatusChangedListener>();
+  private readonly limitListeners = new Set<LaneLimitsChangedListener>();
+  private readonly alertListeners = new Set<OperatorAlertListener>();
 
   /** Subscribe; returns the matching unsubscribe function. */
   onStatusChanged(listener: LaneStatusChangedListener): () => void {
@@ -50,6 +68,40 @@ export class LaneEvents {
         listener(event);
       } catch (err) {
         console.error(`[lane-events] ${LANE_STATUS_CHANGED} listener failed for lane ${event.lane_id}:`, err);
+      }
+    }
+  }
+
+  onLimitsChanged(listener: LaneLimitsChangedListener): () => void {
+    this.limitListeners.add(listener);
+    return () => {
+      this.limitListeners.delete(listener);
+    };
+  }
+
+  emitLimitsChanged(event: LaneLimitsChangedEvent): void {
+    for (const listener of [...this.limitListeners]) {
+      try {
+        listener(event);
+      } catch (err) {
+        console.error(`[lane-events] ${LANE_LIMITS_CHANGED} listener failed for lane ${event.lane_id}:`, err);
+      }
+    }
+  }
+
+  onOperatorAlert(listener: OperatorAlertListener): () => void {
+    this.alertListeners.add(listener);
+    return () => {
+      this.alertListeners.delete(listener);
+    };
+  }
+
+  emitOperatorAlert(alert: unknown): void {
+    for (const listener of [...this.alertListeners]) {
+      try {
+        listener(alert);
+      } catch (err) {
+        console.error(`[lane-events] ${OPERATOR_ALERT} listener failed:`, err);
       }
     }
   }

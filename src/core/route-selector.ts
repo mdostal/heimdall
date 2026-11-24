@@ -165,6 +165,21 @@ export function getMaxUsagePolicy(): { policy: MaxUsagePolicy; levelsConfigured:
   return { policy: filters.maxUsage, levelsConfigured: filters.levels !== null };
 }
 
+/**
+ * heimdall#142 slice 6 — the level bindings for reporting (status view,
+ * premium-unavailable alerts). Never throws: an invalid policy file reports
+ * `invalid` with its message, so a status read still answers.
+ */
+export function getLevelPolicyState(): { policy: LevelPolicy | null; state: "configured" | "not_configured" | "invalid"; error: string | null } {
+  try {
+    const levels = getRoutePolicyFilters().levels;
+    return { policy: levels, state: levels ? "configured" : "not_configured", error: null };
+  } catch (error) {
+    if (error instanceof PolicyValidationError) return { policy: null, state: "invalid", error: error.message };
+    throw error;
+  }
+}
+
 interface RoutingCandidates {
   candidates: Lane[];
   /** Lanes that passed every other filter but are in the policy's excluded_lanes. */
