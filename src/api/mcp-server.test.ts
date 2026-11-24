@@ -17,11 +17,16 @@ import {
   callModelsSetEnabledTool,
   callRouteSelectionTool,
   callRouteReportOutcomeTool,
+  callRouteModelSwapsTool,
+  callMaxUsageGetTool,
+  callMaxUsageSetTool,
   buildToolDispatch,
   dispatchToolCall,
   LANES_LIST_TOOL_NAME,
   LANES_OVERRIDE_TOOL_NAME,
   LANES_SET_RESET_AT_TOOL_NAME,
+  LANES_MODELS_LIST_TOOL_NAME,
+  LANES_MODELS_SET_ENABLED_TOOL_NAME,
   LANES_ADD_TOOL_NAME,
   ROUTING_STRATEGY_GET_TOOL_NAME,
   ROUTING_STRATEGY_SET_TOOL_NAME,
@@ -30,12 +35,20 @@ import {
   MODELS_SET_ENABLED_TOOL_NAME,
   ROUTE_SELECTION_TOOL_NAME,
   ROUTE_REPORT_OUTCOME_TOOL_NAME,
+  ROUTE_MODEL_SWAPS_TOOL_NAME,
+  LANES_MAX_USAGE_GET_TOOL_NAME,
+  LANES_MAX_USAGE_SET_TOOL_NAME,
 } from "./mcp-server.js";
 import { getLaneStatuses } from "./http-server.js";
 import { LaneRegistry } from "../core/lane-registry.js";
 import { StateStore } from "../core/state-store.js";
 import { EnvCredentialSource } from "../core/credential-source.js";
 import { LANE_STATUS_VALUES } from "../core/status-model.js";
+import { useRouteLedgerPath } from "../core/route-selector.js";
+
+// heimdall#96: the route ledger defaults to the per-machine DB file; keep this
+// file's routing decisions in memory instead.
+useRouteLedgerPath(":memory:");
 
 function registryWithOneConfiguredLane(): LaneRegistry {
   return new LaneRegistry(
@@ -48,9 +61,9 @@ function tmpEnvPath(): string {
   return path.join(os.tmpdir(), `heimdall-mcp-server-test-${Date.now()}-${Math.random().toString(36).slice(2)}.env`);
 }
 
-test("listLaneToolsDescriptor exposes 11 tools: list, override, setResetAt, add, routingStrategy.get/set, models.list/refresh/setEnabled, route_selection, route.reportOutcome (hdl-rof-02)", () => {
+test("listLaneToolsDescriptor exposes 16 tools: list, override, setResetAt, add, lanes.models.list/setEnabled, routingStrategy.get/set, models.list/refresh/setEnabled, route_selection, route.reportOutcome (hdl-rof-02), route.modelSwaps (heimdall#142), lanes.maxUsage.get/set (PANT-1325)", () => {
   const tools = listLaneToolsDescriptor();
-  assert.equal(tools.length, 11);
+  assert.equal(tools.length, 16);
   const names = tools.map((t) => t.name);
   assert.deepEqual(
     names.sort(),
@@ -59,6 +72,8 @@ test("listLaneToolsDescriptor exposes 11 tools: list, override, setResetAt, add,
       LANES_LIST_TOOL_NAME,
       LANES_OVERRIDE_TOOL_NAME,
       LANES_SET_RESET_AT_TOOL_NAME,
+      LANES_MODELS_LIST_TOOL_NAME,
+      LANES_MODELS_SET_ENABLED_TOOL_NAME,
       ROUTING_STRATEGY_GET_TOOL_NAME,
       ROUTING_STRATEGY_SET_TOOL_NAME,
       MODELS_LIST_TOOL_NAME,
@@ -66,6 +81,9 @@ test("listLaneToolsDescriptor exposes 11 tools: list, override, setResetAt, add,
       MODELS_SET_ENABLED_TOOL_NAME,
       ROUTE_SELECTION_TOOL_NAME,
       ROUTE_REPORT_OUTCOME_TOOL_NAME,
+      ROUTE_MODEL_SWAPS_TOOL_NAME,
+      LANES_MAX_USAGE_GET_TOOL_NAME,
+      LANES_MAX_USAGE_SET_TOOL_NAME,
     ].sort(),
   );
   assert.equal(LANES_LIST_TOOL_NAME, "heimdall.lanes.list");
@@ -190,6 +208,7 @@ test("hdl-mcp-02: callLaneOverrideTool returns setLaneOverride's result wrapped 
       lane_id: "claude@mathew.dostal",
       manual_override: "disabled",
       override_reason: null,
+      override_until: null,
     });
   } finally {
     store.close();
@@ -252,8 +271,9 @@ test("hdl-mcp-02: callLaneSetResetAtTool sets and clears a manual reset_at, matc
 test("hdl-mcp-02: callAddLaneTool adds a lane and reports restart_required — an agent must be able to tell the lane isn't live yet", () => {
   const registry = registryWithOneConfiguredLane();
   const envPath = tmpEnvPath();
+  const addStore = new StateStore(":memory:");
   try {
-    const result = callAddLaneTool(registry, envPath, {
+    const result = callAddLaneTool(registry, addStore, {
       lane_id: "gemini@ops",
       provider: "gemini",
       model: "gemini-3-pro",
@@ -262,10 +282,11 @@ test("hdl-mcp-02: callAddLaneTool adds a lane and reports restart_required — a
     const parsed = JSON.parse(result.content[0].text);
     assert.equal(parsed.ok, true);
     assert.equal(parsed.lane_id, "gemini@ops");
-    assert.equal(parsed.credential_ref, "GEMINI_OPS_TOKEN");
+    assert.equal(parsed.credential_ref, "HEIMDALL_API_LANE_67656d696e69406f7073");
     assert.equal(parsed.restart_required, true);
     assert.equal(parsed.restart_command, "npm run dev");
   } finally {
+    addStore.close();
     fs.rmSync(envPath, { force: true });
   }
 });
@@ -273,11 +294,12 @@ test("hdl-mcp-02: callAddLaneTool adds a lane and reports restart_required — a
 test("hdl-mcp-02: callAddLaneTool does NOT throw on a duplicate lane_id — returns structured {ok: false} content instead", () => {
   const registry = registryWithOneConfiguredLane();
   const envPath = tmpEnvPath();
+  const addStore = new StateStore(":memory:");
   try {
     assert.doesNotThrow(() =>
-      callAddLaneTool(registry, envPath, { lane_id: "claude@mathew.dostal", provider: "claude", model: "claude-sonnet", token: "x" }),
+      callAddLaneTool(registry, addStore, { lane_id: "claude@mathew.dostal", provider: "claude", model: "claude-sonnet", token: "x" }),
     );
-    const result = callAddLaneTool(registry, envPath, {
+    const result = callAddLaneTool(registry, addStore, {
       lane_id: "claude@mathew.dostal",
       provider: "claude",
       model: "claude-sonnet",
@@ -287,6 +309,7 @@ test("hdl-mcp-02: callAddLaneTool does NOT throw on a duplicate lane_id — retu
     assert.equal(parsed.ok, false);
     assert.equal(parsed.error, "lane_already_declared");
   } finally {
+    addStore.close();
     fs.rmSync(envPath, { force: true });
   }
 });
@@ -392,6 +415,55 @@ test("hdl-mcp-02: createMcpServer still constructs a connectable Server instance
     const server = createMcpServer(registry, store);
     assert.ok(server);
     assert.equal(typeof server.connect, "function");
+  } finally {
+    store.close();
+  }
+});
+
+test("heimdall#142 slice 4: heimdall.route.modelSwaps reports current swaps and rejects a bad limit", () => {
+  const store = new StateStore(":memory:");
+  try {
+    store.startLaneModelSwap("lane-a", "claude-fable-5-2", "claude-opus-5-5", JSON.stringify({ type: "limit" }), new Date());
+    const ok = JSON.parse(callRouteModelSwapsTool(store, {}).content[0].text);
+    assert.deepEqual(ok.current.map((row: { lane_id: string; model: string }) => [row.lane_id, row.model]), [["lane-a", "claude-opus-5-5"]]);
+    assert.ok(Array.isArray(ok.events));
+    const bad = JSON.parse(callRouteModelSwapsTool(store, { limit: 0 }).content[0].text);
+    assert.equal(bad.error, "invalid_limit");
+  } finally {
+    store.close();
+  }
+});
+
+test("PANT-1325: heimdall.lanes.maxUsage.set turns max usage on with an expiry and off; .get reports it with the paid switches", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  try {
+    const laneId = "claude@mathew.dostal";
+    const byName = Object.fromEntries(listLaneToolsDescriptor().map((t) => [t.name, t]));
+    assert.deepEqual(byName[LANES_MAX_USAGE_SET_TOOL_NAME].inputSchema.required, ["lane_id", "enabled"]);
+    const until = new Date(Date.now() + 3_600_000).toISOString();
+
+    const on = JSON.parse(callMaxUsageSetTool(registry, store, { lane_id: laneId, enabled: true, until, reason: "release" }).content[0].text);
+    assert.equal(on.ok, true);
+    assert.equal(on.max_usage.enabled, true);
+    assert.equal(on.max_usage.until, until);
+
+    const got = JSON.parse(callMaxUsageGetTool(registry, store, { lane_id: laneId }).content[0].text);
+    assert.equal(got.lanes[0].enabled, true);
+    assert.deepEqual(got.lanes[0].paid_switches.map((sw: { kind: string }) => sw.kind), ["credits", "spend_cap"]);
+
+    const paid = JSON.parse(callMaxUsageSetTool(registry, store, { lane_id: laneId, enabled: true, until, credits: true }).content[0].text);
+    assert.equal(paid.error, "not_a_heimdall_switch");
+    const noUntil = JSON.parse(callMaxUsageSetTool(registry, store, { lane_id: laneId, enabled: true }).content[0].text);
+    assert.equal(noUntil.error, "invalid_until");
+    const unknown = JSON.parse(callMaxUsageSetTool(registry, store, { lane_id: "ghost", enabled: false }).content[0].text);
+    assert.equal(unknown.error, "unknown_lane");
+
+    const off = JSON.parse(callMaxUsageSetTool(registry, store, { lane_id: laneId, enabled: false }).content[0].text);
+    assert.equal(off.max_usage.enabled, false);
+    const dispatch = buildToolDispatch(registry, store);
+    assert.doesNotThrow(() => dispatchToolCall(dispatch, LANES_MAX_USAGE_GET_TOOL_NAME, {}));
+    assert.doesNotThrow(() => dispatchToolCall(dispatch, LANES_MAX_USAGE_SET_TOOL_NAME, { lane_id: "ghost", enabled: true }));
   } finally {
     store.close();
   }

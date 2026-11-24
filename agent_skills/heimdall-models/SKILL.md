@@ -64,3 +64,24 @@ your choice — refresh never overwrites a prior manual override.**
 
 This overrides the recency-heuristic default and survives future `heimdall.models.refresh`
 calls. There's no bulk form — call it once per `(provider, model_id)` pair you want to change.
+
+## Per-lane model toggles — `heimdall.lanes.models.list` / `heimdall.lanes.models.setEnabled`
+
+`heimdall.models.setEnabled` is provider-wide. To turn a model off on **one lane** only
+(e.g. "turn Fable off on claude@ff.events until Friday"), use the lane tools:
+
+```json
+{ "tool": "heimdall.lanes.models.list", "arguments": { "lane_id": "claude@ff.events" } }
+```
+
+```json
+{
+  "tool": "heimdall.lanes.models.setEnabled",
+  "arguments": { "lane_id": "claude@ff.events", "model_id": "claude-fable-5-2", "enabled": false,
+                 "until": "2026-11-27T19:00:00Z", "reason": "save Fable for releases" }
+}
+```
+
+`enabled` is required: `true`, `false`, or `null` (back to auto). `until` is optional, a future
+ISO-8601 time with a timezone, after which the toggle returns to auto. Each model also reports
+`available` (false while its limit, or an account-wide limit, is exhausted) and `usable`.

@@ -124,3 +124,54 @@ test("load parses experiment arm names and split ratios", () => {
     },
   });
 });
+
+// heimdall#123: lane-level exclusion.
+test("load defaults excluded_lanes to [] when the field is absent", () => {
+  assert.deepEqual(PolicyLoader.load(writePolicy(VALID_POLICY)).excluded_lanes, []);
+});
+
+test("load parses excluded_lanes as a list of lane ids", () => {
+  const policy = PolicyLoader.load(writePolicy(`${VALID_POLICY}excluded_lanes:\n  - claude@mathew.dostal\n`));
+  assert.deepEqual(policy.excluded_lanes, ["claude@mathew.dostal"]);
+});
+
+test("load rejects an excluded_lanes that is not a list of non-empty lane ids", () => {
+  for (const [value, pattern] of [
+    ["claude@mathew.dostal", /Invalid field "excluded_lanes": expected list of lane ids/],
+    ["\n  - 42", /Invalid field "excluded_lanes.0": expected non-empty lane id/],
+    ['\n  - claude@ffevents\n  - ""', /Invalid field "excluded_lanes.1": expected non-empty lane id/],
+  ] as const) {
+    assert.throws(
+      () => PolicyLoader.load(writePolicy(`${VALID_POLICY}excluded_lanes: ${value}\n`)),
+      (error: unknown) => error instanceof PolicyValidationError && pattern.test(error.message),
+    );
+  }
+});
+
+// heimdall#142 slice 3: levels and work classes.
+test("load leaves levels null when neither levels nor work_classes is configured", () => {
+  assert.equal(PolicyLoader.load(writePolicy(VALID_POLICY)).levels, null);
+});
+
+test("load parses level bindings and work classes", () => {
+  const policy = PolicyLoader.load(
+    writePolicy(
+      `${VALID_POLICY}levels:\n  models:\n    claude-opus-5-5: premium\n  lanes:\n    legacy: standard\nwork_classes:\n  planning:\n    levels: [premium, standard]\n  build:\n    levels: [premium]\n`,
+    ),
+  );
+  assert.deepEqual(policy.levels, {
+    models: { "claude-opus-5-5": "premium" },
+    lanes: { legacy: "standard" },
+    work_classes: {
+      planning: { levels: ["premium", "standard"], code_work: false },
+      build: { levels: ["premium"], code_work: false },
+    },
+  });
+});
+
+test("load rejects a floor work class configured below premium as a PolicyValidationError", () => {
+  assert.throws(
+    () => PolicyLoader.load(writePolicy(`${VALID_POLICY}levels:\n  models: {}\nwork_classes:\n  review:\n    levels: [premium, economy]\n`)),
+    (error: unknown) => error instanceof PolicyValidationError && /may only run on premium/.test(error.message),
+  );
+});

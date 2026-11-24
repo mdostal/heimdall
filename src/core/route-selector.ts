@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import type { Lane, LaneRegistry } from "./lane-registry.js";
 import type { StateStore } from "./state-store.js";
 import { createRoutingStrategyRegistry, DEFAULT_ROUTING_STRATEGY_NAME } from "./routing-strategies/registry.js";
@@ -5,6 +6,18 @@ import { ScoredStrategy } from "./routing-strategies/scored-strategy.js";
 import { resolveEffectiveModel } from "./model-catalog.js";
 import { TASK_TYPES, type TaskType, parseTaskType } from "./task-type.js";
 import type { JsonValue } from "./routing/route-ledger.js";
+import type { RouteSelectionDetail } from "./routing-strategies/types.js";
+import { DEFAULT_MAX_USAGE_POLICY, DEFAULT_POLICY_PATH, PolicyLoader, PolicyValidationError, type MaxUsagePolicy } from "./routing/policy-loader.js";
+import {
+  allowedLevels,
+  LevelConfigError,
+  resolveLevel,
+  validateLaneTiers,
+  type Level,
+  type LevelPolicy,
+} from "./routing/levels.js";
+import { getModelUsability } from "./lane-models.js";
+import { describeCause, planLaneModel, recordSwapState, type ModelSwap } from "./model-swap.js";
 
 export { TASK_TYPES, type TaskType, parseTaskType };
 
@@ -29,6 +42,53 @@ export interface AvailableRoute {
   experiment_arm?: string;
   ranked_candidates?: ReadonlyArray<{ laneId: string; score: number }>;
   policy_version?: string;
+  /** heimdall#123 — lanes the policy's excluded_lanes withheld from this
+   * decision; present only when at least one was withheld. */
+  excluded_lanes?: readonly string[];
+  /** heimdall#142 slice 3 — present only when the policy configures levels:
+   * the routed model's level, the work class it was judged under, the
+   * levels that class allows, and any lane withheld by the level gate. */
+  level?: Level;
+  work_class?: string;
+  allowed_levels?: readonly Level[];
+  level_withheld?: readonly LevelWithheldLane[];
+  /** heimdall#142 slice 4 — present only on a swap: the lane's preferred
+   * model (what it returns to by itself), while `model` above is the one to
+   * dispatch with now. */
+  preferred_model?: string;
+  model_swap?: ModelSwap;
+  /** heimdall#142 slice 5 — present only when the routed lane is in max-usage mode. */
+  max_usage?: true;
+  /** heimdall#142 slice 5 — present only when work was steered to max-usage lanes ahead of others. */
+  max_usage_preferred?: true;
+}
+
+/** heimdall#142 slice 3 — why the level gate withheld a lane. */
+export type LevelWithheldReason =
+  /** The routed model's level isn't one the work class allows (e.g. standard for build). */
+  | "level_not_allowed"
+  /** No config binds the routed model to a level; unbound is never treated as premium. */
+  | "unbound"
+  /** The operator turned the routed model off (slice 2 toggle). */
+  | "model_disabled"
+  /** An exhausted limit blocks the routed model (slice 1 limits). */
+  | "model_unavailable";
+
+export interface LevelWithheldLane {
+  lane_id: string;
+  model: string;
+  level: Level | null;
+  reason: LevelWithheldReason;
+  /** When the blocking limits reset, for model_unavailable; else null. */
+  available_at: string | null;
+}
+
+/** heimdall#142 slice 3 — the level gate a decision ran under. */
+export interface LevelGate {
+  work_class: string;
+  allowed_levels: readonly Level[];
+  /** True when the premium floor for code work applies. */
+  floor: boolean;
 }
 
 // hdl-rs-02: one module-level registry, created once for the process
@@ -54,11 +114,93 @@ export function getActiveRoutingStrategyName(store: StateStore): string {
   return stored && routingStrategies[stored] ? stored : DEFAULT_ROUTING_STRATEGY_NAME;
 }
 
+// heimdall#123: the policy file is also where lane exclusions live, and they
+// apply under every strategy, not only "scored". Held here rather than read
+// through a ScoredStrategy so priority/round-robin routing needs no scored
+// instance. Cached after the first good load, like ScoredStrategy's own
+// policy; useRoutePolicyPath() resets it.
+let routePolicyPath: string | undefined;
+// heimdall#142 slice 3: the level bindings live in the same file and are
+// cached alongside the exclusions.
+interface RoutePolicyFilters {
+  excluded: ReadonlySet<string>;
+  levels: LevelPolicy | null;
+  /** heimdall#142 slice 4 — the policy's model_swap.enabled. */
+  swap: boolean;
+  /** heimdall#142 slice 5 — the policy's max_usage section (defaults when absent). */
+  maxUsage: MaxUsagePolicy;
+}
+let cachedFilters: RoutePolicyFilters | null = null;
+
+// No policy file means no exclusions were configured, so routing proceeds
+// exactly as before this existed (priority/round-robin never needed the
+// file). A file that exists but doesn't validate throws
+// PolicyValidationError: the operator's exclusions can't be read, so every
+// strategy fails closed (503) instead of possibly routing to an excluded
+// lane.
+// The same holds for levels: no file means no level routing, and an invalid
+// `levels` / `work_classes` section fails closed.
+function getRoutePolicyFilters(): RoutePolicyFilters {
+  if (cachedFilters) return cachedFilters;
+  const path = routePolicyPath ?? DEFAULT_POLICY_PATH;
+  if (!existsSync(path)) return { excluded: new Set(), levels: null, swap: false, maxUsage: { ...DEFAULT_MAX_USAGE_POLICY } };
+  const policy = PolicyLoader.load(path);
+  cachedFilters = {
+    excluded: new Set(policy.excluded_lanes),
+    levels: policy.levels,
+    swap: policy.model_swap.enabled,
+    maxUsage: policy.max_usage,
+  };
+  return cachedFilters;
+}
+
+/**
+ * heimdall#142 slice 5 — the max_usage policy and whether level routing is
+ * configured (max usage only acts with levels, like model swap, because
+ * without level bindings Heimdall can't tell a premium model from a lower
+ * one). Throws PolicyValidationError for an invalid policy file.
+ */
+export function getMaxUsagePolicy(): { policy: MaxUsagePolicy; levelsConfigured: boolean } {
+  const filters = getRoutePolicyFilters();
+  return { policy: filters.maxUsage, levelsConfigured: filters.levels !== null };
+}
+
+interface RoutingCandidates {
+  candidates: Lane[];
+  /** Lanes that passed every other filter but are in the policy's excluded_lanes. */
+  excludedLanes: string[];
+  /** null when the policy configures no levels. */
+  levelGate: LevelGate | null;
+  /** Lanes that passed every other filter but the level gate withheld. */
+  levelWithheld: LevelWithheldLane[];
+  /** Level of each candidate's routed model (only when levelGate is set). */
+  candidateLevels: Map<string, Level>;
+  /** Earliest time a lane at an allowed level could become routable, when any reported one. */
+  queueResetsAt: string | null;
+  /** heimdall#142 slice 4 — candidates routing a model other than their preferred one. */
+  swaps: Map<string, ModelSwap>;
+  /** heimdall#142 slice 5 — lanes with max usage on (whether or not they are candidates). */
+  maxUsageLanes: string[];
+  /** heimdall#142 slice 5 — true when candidates were narrowed to max-usage lanes (prefer_account). */
+  maxUsagePreferred: boolean;
+}
+
+export interface RouteOptions {
+  /** heimdall#142 slice 3 — the work class to judge levels under; defaults to the task type. */
+  workClass?: string;
+  now?: Date;
+}
+
 // hdl-rr-03: shared candidacy filtering — used by both getAvailableRoute
 // (active-strategy-driven) and getScoredRoute (always-scored, bypasses the
 // active-strategy setting). One definition of "which lanes are even
 // eligible to be routed to" for every routing surface.
-function getRoutingCandidates(registry: LaneRegistry, store: StateStore): Lane[] {
+function getRoutingCandidates(
+  registry: LaneRegistry,
+  store: StateStore,
+  taskType: TaskType,
+  options: RouteOptions = {},
+): RoutingCandidates {
   for (const lane of registry.list()) {
     store.upsertLane({
       lane_id: lane.lane_id,
@@ -68,34 +210,229 @@ function getRoutingCandidates(registry: LaneRegistry, store: StateStore): Lane[]
   }
 
   const statuses = new Map(store.getAllCurrentStatuses().map((status) => [status.lane_id, status]));
-  return registry
-    .list()
-    .filter((lane) => lane.credential !== null)
-    .filter((lane) => {
-      // hdl-rs-01: manual_override gates routing candidacy the SAME way it
-      // already gates Multica actuation (MulticaControlAdapter.reconcile) —
-      // "disabled" blocks a lane from being routed to no matter its sensed
-      // status; "enabled" forces it in even if sensed status isn't "up";
-      // unset (null) is byte-identical to pre-hdl-rs-01 behavior.
-      const override = store.getManualOverride(lane.lane_id);
-      if (override === "disabled") return false;
-      if (override === "enabled") return true;
-      return statuses.get(lane.lane_id)?.status === "up";
-    });
+  // hdl-rs-01: manual_override gates routing candidacy the SAME way it
+  // already gates Multica actuation (MulticaControlAdapter.reconcile) —
+  // "disabled" blocks a lane from being routed to no matter its sensed
+  // status; "enabled" forces it in even if sensed status isn't "up";
+  // unset (null) is byte-identical to pre-hdl-rs-01 behavior.
+  const statusAllows = (lane: Lane): boolean => {
+    const override = store.getManualOverride(lane.lane_id);
+    if (override === "disabled") return false;
+    if (override === "enabled") return true;
+    return statuses.get(lane.lane_id)?.status === "up";
+  };
+  const credentialed = registry.list().filter((lane) => lane.credential !== null);
+  const eligible = credentialed.filter(statusAllows);
+
+  // heimdall#123: applied after status, so it wins over a manual "enabled"
+  // override too — an excluded lane is never a candidate, and a decision
+  // with no other candidate is "no route", never a fallback to the excluded
+  // lane.
+  const { excluded, levels, swap: swapEnabled, maxUsage: maxUsagePolicy } = getRoutePolicyFilters();
+  const notExcluded = eligible.filter((lane) => !excluded.has(lane.lane_id));
+  const excludedLanes = eligible.filter((lane) => excluded.has(lane.lane_id)).map((lane) => lane.lane_id);
+  if (!levels) {
+    // heimdall#142 slice 5: max usage needs levels, like swap; without them
+    // routing is exactly as before.
+    return {
+      candidates: notExcluded, excludedLanes, levelGate: null, levelWithheld: [], candidateLevels: new Map(),
+      queueResetsAt: null, swaps: new Map(), maxUsageLanes: [], maxUsagePreferred: false,
+    };
+  }
+
+  // heimdall#142 slice 3: the level gate, applied last, so like
+  // excluded_lanes it wins over a manual "enabled" override. A lane is a
+  // candidate only when the model it would route (after any catalog
+  // substitution) is bound to a level the work class allows, is switched on
+  // and isn't blocked by an exhausted limit. A decision left with no
+  // candidate is a queue, never a step down to a lower level.
+  try {
+    validateLaneTiers(registry.list());
+  } catch (error) {
+    if (error instanceof LevelConfigError) throw new PolicyValidationError(error.message);
+    throw error;
+  }
+  const now = options.now ?? new Date();
+  // heimdall#142 slice 5: lanes the operator put in max-usage mode (unexpired).
+  const maxUsageLanes = new Set(store.getLaneMaxUsage(undefined, now).map((row) => row.lane_id));
+  const gate = allowedLevels(levels, taskType, options.workClass);
+  const levelGate: LevelGate = { work_class: gate.work_class, allowed_levels: gate.levels, floor: gate.floor };
+  const candidates: Lane[] = [];
+  const levelWithheld: LevelWithheldLane[] = [];
+  const candidateLevels = new Map<string, Level>();
+  const swaps = new Map<string, ModelSwap>();
+  let queueResetsAt: string | null = null;
+  const noteReset = (at: string | null): void => {
+    if (at !== null && Date.parse(at) > now.getTime() && (queueResetsAt === null || Date.parse(at) < Date.parse(queueResetsAt))) {
+      queueResetsAt = at;
+    }
+  };
+
+  for (const lane of credentialed) {
+    if (excluded.has(lane.lane_id) || store.getManualOverride(lane.lane_id) === "disabled") continue;
+    const routable = statusAllows(lane);
+    const { model } = resolveEffectiveModel(store, lane.provider, lane.model);
+    const { level } = resolveLevel(levels, lane, model);
+    const withhold = (reason: LevelWithheldReason, availableAt: string | null = null): void => {
+      if (routable) levelWithheld.push({ lane_id: lane.lane_id, model, level, reason, available_at: availableAt });
+    };
+    if (level === null) {
+      withhold("unbound");
+      continue;
+    }
+    if (!gate.levels.includes(level)) {
+      withhold("level_not_allowed");
+      continue;
+    }
+    const usability = getModelUsability(lane, model, store, now);
+    let swap: ModelSwap | null = null;
+    if (!usability.enabled || !usability.available) {
+      // heimdall#142 slice 4: the same account may serve another model at
+      // this level. Swap to it rather than withholding the lane; never to a
+      // lower level (see model-swap.ts).
+      // heimdall#142 slice 5: a max-usage lane works through its premium
+      // models even when the policy turns swap off.
+      const plan = swapEnabled || maxUsageLanes.has(lane.lane_id) ? planLaneModel(lane, model, level, usability, gate.levels, levels, store, now) : null;
+      swap = plan?.swap ?? null;
+      if (!swap) {
+        for (const at of plan?.alternatives_available_at ?? []) noteReset(at);
+        if (!usability.enabled) {
+          withhold("model_disabled");
+        } else {
+          noteReset(usability.available_at);
+          withhold("model_unavailable", usability.available_at);
+        }
+        continue;
+      }
+    }
+    if (!routable) {
+      noteReset(store.getManualResetAt(lane.lane_id) ?? statuses.get(lane.lane_id)?.reset_at ?? null);
+      continue;
+    }
+    // A transition (swap, or swap-back to the preferred model) is logged
+    // once, whichever routing surface observes it first.
+    recordSwapState(store, recordSwapEvent, lane, model, swap, swap === null, now);
+    candidates.push(lane);
+    candidateLevels.set(lane.lane_id, swap ? swap.level : level);
+    if (swap) swaps.set(lane.lane_id, swap);
+  }
+
+  // heimdall#142 slice 5: with prefer_account, work goes to the max-usage
+  // accounts first while any of them has a usable model at an allowed level.
+  // When none does, the other lanes route as if max usage were off.
+  const preferred = maxUsagePolicy.prefer_account ? candidates.filter((lane) => maxUsageLanes.has(lane.lane_id)) : [];
+  const maxUsagePreferred = preferred.length > 0 && preferred.length < candidates.length;
+  return {
+    candidates: maxUsagePreferred ? preferred : candidates,
+    excludedLanes,
+    levelGate,
+    levelWithheld,
+    candidateLevels,
+    queueResetsAt,
+    swaps,
+    maxUsageLanes: [...maxUsageLanes].filter((laneId) => registry.get(laneId) !== undefined).sort(),
+    maxUsagePreferred,
+  };
 }
 
+function levelContext(routing: RoutingCandidates) {
+  return routing.levelGate
+    ? {
+        levelGate: { ...routing.levelGate, resets_at: routing.queueResetsAt },
+        levelWithheld: routing.levelWithheld.map(({ lane_id, reason }) => ({ lane_id, reason })),
+        ...(routing.swaps.size > 0
+          ? {
+              modelSwaps: [...routing.swaps.values()].map((swap) => ({
+                lane_id: swap.lane_id,
+                preferred_model: swap.preferred_model,
+                model: swap.model,
+                cause: describeCause(swap.cause),
+                preferred_available_at: swap.cause.preferred_available_at,
+              })),
+            }
+          : {}),
+      }
+    : {};
+}
+
+/**
+ * heimdall#142 slice 3 — what GET /available-route answers. `queue` means the
+ * level gate left no lane: every model the work class may use is unbound,
+ * off, exhausted or on a lane that's down. It carries the earliest reset
+ * Heimdall knows of (null when none was reported). It is never answered by
+ * stepping down a level. `no_route` is everything else that picks no lane
+ * (no healthy lane at all, the "off" strategy, the scored headroom floor).
+ */
+export type RouteVerdict =
+  | { verdict: "route"; route: AvailableRoute }
+  | {
+      verdict: "queue";
+      task_type: TaskType;
+      work_class: string;
+      allowed_levels: readonly Level[];
+      resets_at: string | null;
+      level_withheld: readonly LevelWithheldLane[];
+      excluded_lanes: readonly string[];
+      /** heimdall#142 slice 5 — lanes in max-usage mode; present only when any is on. */
+      max_usage_lanes?: readonly string[];
+    }
+  | { verdict: "no_route"; task_type: TaskType };
+
+function isQueue(routing: RoutingCandidates): boolean {
+  return routing.levelGate !== null && routing.candidates.length === 0;
+}
+
+export function getRouteVerdict(
+  taskType: TaskType,
+  registry: LaneRegistry,
+  store: StateStore,
+  options: RouteOptions = {},
+): RouteVerdict {
+  const routing = getRoutingCandidates(registry, store, taskType, options);
+  const { candidates, excludedLanes, levelGate, levelWithheld } = routing;
+  if (isQueue(routing)) {
+    // No strategy runs: there is nothing at an allowed level to pick from,
+    // and "off" declining to pick must not read as a queue.
+    return {
+      verdict: "queue",
+      task_type: taskType,
+      work_class: levelGate!.work_class,
+      allowed_levels: levelGate!.allowed_levels,
+      resets_at: routing.queueResetsAt,
+      level_withheld: levelWithheld,
+      excluded_lanes: excludedLanes,
+      ...(routing.maxUsageLanes.length > 0 ? { max_usage_lanes: routing.maxUsageLanes } : {}),
+    };
+  }
+
+  const strategy = routingStrategies[getActiveRoutingStrategyName(store)];
+  const { lane, detail } = strategy.selectRoute({ taskType, candidates, store, excludedLanes, ...levelContext(routing) });
+  if (!lane) return { verdict: "no_route", task_type: taskType };
+  return { verdict: "route", route: toAvailableRoute(lane, detail, taskType, store, routing) };
+}
+
+/** The route GET /available-route returns, or null for a queue or no route (see getRouteVerdict for which). */
 export function getAvailableRoute(
   taskType: TaskType,
   registry: LaneRegistry,
   store: StateStore,
+  options: RouteOptions = {},
 ): AvailableRoute | null {
-  const candidates = getRoutingCandidates(registry, store);
+  const verdict = getRouteVerdict(taskType, registry, store, options);
+  return verdict.verdict === "route" ? verdict.route : null;
+}
 
-  const strategy = routingStrategies[getActiveRoutingStrategyName(store)];
-  const { lane, detail } = strategy.selectRoute({ taskType, candidates, store });
-  if (!lane) return null;
-
-  const { model, substituted } = resolveEffectiveModel(store, lane.provider, lane.model);
+function toAvailableRoute(
+  lane: Lane,
+  detail: RouteSelectionDetail | undefined,
+  taskType: TaskType,
+  store: StateStore,
+  routing: RoutingCandidates,
+): AvailableRoute {
+  const { excludedLanes, levelGate, levelWithheld, candidateLevels } = routing;
+  const { model: preferredModel, substituted } = resolveEffectiveModel(store, lane.provider, lane.model);
+  const swap = routing.swaps.get(lane.lane_id) ?? null;
+  const model = swap ? swap.model : preferredModel;
   if (substituted) {
     // hdl-ot-02: Heimdall's own local record — this fact previously existed
     // only as the response's model_substituted:true field for whoever
@@ -104,7 +441,7 @@ export function getAvailableRoute(
       provider: lane.provider,
       laneId: lane.lane_id,
       declaredModel: lane.model,
-      effectiveModel: model,
+      effectiveModel: preferredModel,
     });
   }
 
@@ -121,6 +458,18 @@ export function getAvailableRoute(
     ...(detail?.experimentArm !== undefined ? { experiment_arm: detail.experimentArm } : {}),
     ...(detail?.rankedCandidates !== undefined ? { ranked_candidates: detail.rankedCandidates } : {}),
     ...(detail?.policyVersion !== undefined ? { policy_version: detail.policyVersion } : {}),
+    ...(excludedLanes.length > 0 ? { excluded_lanes: excludedLanes } : {}),
+    ...(levelGate
+      ? {
+          level: candidateLevels.get(lane.lane_id)!,
+          work_class: levelGate.work_class,
+          allowed_levels: levelGate.allowed_levels,
+          ...(levelWithheld.length > 0 ? { level_withheld: levelWithheld } : {}),
+        }
+      : {}),
+    ...(swap ? { preferred_model: swap.preferred_model, model_swap: swap } : {}),
+    ...(routing.maxUsageLanes.includes(lane.lane_id) ? { max_usage: true as const } : {}),
+    ...(routing.maxUsagePreferred ? { max_usage_preferred: true as const } : {}),
   };
 }
 
@@ -132,6 +481,8 @@ export interface RouteRequest {
   task_id: string;
   task_type: TaskType;
   estimated_cost?: number;
+  /** heimdall#142 slice 3 — the work class to judge levels under; defaults to task_type. */
+  work_class?: string;
 }
 
 export interface RouteResult {
@@ -141,6 +492,30 @@ export interface RouteResult {
   rationale: string;
   experiment_arm: string | null;
   policy_version: string | null;
+  /** heimdall#123 — lanes withheld by the policy's excluded_lanes ([] when none). */
+  excluded_lanes: readonly string[];
+  /** heimdall#142 slice 3 — "queue" when the level gate left no lane (see RouteVerdict). */
+  verdict: "route" | "queue" | "no_route";
+  /** For a queue: the earliest reset Heimdall knows of for an allowed-level model; else null. */
+  resets_at: string | null;
+  /** The work class and levels the decision was judged under; null when the policy configures no levels. */
+  work_class: string | null;
+  allowed_levels: readonly Level[] | null;
+  /** The chosen lane's routed-model level; null with no lane or no level config. */
+  chosen_level: Level | null;
+  /** Lanes withheld by the level gate ([] when none). */
+  level_withheld: readonly LevelWithheldLane[];
+  /** heimdall#142 slice 4 — the model to dispatch with on chosen_lane (a
+   * per-task override; the agent row stays the preference). null with no lane. */
+  model: string | null;
+  /** The chosen lane's preferred model; equals `model` unless swapped. null with no lane. */
+  preferred_model: string | null;
+  /** Non-null when `model` is a swap away from `preferred_model`: the limit or toggle that caused it. */
+  model_swap: ModelSwap | null;
+  /** heimdall#142 slice 5 — lanes in max-usage mode right now ([] when none). */
+  max_usage_lanes: readonly string[];
+  /** heimdall#142 slice 5 — true when candidates were narrowed to the max-usage lanes. */
+  max_usage_preferred: boolean;
 }
 
 // hdl-rr-03: one module-level ScoredStrategy instance — mirrors
@@ -153,6 +528,47 @@ const scoredStrategyForRouteEndpoint = new ScoredStrategy();
 /** hdl-ot-03: reuses the exact same module-level ledger connection getScoredRoute() writes to — GET /metrics reads through this, no second connection opened. */
 export function getRoutingDecisionCounts(): ReturnType<ScoredStrategy["getDecisionCounts"]> {
   return scoredStrategyForRouteEndpoint.getDecisionCounts();
+}
+
+// heimdall#96: the routing strategies that write decisions to a ledger.
+// Both go through one path so every routing surface in a process shares the
+// file composeService() binds.
+const ledgerBackedStrategies: ScoredStrategy[] = [
+  scoredStrategyForRouteEndpoint,
+  ...Object.values(routingStrategies).filter((strategy): strategy is ScoredStrategy => strategy instanceof ScoredStrategy),
+];
+
+/** Points every ledger-backed strategy at `path` — composeService() passes its StateStore's DB path. */
+export function useRouteLedgerPath(path: string): void {
+  for (const strategy of ledgerBackedStrategies) strategy.useLedgerPath(path);
+}
+
+/** Points every scored strategy, and the excluded_lanes filter, at the routing policy in `path` (undefined = the default path). Tests use it to simulate a missing policy (heimdall#95). */
+export function useRoutePolicyPath(path: string | undefined): void {
+  routePolicyPath = path;
+  cachedFilters = null;
+  for (const strategy of ledgerBackedStrategies) strategy.usePolicyPath(path);
+}
+
+export function closeRouteLedgers(): void {
+  for (const strategy of ledgerBackedStrategies) strategy.closeLedger();
+}
+
+export interface RouteOutcomeEvent {
+  decisionId: string;
+  laneId: string;
+  outcome: string | null;
+  metadata: Record<string, JsonValue> | null;
+}
+
+export type RouteOutcomeListener = (event: RouteOutcomeEvent) => void;
+
+const routeOutcomeListeners = new Set<RouteOutcomeListener>();
+
+/** heimdall#96: composeService() listens here to feed outcomes to lane status. Returns an unsubscribe function. */
+export function onRouteOutcome(listener: RouteOutcomeListener): () => void {
+  routeOutcomeListeners.add(listener);
+  return () => routeOutcomeListeners.delete(listener);
 }
 
 export interface RouteOutcomeInput {
@@ -175,17 +591,48 @@ export function reportRouteOutcome(input: RouteOutcomeInput): ReportRouteOutcome
     actualCost: input.actualCost ?? null,
     metadata: input.metadata ?? null,
   });
-  return recorded ? { ok: true } : { ok: false, error: "unknown_decision" };
+  if (!recorded) return { ok: false, error: "unknown_decision" };
+
+  const laneId = routeOutcomeListeners.size > 0 ? scoredStrategyForRouteEndpoint.getChosenLane(input.decisionId) : null;
+  if (laneId) {
+    const event: RouteOutcomeEvent = {
+      decisionId: input.decisionId,
+      laneId,
+      outcome: input.outcome ?? null,
+      metadata: input.metadata ?? null,
+    };
+    for (const listener of routeOutcomeListeners) {
+      try {
+        listener(event);
+      } catch (error) {
+        // The outcome is already in the ledger; a listener failure must not
+        // turn a recorded outcome into an error response.
+        console.error(`reportRouteOutcome: outcome listener failed for decision ${input.decisionId}`, error);
+      }
+    }
+  }
+  return { ok: true };
 }
 
-export function getScoredRoute(request: RouteRequest, registry: LaneRegistry, store: StateStore): RouteResult {
-  const candidates = getRoutingCandidates(registry, store);
+export function getScoredRoute(
+  request: RouteRequest,
+  registry: LaneRegistry,
+  store: StateStore,
+  options: Omit<RouteOptions, "workClass"> = {},
+): RouteResult {
+  const routing = getRoutingCandidates(registry, store, request.task_type, { ...options, workClass: request.work_class });
+  const { candidates, excludedLanes, levelGate, levelWithheld, candidateLevels } = routing;
+  // The scored strategy still runs on a queue, so the decision (and why no
+  // lane was chosen) is in the ledger like every other no-route decision.
   const { lane, detail } = scoredStrategyForRouteEndpoint.selectRoute({
     taskType: request.task_type,
     candidates,
     store,
     taskId: request.task_id,
+    excludedLanes,
+    ...levelContext(routing),
   });
+  const queued = isQueue(routing);
 
   return {
     decision_id: detail?.decisionId ?? null,
@@ -194,5 +641,58 @@ export function getScoredRoute(request: RouteRequest, registry: LaneRegistry, st
     rationale: detail?.rationale ?? "",
     experiment_arm: detail?.experimentArm ?? null,
     policy_version: detail?.policyVersion ?? null,
+    excluded_lanes: excludedLanes,
+    verdict: lane ? "route" : queued ? "queue" : "no_route",
+    resets_at: queued ? routing.queueResetsAt : null,
+    work_class: levelGate?.work_class ?? null,
+    allowed_levels: levelGate?.allowed_levels ?? null,
+    chosen_level: lane ? (candidateLevels.get(lane.lane_id) ?? null) : null,
+    level_withheld: levelWithheld,
+    ...routedModel(lane, routing, store),
+    max_usage_lanes: routing.maxUsageLanes,
+    max_usage_preferred: routing.maxUsagePreferred,
   };
+}
+
+function routedModel(
+  lane: Lane | null,
+  routing: RoutingCandidates,
+  store: StateStore,
+): Pick<RouteResult, "model" | "preferred_model" | "model_swap"> {
+  if (!lane) return { model: null, preferred_model: null, model_swap: null };
+  const preferred = resolveEffectiveModel(store, lane.provider, lane.model).model;
+  const swap = routing.swaps.get(lane.lane_id) ?? null;
+  return { model: swap ? swap.model : preferred, preferred_model: preferred, model_swap: swap };
+}
+
+/** heimdall#142 slice 4 — the most recent swaps and swap-backs from the route ledger, newest first. */
+export function listModelSwapEvents(limit?: number): ReturnType<ScoredStrategy["listModelSwapEvents"]> {
+  return scoredStrategyForRouteEndpoint.listModelSwapEvents(limit);
+}
+
+export interface ModelSwapsReport {
+  /** Lanes routing a model other than their preferred one right now. */
+  current: Array<{ lane_id: string; preferred_model: string; model: string; cause: JsonValue; swapped_at: string }>;
+  /** Recent swaps and swap-backs from the route ledger, newest first, each with its causing limit. */
+  events: ReturnType<ScoredStrategy["listModelSwapEvents"]>;
+}
+
+/** heimdall#142 slice 4 — what GET /model-swaps and MCP heimdall.route.modelSwaps report. */
+export function getModelSwapsReport(store: StateStore, limit: number = 50): ModelSwapsReport {
+  return {
+    current: store.getLaneModelSwaps().map((row) => {
+      let cause: JsonValue = null;
+      try {
+        cause = JSON.parse(row.cause) as JsonValue;
+      } catch {
+        cause = null;
+      }
+      return { lane_id: row.lane_id, preferred_model: row.preferred_model, model: row.swapped_to, cause, swapped_at: row.swapped_at };
+    }),
+    events: listModelSwapEvents(limit),
+  };
+}
+
+function recordSwapEvent(event: Parameters<ScoredStrategy["recordModelSwapEvent"]>[0]): void {
+  scoredStrategyForRouteEndpoint.recordModelSwapEvent(event);
 }

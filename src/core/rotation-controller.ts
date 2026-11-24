@@ -1,6 +1,7 @@
 import type { Lane, LaneRegistry } from "./lane-registry.js";
 import type { StateStore } from "./state-store.js";
 import { parseClaudeCapSignal, type ClaudeCapSignal } from "./error-parser.js";
+import { isModelScopedCap, limitFromClaudeCapSignal } from "./limits.js";
 
 export interface ActiveClaudeAccount {
   lane_id: string;
@@ -75,6 +76,18 @@ export class RotationController {
   }
 
   markCapped(laneId: string, signal: ClaudeCapSignal): void {
+    // heimdall#142: record which limit was hit. A model-scoped limit leaves
+    // the account usable for its other models, so the lane is not capped.
+    const limit = limitFromClaudeCapSignal(signal);
+    if (limit) this.store.recordLimit(laneId, limit, "passive", this.now().toISOString());
+    if (isModelScopedCap(signal)) {
+      this.store.recordTelemetryEvent("rotation_event", {
+        laneId,
+        provider: this.registry.get(laneId)?.provider ?? "unknown",
+        kind: "model_limit",
+      }, this.now().toISOString());
+      return;
+    }
     this.store.recordStatus({
       lane_id: laneId,
       status: "out_of_credit",

@@ -24,3 +24,18 @@ test("passing an env override never mutates Heimdall's own process.env", async (
   await runner.run("node", ["-e", "process.exit(0)"], { env: { HDL_TEST_VAR_ISOLATION: "leaked" } });
   assert.equal(process.env.HDL_TEST_VAR_ISOLATION, undefined);
 });
+
+test("run() kills a subprocess that exceeds timeoutMs and rejects, instead of hanging forever", async () => {
+  const runner = new NodeCommandRunner();
+  await assert.rejects(runner.run("node", ["-e", "setTimeout(() => {}, 60_000)"], { timeoutMs: 200 }));
+});
+
+test("PANT-694: run() closes the subprocess's stdin, so a CLI that reads stdin to EOF doesn't hang", async () => {
+  const runner = new NodeCommandRunner();
+  const result = await runner.run(
+    "node",
+    ["-e", "process.stdin.resume(); process.stdin.on('end', () => process.stdout.write('eof'))"],
+    { timeoutMs: 5_000 },
+  );
+  assert.equal(result.stdout, "eof");
+});

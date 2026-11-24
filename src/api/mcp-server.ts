@@ -42,8 +42,10 @@ import {
   setRoutingStrategy,
   type AddLaneInput,
 } from "./http-server.js";
-import { getActiveRoutingStrategyName, getRoutingStrategyNames, getScoredRoute, reportRouteOutcome, parseTaskType } from "../core/route-selector.js";
+import { getActiveRoutingStrategyName, getModelSwapsReport, getRoutingStrategyNames, getScoredRoute, reportRouteOutcome, parseTaskType } from "../core/route-selector.js";
 import { refreshModelCatalog, getModelCatalog, setModelEnabled } from "../core/model-catalog.js";
+import { listLaneModels, setLaneModelEnabled } from "../core/lane-models.js";
+import { getMaxUsageReport, setMaxUsage } from "../core/max-usage.js";
 import { StateStore, resolveDefaultDbPath } from "../core/state-store.js";
 import type { LaneRegistry } from "../core/lane-registry.js";
 
@@ -51,6 +53,8 @@ export const LANES_LIST_TOOL_NAME = "heimdall.lanes.list";
 export const LANES_OVERRIDE_TOOL_NAME = "heimdall.lanes.override";
 export const LANES_SET_RESET_AT_TOOL_NAME = "heimdall.lanes.setResetAt";
 export const LANES_ADD_TOOL_NAME = "heimdall.lanes.add";
+export const LANES_MODELS_LIST_TOOL_NAME = "heimdall.lanes.models.list";
+export const LANES_MODELS_SET_ENABLED_TOOL_NAME = "heimdall.lanes.models.setEnabled";
 export const ROUTING_STRATEGY_GET_TOOL_NAME = "heimdall.routingStrategy.get";
 export const ROUTING_STRATEGY_SET_TOOL_NAME = "heimdall.routingStrategy.set";
 export const MODELS_LIST_TOOL_NAME = "heimdall.models.list";
@@ -58,6 +62,9 @@ export const MODELS_REFRESH_TOOL_NAME = "heimdall.models.refresh";
 export const MODELS_SET_ENABLED_TOOL_NAME = "heimdall.models.setEnabled";
 export const ROUTE_SELECTION_TOOL_NAME = "route_selection";
 export const ROUTE_REPORT_OUTCOME_TOOL_NAME = "heimdall.route.reportOutcome";
+export const ROUTE_MODEL_SWAPS_TOOL_NAME = "heimdall.route.modelSwaps";
+export const LANES_MAX_USAGE_GET_TOOL_NAME = "heimdall.lanes.maxUsage.get";
+export const LANES_MAX_USAGE_SET_TOOL_NAME = "heimdall.lanes.maxUsage.set";
 
 const DEFAULT_ENV_FILE_PATH = ".env";
 
@@ -82,6 +89,7 @@ export function listLaneToolsDescriptor() {
             enum: ["enabled", "disabled", "auto"],
             description: "'auto' clears the override, returning to sensed-status-driven routing.",
           },
+          until: { type: "string" as const, description: "Optional future ISO-8601 expiry with timezone; reverts to Auto." },
           reason: {
             type: "string" as const,
             description: "Optional free-text note for why this lane is overridden. Ignored (never persisted) when state is 'auto'.",
@@ -110,16 +118,42 @@ export function listLaneToolsDescriptor() {
     {
       name: LANES_ADD_TOOL_NAME,
       description:
-        "Declare a new lane, writing it to the local .env file. Does NOT restart the process — the new lane is inert until Heimdall is restarted (the response names the exact restart command).",
+        "Declare a new lane, persisting it in the state DB. Does NOT restart the process — the new lane is inert until Heimdall is restarted (the response names the exact restart command).",
       inputSchema: {
         type: "object" as const,
         properties: {
           lane_id: { type: "string" as const },
           provider: { type: "string" as const },
           model: { type: "string" as const },
-          token: { type: "string" as const, description: "The lane's credential — stored locally in .env, never returned by any Heimdall API." },
+          token: { type: "string" as const, description: "The lane's credential — stored locally in the state DB, never returned by any Heimdall API." },
         },
         required: ["lane_id", "provider", "model", "token"],
+      },
+    },
+    {
+      name: LANES_MODELS_LIST_TOOL_NAME,
+      description:
+        "List the models one lane serves, each with enabled (operator toggle), available (false while a limit that blocks it is exhausted, with blocked_by and available_at), usable, and the configured tier.",
+      inputSchema: {
+        type: "object" as const,
+        properties: { lane_id: { type: "string" as const } },
+        required: ["lane_id"],
+      },
+    },
+    {
+      name: LANES_MODELS_SET_ENABLED_TOOL_NAME,
+      description:
+        "Turn one model inside a lane off (enabled: false) or back on (enabled: true), or return it to auto (enabled: null). Optional until: the toggle expires then and the model returns to auto. Persists across restarts. Reports only; it does not dispatch work.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          lane_id: { type: "string" as const },
+          model_id: { type: "string" as const, description: "A model id the lane serves, e.g. claude-fable-5-2." },
+          enabled: { type: ["boolean", "null"] as const, description: "true = on, false = off, null = back to auto." },
+          until: { type: "string" as const, description: "Optional future ISO-8601 expiry with timezone; reverts to auto." },
+          reason: { type: "string" as const, description: "Optional free-text note for why." },
+        },
+        required: ["lane_id", "model_id", "enabled"],
       },
     },
     {
@@ -181,6 +215,11 @@ export function listLaneToolsDescriptor() {
           task_id: { type: "string" as const, description: "Caller-supplied identifier — also the deterministic key for experiment-arm assignment." },
           task_type: { type: "string" as const, enum: ["planning", "build", "review"] },
           estimated_cost: { type: "number" as const },
+          work_class: {
+            type: "string" as const,
+            description:
+              "Work class to judge levels under (e.g. release, code); defaults to task_type. Build, review, release and code work never route below premium; with no premium model available the verdict is queue with resets_at.",
+          },
         },
         required: ["task_id", "task_type"],
       },
@@ -199,6 +238,41 @@ export function listLaneToolsDescriptor() {
         required: ["decision_id"],
       },
     },
+    {
+      name: ROUTE_MODEL_SWAPS_TOOL_NAME,
+      description:
+        "Show model swaps: lanes currently routing another premium model because their preferred one hit a limit (or was turned off), and the recent swap / swap-back log with the limit that caused each.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          limit: { type: "number" as const, description: "How many recent events to return (1-500, default 50)." },
+        },
+      },
+    },
+    {
+      name: LANES_MAX_USAGE_GET_TOOL_NAME,
+      description:
+        "Show max-usage mode per account lane: whether it is on, until when, whether routing acts on it, and the account's paid switches (credits, spend_cap) as observed. Omit lane_id for every lane.",
+      inputSchema: {
+        type: "object" as const,
+        properties: { lane_id: { type: "string" as const } },
+      },
+    },
+    {
+      name: LANES_MAX_USAGE_SET_TOOL_NAME,
+      description:
+        "Turn max-usage mode on for one account lane until an expiry (enabled: true, until required), or off (enabled: false). While on, the lane works through every premium model it serves in preference order as each limit is reached, and takes work ahead of other lanes, then routing queues. Never below premium for code work. It never turns on paid credits or raises a spend cap; those stay human switches. Persists across restarts.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          lane_id: { type: "string" as const },
+          enabled: { type: "boolean" as const, description: "true = on (needs until), false = off." },
+          until: { type: "string" as const, description: "Required when turning on: future ISO-8601 expiry with timezone, within max_usage.max_hours." },
+          reason: { type: "string" as const, description: "Optional free-text note for why." },
+        },
+        required: ["lane_id", "enabled"],
+      },
+    },
   ];
 }
 
@@ -211,9 +285,9 @@ export function callLanesListTool(registry: LaneRegistry, store: StateStore) {
 }
 
 export function callLaneOverrideTool(registry: LaneRegistry, store: StateStore, args: unknown) {
-  const input = (args ?? {}) as { lane_id?: unknown; state?: unknown; reason?: unknown };
+  const input = (args ?? {}) as { lane_id?: unknown; state?: unknown; reason?: unknown; until?: unknown };
   const laneId = typeof input.lane_id === "string" ? input.lane_id : "";
-  return textResult(setLaneOverride(registry, store, laneId, input.state, input.reason));
+  return textResult(setLaneOverride(registry, store, laneId, input.state, input.reason, input.until));
 }
 
 export function callLaneSetResetAtTool(registry: LaneRegistry, store: StateStore, args: unknown) {
@@ -222,8 +296,22 @@ export function callLaneSetResetAtTool(registry: LaneRegistry, store: StateStore
   return textResult(setLaneResetAt(registry, store, laneId, input.reset_at ?? null));
 }
 
-export function callAddLaneTool(registry: LaneRegistry, envFilePath: string, args: unknown) {
-  return textResult(addLane(registry, envFilePath, (args ?? {}) as AddLaneInput));
+export function callAddLaneTool(registry: LaneRegistry, store: StateStore, args: unknown) {
+  return textResult(addLane(registry, store, (args ?? {}) as AddLaneInput));
+}
+
+export function callLaneModelsListTool(registry: LaneRegistry, store: StateStore, args: unknown) {
+  const input = (args ?? {}) as { lane_id?: unknown };
+  return textResult(listLaneModels(registry, store, typeof input.lane_id === "string" ? input.lane_id : ""));
+}
+
+export function callLaneModelsSetEnabledTool(registry: LaneRegistry, store: StateStore, args: unknown) {
+  const input = (args ?? {}) as { lane_id?: unknown; model_id?: unknown; enabled?: unknown; reason?: unknown; until?: unknown };
+  const laneId = typeof input.lane_id === "string" ? input.lane_id : "";
+  const modelId = typeof input.model_id === "string" ? input.model_id : "";
+  // An omitted `enabled` is a malformed call, not "back to auto".
+  const enabled = input.enabled === undefined ? "missing" : input.enabled;
+  return textResult(setLaneModelEnabled(registry, store, laneId, modelId, enabled, input.reason, input.until));
 }
 
 export function callRoutingStrategyGetTool(store: StateStore) {
@@ -261,14 +349,34 @@ export function callModelsSetEnabledTool(store: StateStore, args: unknown) {
 }
 
 export function callRouteSelectionTool(registry: LaneRegistry, store: StateStore, args: unknown) {
-  const input = (args ?? {}) as { task_id?: unknown; task_type?: unknown; estimated_cost?: unknown };
+  const input = (args ?? {}) as { task_id?: unknown; task_type?: unknown; estimated_cost?: unknown; work_class?: unknown };
   const taskId = typeof input.task_id === "string" ? input.task_id : "";
   const taskType = parseTaskType(typeof input.task_type === "string" ? input.task_type : null);
   if (!taskId || !taskType) {
     return textResult({ ok: false, error: "invalid_request", required: ["task_id", "task_type"], allowed_task_types: ["planning", "build", "review"] });
   }
   const estimatedCost = typeof input.estimated_cost === "number" ? input.estimated_cost : undefined;
-  return textResult(getScoredRoute({ task_id: taskId, task_type: taskType, estimated_cost: estimatedCost }, registry, store));
+  const workClass = typeof input.work_class === "string" && input.work_class.trim() !== "" ? input.work_class.trim() : undefined;
+  return textResult(getScoredRoute({ task_id: taskId, task_type: taskType, estimated_cost: estimatedCost, work_class: workClass }, registry, store));
+}
+
+export function callRouteModelSwapsTool(store: StateStore, args: unknown) {
+  const input = (args ?? {}) as { limit?: unknown };
+  const limit = input.limit === undefined ? 50 : input.limit;
+  if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 500) {
+    return textResult({ ok: false, error: "invalid_limit", message: "limit must be an integer from 1 to 500" });
+  }
+  return textResult(getModelSwapsReport(store, limit));
+}
+
+export function callMaxUsageGetTool(registry: LaneRegistry, store: StateStore, args: unknown) {
+  const input = (args ?? {}) as { lane_id?: unknown };
+  return textResult(getMaxUsageReport(registry, store, typeof input.lane_id === "string" ? input.lane_id : undefined));
+}
+
+export function callMaxUsageSetTool(registry: LaneRegistry, store: StateStore, args: unknown) {
+  const { lane_id: laneId, ...rest } = (args ?? {}) as Record<string, unknown>;
+  return textResult(setMaxUsage(registry, store, typeof laneId === "string" ? laneId : "", rest));
 }
 
 export function callRouteReportOutcomeTool(args: unknown) {
@@ -294,14 +402,16 @@ type ToolResult = ReturnType<typeof callLanesListTool>;
 export function buildToolDispatch(
   registry: LaneRegistry,
   store: StateStore,
-  envFilePath: string = DEFAULT_ENV_FILE_PATH,
+  _envFilePath: string = DEFAULT_ENV_FILE_PATH,
   fetchImpl?: typeof fetch,
 ): Record<string, (args: unknown) => ToolResult | Promise<ToolResult>> {
   return {
     [LANES_LIST_TOOL_NAME]: () => callLanesListTool(registry, store),
     [LANES_OVERRIDE_TOOL_NAME]: (args) => callLaneOverrideTool(registry, store, args),
     [LANES_SET_RESET_AT_TOOL_NAME]: (args) => callLaneSetResetAtTool(registry, store, args),
-    [LANES_ADD_TOOL_NAME]: (args) => callAddLaneTool(registry, envFilePath, args),
+    [LANES_ADD_TOOL_NAME]: (args) => callAddLaneTool(registry, store, args),
+    [LANES_MODELS_LIST_TOOL_NAME]: (args) => callLaneModelsListTool(registry, store, args),
+    [LANES_MODELS_SET_ENABLED_TOOL_NAME]: (args) => callLaneModelsSetEnabledTool(registry, store, args),
     [ROUTING_STRATEGY_GET_TOOL_NAME]: () => callRoutingStrategyGetTool(store),
     [ROUTING_STRATEGY_SET_TOOL_NAME]: (args) => callRoutingStrategySetTool(store, args),
     [MODELS_LIST_TOOL_NAME]: (args) => callModelsListTool(store, args),
@@ -309,6 +419,9 @@ export function buildToolDispatch(
     [MODELS_SET_ENABLED_TOOL_NAME]: (args) => callModelsSetEnabledTool(store, args),
     [ROUTE_SELECTION_TOOL_NAME]: (args) => callRouteSelectionTool(registry, store, args),
     [ROUTE_REPORT_OUTCOME_TOOL_NAME]: (args) => callRouteReportOutcomeTool(args),
+    [ROUTE_MODEL_SWAPS_TOOL_NAME]: (args) => callRouteModelSwapsTool(store, args),
+    [LANES_MAX_USAGE_GET_TOOL_NAME]: (args) => callMaxUsageGetTool(registry, store, args),
+    [LANES_MAX_USAGE_SET_TOOL_NAME]: (args) => callMaxUsageSetTool(registry, store, args),
   };
 }
 
@@ -352,8 +465,8 @@ const isMainModule =
   process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`;
 
 if (isMainModule) {
-  const registry = buildLaneRegistry();
   const store = new StateStore(resolveDefaultDbPath());
+  const registry = buildLaneRegistry(process.env, store);
   const server = createMcpServer(registry, store);
   const transport = new StdioServerTransport();
   await server.connect(transport);

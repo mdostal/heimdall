@@ -1,3 +1,8 @@
+---
+title: North Star
+nav_order: 12
+---
+
 # Heimdall — North Star
 
 Heimdall is the Pantheon's **health-aware LLM/lane router.** It automates what Mathew does by hand today: spreading agent work across providers AND accounts by available headroom. Every lane = provider × account × runtime, each with its own long-lived creds: `claude@mathew.dostal`, `claude@dostalmathew`, `fable`, `codex`, `gemini-3-pro`, `openrouter/grok`, `ollama-local`.

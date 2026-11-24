@@ -14,6 +14,8 @@ import {
   addLane,
   setBackoffPolicy,
   setBackoffPolicyOverride,
+  pushLaneStatus,
+  MAX_REQUEST_BODY_BYTES,
 } from "./http-server.js";
 import { LaneRegistry } from "../core/lane-registry.js";
 import { StateStore } from "../core/state-store.js";
@@ -25,6 +27,11 @@ import { InProcessScheduler } from "../core/scheduler/in-process-scheduler.js";
 import type { Lane } from "../core/lane-registry.js";
 import type { ArgusEmitter } from "../core/telemetry/argus-client.js";
 import type { LaneAgentResolver } from "../core/actuation/lane-agent-resolver.js";
+import { useRouteLedgerPath, useRoutePolicyPath } from "../core/route-selector.js";
+
+// heimdall#96: the route ledger defaults to the per-machine DB file; keep this
+// file's routing decisions in memory instead.
+useRouteLedgerPath(":memory:");
 
 /** Never the real repo .env — every POST /lanes test uses one of these, cleaned up after. */
 function tmpEnvPath(): string {
@@ -88,6 +95,29 @@ test("getLaneStatuses returns entries matching the LaneRouterContract shape", ()
       `unexpected signal_source: ${lane.signal_source}`,
     );
   }
+  store.close();
+});
+
+test("PANT-823: getLaneStatuses reports signal_state + last_probed_at, never_probed -> fresh -> stale, status unchanged", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const now = new Date("2026-09-28T12:00:00.000Z");
+
+  const [neverProbed] = getLaneStatuses(registry, store, undefined, now);
+  assert.equal(neverProbed.status, "down"); // REQ-07 fallback, still reported
+  assert.equal(neverProbed.signal_state, "never_probed");
+  assert.equal(neverProbed.last_probed_at, null);
+
+  store.recordStatus({ lane_id: "claude@mathew.dostal", status: "up", reset_at: null, reason: null, signal_source: "active_probe", observed_at: now.toISOString() });
+  const [fresh] = getLaneStatuses(registry, store, undefined, now);
+  assert.equal(fresh.status, "up");
+  assert.equal(fresh.signal_state, "fresh");
+  assert.equal(fresh.last_probed_at, now.toISOString());
+
+  const [stale] = getLaneStatuses(registry, store, undefined, new Date(now.getTime() + 3 * 60 * 60_000));
+  assert.equal(stale.status, "up");
+  assert.equal(stale.signal_state, "stale");
+  assert.equal(stale.last_probed_at, now.toISOString());
   store.close();
 });
 
@@ -1185,6 +1215,7 @@ test("hdl-mcp-01: setLaneOverride is independently callable without an HTTP serv
       lane_id: "claude@mathew.dostal",
       manual_override: "disabled",
       override_reason: null,
+      override_until: null,
     });
     assert.equal(store.getManualOverride("claude@mathew.dostal"), "disabled");
   } finally {
@@ -1215,6 +1246,102 @@ test("hdl-mcp-01: setLaneOverride returns {ok: false, error: 'invalid_override_s
     }
   } finally {
     store.close();
+  }
+});
+
+test("PANT-185: pushLaneStatus records the status with signal_source='passive' and returns it", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  try {
+    const result = pushLaneStatus(registry, store, "claude@mathew.dostal", "out_of_credit");
+    assert.deepEqual(result, { ok: true, lane_id: "claude@mathew.dostal", status: "out_of_credit", signal_source: "passive", limit: null });
+    const current = store.getCurrentStatus("claude@mathew.dostal");
+    assert.equal(current?.status, "out_of_credit");
+    assert.equal(current?.signal_source, "passive");
+  } finally {
+    store.close();
+  }
+});
+
+test("PANT-185: pushLaneStatus returns {ok: false, error: 'unknown_lane'} for an undeclared lane", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  try {
+    const result = pushLaneStatus(registry, store, "never-declared", "down");
+    assert.deepEqual(result, { ok: false, error: "unknown_lane", lane_id: "never-declared" });
+  } finally {
+    store.close();
+  }
+});
+
+test("PANT-185: pushLaneStatus returns {ok: false, error: 'invalid_status'} for an unknown status value", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  try {
+    const result = pushLaneStatus(registry, store, "claude@mathew.dostal", "on_fire");
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.error, "invalid_status");
+      assert.deepEqual([...result.allowed_statuses].sort(), [...LANE_STATUS_VALUES].sort());
+    }
+  } finally {
+    store.close();
+  }
+});
+
+test("PANT-185: PATCH /lanes/:id records out_of_credit and returns 200 with signal_source=passive", async () => {
+  const server = createHttpServer(registryWithOneConfiguredLane(), new StateStore(":memory:"));
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes/claude%40mathew.dostal`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "out_of_credit" }),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json() as Record<string, unknown>;
+    assert.equal(body.lane_id, "claude@mathew.dostal");
+    assert.equal(body.status, "out_of_credit");
+    assert.equal(body.signal_source, "passive");
+  } finally {
+    server.close();
+  }
+});
+
+test("PANT-185: PATCH /lanes/:id returns 404 for an undeclared lane", async () => {
+  const server = createHttpServer(registryWithOneConfiguredLane(), new StateStore(":memory:"));
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes/no-such-lane`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "down" }),
+    });
+    assert.equal(res.status, 404);
+    const body = await res.json() as Record<string, unknown>;
+    assert.equal(body.error, "unknown_lane");
+  } finally {
+    server.close();
+  }
+});
+
+test("PANT-185: PATCH /lanes/:id returns 400 for an invalid status value", async () => {
+  const server = createHttpServer(registryWithOneConfiguredLane(), new StateStore(":memory:"));
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    const res = await fetch(`http://localhost:${port}/lanes/claude%40mathew.dostal`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "totally-bogus" }),
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json() as Record<string, unknown>;
+    assert.equal(body.error, "invalid_status");
+  } finally {
+    server.close();
   }
 });
 
@@ -1269,8 +1396,9 @@ test("hdl-mcp-01: setLaneResetAt rejects a past timestamp with {ok: false, error
 test("hdl-mcp-01: addLane is independently callable without an HTTP server — unchanged response shape (restart_required, restart_command, no automatic restart)", () => {
   const registry = registryWithOneConfiguredLane();
   const envPath = tmpEnvPath();
+  const addStore = new StateStore(":memory:");
   try {
-    const result = addLane(registry, envPath, {
+    const result = addLane(registry, addStore, {
       lane_id: "gemini@ops",
       provider: "gemini",
       model: "gemini-3-pro",
@@ -1279,11 +1407,12 @@ test("hdl-mcp-01: addLane is independently callable without an HTTP server — u
     assert.deepEqual(result, {
       ok: true,
       lane_id: "gemini@ops",
-      credential_ref: "GEMINI_OPS_TOKEN",
+      credential_ref: "HEIMDALL_API_LANE_67656d696e69406f7073",
       restart_required: true,
       restart_command: "npm run dev",
     });
   } finally {
+    addStore.close();
     fs.rmSync(envPath, { force: true });
   }
 });
@@ -1291,10 +1420,12 @@ test("hdl-mcp-01: addLane is independently callable without an HTTP server — u
 test("hdl-mcp-01: addLane returns {ok: false, error: 'missing_field', field} naming the missing field", () => {
   const registry = registryWithOneConfiguredLane();
   const envPath = tmpEnvPath();
+  const addStore = new StateStore(":memory:");
   try {
-    const result = addLane(registry, envPath, { lane_id: "gemini@ops", provider: "gemini", model: "gemini-3-pro" });
+    const result = addLane(registry, addStore, { lane_id: "gemini@ops", provider: "gemini", model: "gemini-3-pro" });
     assert.deepEqual(result, { ok: false, error: "missing_field", field: "token" });
   } finally {
+    addStore.close();
     fs.rmSync(envPath, { force: true });
   }
 });
@@ -1302,8 +1433,9 @@ test("hdl-mcp-01: addLane returns {ok: false, error: 'missing_field', field} nam
 test("hdl-mcp-01: addLane returns {ok: false, error: 'lane_already_declared', ...} for a lane already in the registry", () => {
   const registry = registryWithOneConfiguredLane();
   const envPath = tmpEnvPath();
+  const addStore = new StateStore(":memory:");
   try {
-    const result = addLane(registry, envPath, {
+    const result = addLane(registry, addStore, {
       lane_id: "claude@mathew.dostal",
       provider: "claude",
       model: "claude-sonnet",
@@ -1311,11 +1443,12 @@ test("hdl-mcp-01: addLane returns {ok: false, error: 'lane_already_declared', ..
     });
     assert.deepEqual(result, { ok: false, error: "lane_already_declared", lane_id: "claude@mathew.dostal" });
   } finally {
+    addStore.close();
     fs.rmSync(envPath, { force: true });
   }
 });
 
-test("hdl-lm-01: POST /lanes creates a lane, writes .env, and responds with restart_required", async () => {
+test("hdl-lm-01: POST /lanes creates a lane in SQLite, and responds with restart_required", async () => {
   const registry = registryWithOneConfiguredLane();
   const store = new StateStore(":memory:");
   const envPath = tmpEnvPath();
@@ -1332,17 +1465,13 @@ test("hdl-lm-01: POST /lanes creates a lane, writes .env, and responds with rest
     assert.equal(res.status, 201);
     const body = await res.json();
     assert.equal(body.lane_id, "gemini@ops");
-    assert.equal(body.credential_ref, "GEMINI_OPS_TOKEN");
+    assert.equal(body.credential_ref, "HEIMDALL_API_LANE_67656d696e69406f7073");
     assert.equal(body.restart_required, true);
     assert.equal(body.restart_command, "npm run dev");
 
-    // envPath starts empty in this test (independent of the in-memory
-    // registry fixture, which is constructed programmatically, not from
-    // this file) — appendLane's index-continuation logic is covered
-    // separately and thoroughly in env-file.test.ts.
-    const envContent = fs.readFileSync(envPath, "utf8");
-    assert.match(envContent, /HEIMDALL_LANE_1_ID=gemini@ops/);
-    assert.match(envContent, /GEMINI_OPS_TOKEN=secret-value/);
+    assert.equal(fs.existsSync(envPath), false);
+    assert.equal(store.getLaneDeclarations()[0].token, "secret-value");
+
   } finally {
     server.close();
     store.close();
@@ -2106,7 +2235,7 @@ test("hdl-override-reason: GET / (dashboard) renders a reason input next to the 
     assert.match(body, /override-reason-input/, "must render a reason input the operator can type into before overriding");
     assert.match(
       body,
-      /body: JSON\.stringify\(\{ state: state, reason: reason \}\)/,
+      /body: JSON\.stringify\(\{ state: state, reason: reason, until: until \}\)/,
       "the click handler must send the reason input's current value alongside state",
     );
     assert.match(body, /override-reason-note/, "must render the persisted reason as a distinct, scoped element (not the shared .reason class also used for status text and the routing-policy panel)");
@@ -2516,9 +2645,11 @@ test("hdl-ot-03: GET /metrics returns 200 with valid Prometheus text format on a
     const body = await res.text();
     assert.match(body, /^# HELP heimdall_lanes /m);
     assert.match(body, /^# TYPE heimdall_lanes gauge$/m);
-    // A declared-but-never-probed lane still counts as a lane (status
-    // defaults to "down" — same fallback GET /lanes already uses).
-    assert.match(body, /heimdall_lanes\{provider="claude",status="down"\} 1/);
+    // A declared-but-never-probed lane still counts as a lane, under
+    // status="unknown" (PANT-823) — GET /lanes' "down" for it is the REQ-07
+    // no-signal fallback, not an observed outage.
+    assert.match(body, /heimdall_lanes\{provider="claude",status="unknown"\} 1/);
+    assert.doesNotMatch(body, /heimdall_lanes\{provider="claude",status="down"\}/);
   } finally {
     server.close();
     store.close();
@@ -2540,8 +2671,8 @@ test("hdl-ot-03: GET /metrics reflects real telemetry_events counts with correct
   try {
     const res = await fetch(`http://localhost:${port}/metrics`);
     const body = await res.text();
-    assert.match(body, /heimdall_actuation_results_total\{provider="claude",action="disable",success="true"\} 2/);
-    assert.match(body, /heimdall_actuation_results_total\{provider="claude",action="enable",success="false"\} 1/);
+    // PANT-824: removed — stub adapters can never produce actuation results.
+    assert.doesNotMatch(body, /heimdall_actuation_results_total/);
     assert.match(body, /heimdall_rotation_events_total\{provider="claude",kind="capped"\} 1/);
     assert.match(body, /heimdall_model_substitutions_total\{provider="claude"\} 1/);
   } finally {
@@ -2562,6 +2693,7 @@ test("hdl-ot-04: GET / (dashboard) includes a Telemetry panel that loads from GE
     const body = await res.text();
     assert.match(body, /id="telemetry-root"/);
     assert.match(body, /fetch\("\/metrics"\)/, "the panel must load its state from GET /metrics");
+    assert.match(body, /heimdall_lane_last_probe_age_seconds/, "PANT-824: the panel summarizes the sensing metrics");
   } finally {
     server.close();
     store.close();
@@ -3211,6 +3343,474 @@ test("hdl-bp-05: POST /backoff-policy/exponential-ceiling-ms rejects a value at 
       assert.equal(res.status, 400, `expected 400 for value=${value}`);
       assert.equal((await res.json()).error, "invalid_ceiling_ms");
     }
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("PANT-829: a request body over MAX_REQUEST_BODY_BYTES gets 413, not buffered or parsed", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const oversized = JSON.stringify({ theme: "terminal", padding: "x".repeat(MAX_REQUEST_BODY_BYTES) });
+    const res = await fetch(`http://localhost:${port}/theme`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: oversized,
+    });
+    assert.equal(res.status, 413);
+    assert.deepEqual(await res.json(), { error: "payload_too_large", max_bytes: MAX_REQUEST_BODY_BYTES });
+
+    const getRes = await fetch(`http://localhost:${port}/theme`);
+    assert.equal((await getRes.json()).active, "mission-control", "a rejected body must not be applied");
+  } finally {
+    server.close();
+    server.closeAllConnections();
+    store.close();
+  }
+});
+
+test("PANT-829: a chunked body with no Content-Length is still capped at MAX_REQUEST_BODY_BYTES", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const chunk = new TextEncoder().encode("x".repeat(64 * 1024));
+    let sent = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent > MAX_REQUEST_BODY_BYTES * 2) {
+          controller.close();
+          return;
+        }
+        sent += chunk.length;
+        controller.enqueue(chunk);
+      },
+    });
+    const res = await fetch(`http://localhost:${port}/theme`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+      duplex: "half",
+    } as RequestInit);
+    assert.equal(res.status, 413);
+  } finally {
+    server.close();
+    server.closeAllConnections();
+    store.close();
+  }
+});
+
+test("PANT-829: a body at the limit is still accepted, and invalid JSON is still a 400", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const base = JSON.stringify({ theme: "terminal", padding: "" });
+    const atLimit = JSON.stringify({ theme: "terminal", padding: "x".repeat(MAX_REQUEST_BODY_BYTES - base.length) });
+    assert.equal(Buffer.byteLength(atLimit), MAX_REQUEST_BODY_BYTES);
+    const okRes = await fetch(`http://localhost:${port}/theme`, { method: "POST", body: atLimit });
+    assert.equal(okRes.status, 200);
+
+    const badRes = await fetch(`http://localhost:${port}/theme`, { method: "POST", body: "{not json" });
+    assert.equal(badRes.status, 400);
+    assert.deepEqual(await badRes.json(), { error: "invalid_json" });
+  } finally {
+    server.close();
+    server.closeAllConnections();
+    store.close();
+  }
+});
+
+test("GET /events streams lane.status_changed within 1s of recordStatus() changing a lane (PANT-827)", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  store.upsertLane({ lane_id: "claude@mathew.dostal", provider: "claude", credential_ref: "CLAUDE_TOKEN" });
+  store.recordStatus({
+    lane_id: "claude@mathew.dostal",
+    status: "up",
+    reset_at: null,
+    reason: null,
+    signal_source: "active_probe",
+    observed_at: "2026-09-27T10:00:00.000Z",
+  });
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  const controller = new AbortController();
+
+  try {
+    const res = await fetch(`http://localhost:${port}/events`, { signal: controller.signal });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /^text\/event-stream/);
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+
+    const changedAt = Date.now();
+    store.recordStatus({
+      lane_id: "claude@mathew.dostal",
+      status: "out_of_credit",
+      reset_at: null,
+      reason: "quota",
+      error_code: "quota_exceeded",
+      signal_source: "passive",
+      observed_at: "2026-09-27T10:00:05.000Z",
+    });
+
+    let buffer = "";
+    const deadline = setTimeout(() => controller.abort(), 1000);
+    try {
+      while (!/event: lane\.status_changed\ndata: .*\n\n/.test(buffer)) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+      }
+    } finally {
+      clearTimeout(deadline);
+    }
+    assert.ok(Date.now() - changedAt < 1000, "event must arrive within 1s");
+
+    const data = buffer.match(/event: lane\.status_changed\ndata: (.*)\n\n/)![1];
+    const event = JSON.parse(data);
+    assert.equal(event.lane_id, "claude@mathew.dostal");
+    assert.equal(event.from, "up");
+    assert.equal(event.to, "out_of_credit");
+    assert.equal(event.error_code, "quota_exceeded");
+    assert.equal(event.cause, "status");
+  } finally {
+    controller.abort();
+    server.closeAllConnections();
+    server.close();
+    store.close();
+  }
+
+  // The closed stream unsubscribed from the store's emitter.
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  assert.equal(store.events.listenerCount(), 0);
+});
+
+// heimdall#95: one bad request must never take the whole process (and every
+// lane with it) down. These run in-process, so an unhandled rejection or
+// uncaught exception here would fail the test file outright.
+function missingPolicyPath(): string {
+  return path.join(os.tmpdir(), `heimdall-no-policy-${Date.now()}-${Math.random().toString(36).slice(2)}.yaml`);
+}
+
+test("heimdall#95: POST /route with no routing policy file returns 503 routing_policy_unavailable, and GET /healthz still answers 200", async () => {
+  const registry = registryWithRouteLanes();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  useRoutePolicyPath(missingPolicyPath());
+
+  try {
+    const res = await fetch(`http://localhost:${port}/route`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ task_id: "no-policy-1", task_type: "build" }),
+    });
+    assert.equal(res.status, 503);
+    assert.match(res.headers.get("content-type") ?? "", /application\/json/);
+    const body = await res.json();
+    assert.equal(body.error, "routing_policy_unavailable");
+    assert.match(body.detail, /Failed to load routing policy/);
+
+    const health = await fetch(`http://localhost:${port}/healthz`);
+    assert.equal(health.status, 200);
+    assert.deepEqual(await health.json(), { status: "ok" });
+  } finally {
+    useRoutePolicyPath(undefined);
+    server.close();
+    store.close();
+  }
+});
+
+test("heimdall#95: GET /available-route with the scored strategy active and no policy file returns 503, not a crash", async () => {
+  const registry = registryWithRouteLanes();
+  const store = new StateStore(":memory:");
+  store.setSetting("routing_strategy", "scored");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  useRoutePolicyPath(missingPolicyPath());
+
+  try {
+    const res = await fetch(`http://localhost:${port}/available-route?task-type=build`);
+    assert.equal(res.status, 503);
+    const body = await res.json();
+    assert.equal(body.error, "routing_policy_unavailable");
+
+    const health = await fetch(`http://localhost:${port}/healthz`);
+    assert.equal(health.status, 200);
+  } finally {
+    useRoutePolicyPath(undefined);
+    server.close();
+    store.close();
+  }
+});
+
+test("heimdall#95: a handler that throws inside its body callback returns a JSON 500 and the server keeps serving", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  store.setSetting = () => {
+    throw new Error("simulated settings write failure");
+  };
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  const originalConsoleError = console.error;
+  console.error = () => {};
+
+  try {
+    const res = await fetch(`http://localhost:${port}/theme`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ theme: "terminal" }),
+    });
+    assert.equal(res.status, 500);
+    const body = await res.json();
+    assert.deepEqual(body, { error: "internal_error", detail: "simulated settings write failure" });
+
+    const health = await fetch(`http://localhost:${port}/healthz`);
+    assert.equal(health.status, 200);
+  } finally {
+    console.error = originalConsoleError;
+    server.close();
+    store.close();
+  }
+});
+
+test("heimdall#95: a synchronous throw in a route returns a JSON 500 and the server keeps serving", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  store.getSetting = () => {
+    throw new Error("simulated settings read failure");
+  };
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  const originalConsoleError = console.error;
+  console.error = () => {};
+
+  try {
+    const res = await fetch(`http://localhost:${port}/available-route?task-type=build`);
+    assert.equal(res.status, 500);
+    const body = await res.json();
+    assert.deepEqual(body, { error: "internal_error", detail: "simulated settings read failure" });
+
+    const health = await fetch(`http://localhost:${port}/healthz`);
+    assert.equal(health.status, 200);
+  } finally {
+    console.error = originalConsoleError;
+    server.close();
+    store.close();
+  }
+});
+
+test("time-boxed override API validates deadlines and exposes effective policy", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore();
+  const server = createHttpServer(registry, store);
+  await new Promise<void>(resolve => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  const url = `http://localhost:${port}`;
+  const post = (body: object) => fetch(url + "/lanes/claude@mathew.dostal/override", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  try {
+    for (const until of ["garbage", 123, "2020-01-01T00:00:00Z", "2099-01-01T00:00:00"]) {
+      assert.equal((await post({ state: "enabled", until })).status, 400);
+    }
+    const until = new Date(Date.now() + 60000).toISOString();
+    assert.equal((await post({ state: "enabled", until })).status, 200);
+    let lane = (await (await fetch(url + "/lanes")).json())[0];
+    assert.equal(lane.override_until, until);
+    assert.equal(lane.effective_enabled, true);
+    store.expireOverrides(new Date(Date.now() + 120000));
+    lane = (await (await fetch(url + "/lanes")).json())[0];
+    assert.equal(lane.manual_override, null);
+    assert.equal(lane.override_until, null);
+    assert.equal(lane.effective_enabled, false);
+    const html = await (await fetch(url + "/")).text();
+    assert.match(html, /override-until-input/);
+    assert.match(html, /Reverts to Auto at/);
+  } finally { server.close(); store.close(); }
+});
+
+const FABLE_LIMIT_ERROR = "You've reached your Fable limit · resets Fri 1pm (America/Chicago). /upgrade or switch to Opus to continue.";
+
+test("heimdall#142: a pushed Fable limit records only weekly_model:<id> and leaves the lane up", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const previous = process.env.HEIMDALL_CLAUDE_MODEL_ALIASES;
+  process.env.HEIMDALL_CLAUDE_MODEL_ALIASES = "fable=claude-fable-5-2";
+  try {
+    const now = new Date("2026-11-15T15:00:00Z");
+    pushLaneStatus(registry, store, "claude@mathew.dostal", "up", undefined, now);
+    const result = pushLaneStatus(registry, store, "claude@mathew.dostal", "out_of_credit", FABLE_LIMIT_ERROR, now);
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.status, "up", "a per-model limit must not take the whole account out of routing");
+      assert.equal(result.limit?.kind, "weekly_model:claude-fable-5-2");
+    }
+    assert.equal(store.getCurrentStatus("claude@mathew.dostal")?.status, "up");
+    const limits = store.getLimits("claude@mathew.dostal", now);
+    assert.deepEqual(limits.map((l) => [l.kind, l.state, l.resets_at, l.used_percent]), [
+      ["weekly_model:claude-fable-5-2", "exhausted", "2026-11-20T19:00:00.000Z", null],
+    ]);
+    const status = getLaneStatuses(registry, store).find((s) => s.lane_id === "claude@mathew.dostal");
+    assert.equal(status?.limits.length, 1, "lane status shows the limit");
+  } finally {
+    if (previous === undefined) delete process.env.HEIMDALL_CLAUDE_MODEL_ALIASES;
+    else process.env.HEIMDALL_CLAUDE_MODEL_ALIASES = previous;
+    store.close();
+  }
+});
+
+test("heimdall#142: a pushed account-wide weekly limit records out_of_credit with the provider's reset time", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  try {
+    const now = new Date("2026-11-15T15:00:00Z");
+    const result = pushLaneStatus(registry, store, "claude@mathew.dostal", "out_of_credit",
+      "You've hit your weekly limit · resets Mon 9am (UTC)", now);
+    assert.equal(result.ok, true);
+    const current = store.getCurrentStatus("claude@mathew.dostal");
+    assert.equal(current?.status, "out_of_credit");
+    assert.equal(current?.reset_at, "2026-11-16T09:00:00.000Z");
+    assert.equal(store.getLimits("claude@mathew.dostal", now)[0]?.kind, "weekly_all_models");
+  } finally {
+    store.close();
+  }
+});
+
+test("heimdall#142: pushLaneStatus rejects a non-string error", () => {
+  const store = new StateStore(":memory:");
+  try {
+    const result = pushLaneStatus(registryWithOneConfiguredLane(), store, "claude@mathew.dostal", "down", { message: 1 });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.error, "invalid_error");
+  } finally {
+    store.close();
+  }
+});
+
+test("heimdall#142: PATCH with error, GET /lanes limits, POST /lanes/:id/limits/clear", async () => {
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registryWithOneConfiguredLane(), store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  const base = `http://localhost:${port}/lanes/claude%40mathew.dostal`;
+  try {
+    const patch = await fetch(base, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "out_of_credit", error: FABLE_LIMIT_ERROR }),
+    });
+    assert.equal(patch.status, 200);
+    const patched = (await patch.json()) as { limit: { scope: string } | null };
+    assert.equal(patched.limit?.scope, "model");
+
+    const lanes = (await (await fetch(`http://localhost:${port}/lanes`)).json()) as Array<{ lane_id: string; limits: Array<{ kind: string }> }>;
+    const lane = lanes.find((l) => l.lane_id === "claude@mathew.dostal");
+    assert.equal(lane?.limits.length, 1);
+    const kind = lane?.limits[0]?.kind;
+
+    const post = (body: unknown) => fetch(`${base}/limits/clear`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    assert.equal((await post({})).status, 400);
+    const cleared = await post({ kind });
+    assert.equal(cleared.status, 200);
+    assert.deepEqual(((await cleared.json()) as { limits: unknown[] }).limits, []);
+    assert.equal((await post({ kind })).status, 404);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    store.close();
+  }
+});
+
+test("heimdall#142 slice 4: GET /model-swaps reports current swaps; /metrics counts swaps by causing limit", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  store.startLaneModelSwap("lane-a", "claude-fable-5-2", "claude-opus-5-5", JSON.stringify({ type: "limit", limits: [{ kind: "weekly_model:claude-fable-5-2" }] }), new Date());
+  store.recordTelemetryEvent("model_swap", { provider: "claude", laneId: "lane-a", fromModel: "claude-fable-5-2", toModel: "claude-opus-5-5", cause: "weekly_model:claude-fable-5-2" });
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const res = await fetch(`http://localhost:${port}/model-swaps?limit=10`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body.current.map((row: { lane_id: string; preferred_model: string; model: string }) => [row.lane_id, row.preferred_model, row.model]), [["lane-a", "claude-fable-5-2", "claude-opus-5-5"]]);
+    assert.equal(body.current[0].cause.limits[0].kind, "weekly_model:claude-fable-5-2");
+    assert.ok(Array.isArray(body.events));
+
+    const bad = await fetch(`http://localhost:${port}/model-swaps?limit=abc`);
+    assert.equal(bad.status, 400);
+
+    const metrics = await (await fetch(`http://localhost:${port}/metrics`)).text();
+    assert.match(metrics, /heimdall_model_swaps_total\{[^}]*event="swap"[^}]*cause="weekly_model:claude-fable-5-2"[^}]*\} 1/);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("PANT-1325: POST/GET /lanes/:id/max-usage set and read max usage; GET /lanes and GET /max-usage carry it; paid fields refused", async () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  const server = createHttpServer(registry, store);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  const laneId = registry.list()[0].lane_id;
+  const url = `http://localhost:${port}/lanes/${encodeURIComponent(laneId)}/max-usage`;
+  const post = (body: unknown) => fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  try {
+    const until = new Date(Date.now() + 3_600_000).toISOString();
+    const on = await post({ enabled: true, until, reason: "release week" });
+    assert.equal(on.status, 200);
+    assert.equal((await on.json()).max_usage.enabled, true);
+
+    const one = await (await fetch(url)).json();
+    assert.equal(one.enabled, true);
+    assert.equal(one.until, until);
+    assert.equal(one.reason, "release week");
+
+    const all = await (await fetch(`http://localhost:${port}/max-usage`)).json();
+    assert.equal(all.lanes[0].lane_id, laneId);
+    const lanes = await (await fetch(`http://localhost:${port}/lanes`)).json();
+    assert.equal(lanes[0].max_usage.enabled, true);
+    assert.deepEqual(lanes[0].max_usage.paid_switches.map((sw: { kind: string }) => sw.kind), ["credits", "spend_cap"]);
+
+    const paid = await post({ enabled: true, until, spend_cap: 500 });
+    assert.equal(paid.status, 400);
+    assert.equal((await paid.json()).error, "not_a_heimdall_switch");
+    const noUntil = await post({ enabled: true });
+    assert.equal(noUntil.status, 400);
+    assert.equal((await noUntil.json()).error, "invalid_until");
+    const ghost = await fetch(`http://localhost:${port}/lanes/ghost/max-usage`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: false }) });
+    assert.equal(ghost.status, 404);
+    assert.equal((await fetch(`http://localhost:${port}/lanes/ghost/max-usage`)).status, 404);
+
+    const off = await post({ enabled: false });
+    assert.equal(off.status, 200);
+    assert.equal((await (await fetch(url)).json()).enabled, false);
   } finally {
     server.close();
     store.close();

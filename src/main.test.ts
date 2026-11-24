@@ -1,8 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
-import { composeService } from "./main.js";
+import { EventEmitter } from "node:events";
+import { createServer } from "node:net";
+import { spawn, type ChildProcess } from "node:child_process";
+import { composeService, installShutdownHandlers } from "./main.js";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { CommandRunner } from "./core/scheduler/command-runner.js";
+import { resolveDefaultDbPath } from "./core/state-store.js";
+import { RouteLedger } from "./core/routing/route-ledger.js";
 
 function testEnv(): NodeJS.ProcessEnv {
   return {
@@ -70,6 +80,47 @@ test("composeService wires one MulticaAutopilotScheduler + one InProcessSchedule
   assert.equal(service.multicaSchedulers.length, 2);
   assert.equal(service.inProcessSchedulers.length, 2);
   assert.equal(service.pipelines.size, 2);
+
+  service.stopAll();
+});
+
+test("PANT-753: without MULTICA_AUTOPILOT_AGENT, no autopilot is registered and every lane is still probed at startup (never left on the all-down fallback)", async () => {
+  const env = testEnv();
+  delete env.MULTICA_AUTOPILOT_AGENT;
+  const commandCalls: string[][] = [];
+  const service = composeService({
+    env,
+    commandRunner: {
+      run: async (command: string, args: string[]) => {
+        commandCalls.push([command, ...args]);
+        return { stdout: "{}", stderr: "" };
+      },
+    },
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port: 0,
+  });
+
+  assert.equal(service.multicaSchedulers.length, 0, "autopilot scheduling is opt-in — no agent, no autopilot");
+  assert.equal(service.inProcessSchedulers.length, 2);
+
+  // The InProcessSchedulers' first poll fires at startup (initialDelayMs: 0),
+  // not after the 5s interval — wait for both lanes' first real probe.
+  const deadline = Date.now() + 2_000;
+  const laneIds = ["claude@mathew.dostal", "codex"];
+  while (Date.now() < deadline) {
+    if (laneIds.every((id) => service.store.getCurrentStatus(id)?.signal_source === "active_probe")) break;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  for (const id of laneIds) {
+    const current = service.store.getCurrentStatus(id);
+    assert.equal(current?.status, "up", `${id} should be probed up at startup, got ${current?.status} (${current?.reason})`);
+  }
+  assert.deepEqual(
+    commandCalls.filter((c) => c[0] === "multica"),
+    [],
+    "no multica autopilot CLI calls — autopilot triggers dispatch LLM sessions and spend quota",
+  );
 
   service.stopAll();
 });
@@ -394,40 +445,61 @@ test("a lane with a HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS mapping still gets StubC
   service.stopAll();
 });
 
-test("the shared status watcher calls reconcile() for every lane on each tick, not just on transitions", async () => {
+test("reconcile() is event-driven: never called across unchanged ticks, exactly once per transition (PANT-827)", async () => {
   const service = composeService({
     env: testEnv(),
     commandRunner: mockCommandRunner(),
     fetchImpl: mockFetch(),
     skipHttpListen: true,
     port: 0,
-    statusWatcherIntervalMs: 10,
   });
+  // Isolate from the InProcessSchedulers' startup probe (PANT-753), which
+  // would otherwise record its own statuses underneath the injected ticks.
+  for (const s of service.inProcessSchedulers) s.stop();
 
-  service.store.recordStatus({
-    lane_id: "claude@mathew.dostal",
-    status: "down",
-    reset_at: null,
-    reason: "seeded for test",
-    signal_source: "active_probe",
-    observed_at: "2026-07-25T12:00:00.000Z",
-  });
+  const laneId = "claude@mathew.dostal";
+  const tick = (status: "up" | "down", observedAt: string) =>
+    service.store.recordStatus({
+      lane_id: laneId,
+      status,
+      reset_at: null,
+      reason: "injected tick",
+      signal_source: "active_probe",
+      observed_at: observedAt,
+    });
 
-  const adapter = service.controlAdapters.get("claude@mathew.dostal")!;
+  tick("down", "2026-07-25T12:00:00.000Z");
+
+  const adapter = service.controlAdapters.get(laneId)!;
   const reconcileCalls: string[] = [];
-  const originalReconcile = adapter.reconcile.bind(adapter);
-  adapter.reconcile = async (lane, status) => {
+  adapter.reconcile = async (_lane, status) => {
     reconcileCalls.push(status);
-    return originalReconcile(lane, status);
   };
 
-  // Same "down" status held steady across multiple ticks — no transition —
-  // yet reconcile() must still fire every tick (retry-for-free semantics).
-  await new Promise<void>((resolve) => setTimeout(resolve, 55));
+  // Several ticks, same resolved status — no transition, so no reconcile().
+  tick("down", "2026-07-25T12:00:05.000Z");
+  tick("down", "2026-07-25T12:00:10.000Z");
+  tick("down", "2026-07-25T12:00:15.000Z");
+  // Wall-clock time passing must not trigger it either (no timer left).
+  await new Promise<void>((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(reconcileCalls, []);
+
+  // One transition -> exactly one call.
+  tick("up", "2026-07-25T12:00:20.000Z");
+  tick("up", "2026-07-25T12:00:25.000Z");
+  assert.deepEqual(reconcileCalls, ["up"]);
+
+  // A manual override change reconciles too; re-setting the same value doesn't.
+  service.store.setManualOverride(laneId, "disabled");
+  service.store.setManualOverride(laneId, "disabled");
+  assert.deepEqual(reconcileCalls, ["up", "up"]);
 
   service.stopAll();
-  assert.ok(reconcileCalls.length >= 3, `expected several reconcile() calls, got ${reconcileCalls.length}`);
-  assert.ok(reconcileCalls.every((s) => s === "down"));
+});
+
+test("src/main.ts has no setInterval — nothing polls (PANT-827)", () => {
+  const source = readFileSync(fileURLToPath(new URL("./main.ts", import.meta.url)), "utf8");
+  assert.ok(!/setInterval\s*\(/.test(source), "main.ts must not start any setInterval loop");
 });
 
 test("POST /lanes/:laneId/refresh works end-to-end against the composed service", async () => {
@@ -455,5 +527,513 @@ test("POST /lanes/:laneId/refresh works end-to-end against the composed service"
     assert.equal(claudeLane.status, "up");
   } finally {
     service.stopAll();
+  }
+});
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Records every timer created while installed and whether it was cleared or
+ * (for one-shot timeouts) has fired. Checking these specific handles, rather
+ * than the process-wide timer count, keeps the leak check independent of
+ * timers left behind by other tests and of how fast the event loop runs.
+ */
+function trackTimers() {
+  const originals = {
+    setTimeout: globalThis.setTimeout,
+    setInterval: globalThis.setInterval,
+    clearTimeout: globalThis.clearTimeout,
+    clearInterval: globalThis.clearInterval,
+  };
+  const live = new Map<unknown, string>();
+  const release = (handle: unknown) => {
+    live.delete(handle);
+  };
+
+  const patched = {} as typeof originals;
+  patched.setTimeout = ((fn: (...a: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+    const handle = originals.setTimeout(
+      (...a: unknown[]) => {
+        release(handle);
+        fn(...a);
+      },
+      ms,
+      ...args,
+    );
+    live.set(handle, `setTimeout(${ms})`);
+    return handle;
+  }) as typeof setTimeout;
+  patched.setInterval = ((fn: (...a: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+    const handle = originals.setInterval(fn, ms, ...args);
+    live.set(handle, `setInterval(${ms})`);
+    return handle;
+  }) as typeof setInterval;
+  patched.clearTimeout = ((handle?: Parameters<typeof clearTimeout>[0]) => {
+    release(handle);
+    originals.clearTimeout(handle);
+  }) as typeof clearTimeout;
+  patched.clearInterval = ((handle?: Parameters<typeof clearInterval>[0]) => {
+    release(handle);
+    originals.clearInterval(handle);
+  }) as typeof clearInterval;
+
+  const tracker = {
+    created: () => live.size,
+    live: () => [...live.values()],
+    install: () => Object.assign(globalThis, patched),
+    restore: () => Object.assign(globalThis, originals),
+  };
+  tracker.install();
+  return tracker;
+}
+
+test("PANT-829: shutdown() clears every timer composeService started and closes the server and DB — no leaked handles", async () => {
+  const timers = trackTimers();
+  const env = {
+    ...testEnv(),
+    // Two credentialed claude lanes, so a cap-reset rotation job starts too.
+    HEIMDALL_LANE_3_ID: "claude@second",
+    HEIMDALL_LANE_3_PROVIDER: "claude",
+    HEIMDALL_LANE_3_CREDENTIAL_REF: "CLAUDE_TOKEN_2",
+    CLAUDE_TOKEN_2: "sk-ant-fake-2",
+  };
+  let service: ReturnType<typeof composeService>;
+  try {
+    service = composeService({
+      env,
+      commandRunner: mockCommandRunner(),
+      fetchImpl: mockFetch(),
+      skipHttpListen: true,
+      port: 0,
+    });
+  } finally {
+    timers.restore();
+  }
+  assert.equal(service.rotationControllers.size, 1, "fixture should exercise the cap-reset job");
+  await new Promise<void>((resolve) => service.httpServer.listen(0, resolve));
+  assert.ok(timers.created() > 0, "composeService should have started timers");
+
+  // A keep-alive client connection that would otherwise hold server.close() open.
+  const { port } = service.httpServer.address() as AddressInfo;
+  assert.equal((await fetch(`http://localhost:${port}/healthz`)).status, 200);
+
+  // shutdown() starts (and must clear) its own force-close timer, so track it too.
+  timers.install();
+  try {
+    await service.shutdown({ graceMs: 200 });
+  } finally {
+    timers.restore();
+  }
+
+  assert.equal(service.httpServer.listening, false);
+  assert.deepEqual(timers.live(), [], "every timer composeService started must be cleared by shutdown()");
+  // PANT-827 replaced the status-watcher poll with a lane.status_changed
+  // subscription; shutdown() must release it like it clears the timers.
+  assert.equal(service.store.events.listenerCount(), 0, "the reconcile subscription must be released");
+  assert.throws(() => service.store.listLanes(), /not open|closed/i, "the DB must be closed");
+  // Idempotent — a second shutdown/stopAll after the first is a no-op.
+  await service.shutdown();
+  service.stopAll();
+});
+
+test("PANT-829: an open GET /events (SSE) stream is ended by shutdown() instead of holding it for the grace period", async () => {
+  const service = composeService({
+    env: testEnv(),
+    commandRunner: mockCommandRunner(),
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port: 0,
+  });
+  await new Promise<void>((resolve) => service.httpServer.listen(0, resolve));
+  const { port } = service.httpServer.address() as AddressInfo;
+
+  const res = await fetch(`http://localhost:${port}/events`);
+  assert.equal(res.status, 200);
+  const reader = res.body!.getReader();
+  const first = await reader.read();
+  assert.match(new TextDecoder().decode(first.value), /: connected/);
+
+  // A grace period far longer than the 10s timeout below: if the stream held
+  // shutdown() open, it would only finish at the force-close, so this fails.
+  await withTimeout(service.shutdown({ graceMs: 60_000 }), 10_000, "shutdown() waited on the open SSE stream");
+
+  assert.equal(service.httpServer.listening, false);
+  assert.equal((await reader.read()).done, true, "the client sees the stream end");
+});
+
+test("PANT-829: SIGTERM/SIGINT run the graceful shutdown then exit 0; a second signal exits 1 immediately", async () => {
+  const signals = new EventEmitter();
+  const exits: number[] = [];
+  let shutdowns = 0;
+  let finishShutdown!: () => void;
+  const uninstall = installShutdownHandlers(
+    {
+      shutdown: () => {
+        shutdowns += 1;
+        return new Promise<void>((resolve) => {
+          finishShutdown = resolve;
+        });
+      },
+    },
+    { exit: (code) => exits.push(code), signals },
+  );
+
+  signals.emit("SIGTERM", "SIGTERM");
+  assert.equal(shutdowns, 1);
+  assert.deepEqual(exits, [], "must not exit before shutdown finishes");
+
+  signals.emit("SIGINT", "SIGINT");
+  assert.deepEqual(exits, [1], "a second signal while shutting down forces exit");
+
+  finishShutdown();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(exits, [1, 0]);
+  assert.equal(shutdowns, 1);
+
+  uninstall();
+  assert.equal(signals.listenerCount("SIGTERM"), 0);
+  assert.equal(signals.listenerCount("SIGINT"), 0);
+});
+
+test("PANT-829: an HTTP server 'error' such as EADDRINUSE is reported, not an uncaught crash", async () => {
+  const blocker = createServer();
+  await new Promise<void>((resolve) => blocker.listen(0, resolve));
+  const { port } = blocker.address() as AddressInfo;
+
+  const errors: Error[] = [];
+  let reported!: () => void;
+  const errorReported = new Promise<void>((resolve) => {
+    reported = resolve;
+  });
+  const service = composeService({
+    env: testEnv(),
+    commandRunner: mockCommandRunner(),
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port,
+    onFatalServerError: (err) => {
+      errors.push(err);
+      reported();
+    },
+  });
+
+  try {
+    service.httpServer.listen(port);
+    await withTimeout(errorReported, 5_000, "onFatalServerError was never called");
+    // Let any duplicate 'error' emission surface before counting.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(errors.length, 1);
+    assert.equal((errors[0] as NodeJS.ErrnoException).code, "EADDRINUSE");
+  } finally {
+    service.stopAll();
+    blocker.close();
+  }
+});
+
+// --- heimdall#96: closed routing loop + persisted route ledger -------------
+
+function singleClaudeLaneEnv(dbPath?: string): NodeJS.ProcessEnv {
+  return {
+    HEIMDALL_LANE_1_ID: "claude@mathew.dostal",
+    HEIMDALL_LANE_1_PROVIDER: "claude",
+    HEIMDALL_LANE_1_CREDENTIAL_REF: "CLAUDE_TOKEN",
+    CLAUDE_TOKEN: "sk-ant-fake",
+    ...(dbPath ? { HEIMDALL_DB_PATH: dbPath } : {}),
+  };
+}
+
+async function waitFor(check: () => boolean, what: string, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+async function postJson(port: number, path: string, body: unknown): Promise<Response> {
+  return fetch(`http://localhost:${port}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+async function routeDecision(port: number, taskId: string): Promise<{ decision_id: string; chosen_lane: string | null }> {
+  const res = await postJson(port, "/route", { task_id: taskId, task_type: "build" });
+  assert.equal(res.status, 200);
+  return (await res.json()) as { decision_id: string; chosen_lane: string | null };
+}
+
+const RATE_LIMIT_FAILURE = {
+  outcome: "failure",
+  metadata: {
+    error: { status: 429, body: { type: "error", error: { type: "rate_limit_error", message: "rate limited" } } },
+  },
+};
+
+test("heimdall#96: route outcomes feed lane status as a corroborated passive signal", async () => {
+  const laneId = "claude@mathew.dostal";
+  const service = composeService({
+    env: singleClaudeLaneEnv(":memory:"),
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port: 0,
+  });
+  await new Promise<void>((resolve) => service.httpServer.listen(0, resolve));
+  const { port } = service.httpServer.address() as AddressInfo;
+
+  try {
+    // Startup probe (mockFetch → 200) makes the lane routable.
+    await waitFor(() => service.store.getCurrentStatus(laneId)?.status === "up", "startup probe");
+
+    const first = await routeDecision(port, "task-1");
+    assert.equal(first.chosen_lane, laneId);
+    const firstRes = await postJson(port, `/route/${first.decision_id}/outcome`, RATE_LIMIT_FAILURE);
+    assert.equal(firstRes.status, 200);
+
+    // One failure outcome is not enough: the lane shows degraded, not down.
+    await waitFor(() => service.store.getCurrentStatus(laneId)?.signal_source === "passive", "first passive status");
+    const afterOne = service.store.getCurrentStatus(laneId);
+    assert.equal(afterOne?.status, "degraded");
+    assert.equal(afterOne?.error_code, "rate_limit");
+
+    // Degraded lanes aren't routing candidates, so record the second decision
+    // while the lane is forced on — the outcome is what's under test.
+    service.store.setManualOverride(laneId, "enabled");
+    const second = await routeDecision(port, "task-2");
+    assert.equal(second.chosen_lane, laneId);
+    await postJson(port, `/route/${second.decision_id}/outcome`, RATE_LIMIT_FAILURE);
+
+    await waitFor(() => service.store.getCurrentStatus(laneId)?.status === "down", "corroborated down");
+    const afterTwo = service.store.getCurrentStatus(laneId);
+    assert.equal(afterTwo?.signal_source, "passive");
+    assert.equal(afterTwo?.error_code, "rate_limit");
+
+    // A success outcome is passive evidence of up.
+    const third = await routeDecision(port, "task-3");
+    await postJson(port, `/route/${third.decision_id}/outcome`, { outcome: "success" });
+    await waitFor(() => service.store.getCurrentStatus(laneId)?.status === "up", "passive up");
+    assert.equal(service.store.getCurrentStatus(laneId)?.signal_source, "passive");
+  } finally {
+    service.stopAll();
+  }
+});
+
+test("heimdall#96: with HEIMDALL_DB_PATH unset, the route ledger shares StateStore's file and a decision survives a composeService() restart", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "heimdall-home-"));
+  const originalHome = process.env.HOME;
+  const originalDbPath = process.env.HEIMDALL_DB_PATH;
+  process.env.HOME = home;
+  delete process.env.HEIMDALL_DB_PATH;
+
+  try {
+    const env = singleClaudeLaneEnv();
+    const dbPath = resolveDefaultDbPath(env);
+    assert.equal(dbPath, path.join(home, ".local", "share", "heimdall", "heimdall.db"));
+
+    const first = composeService({ env, fetchImpl: mockFetch(), skipHttpListen: true, port: 0 });
+    let decisionId: string;
+    try {
+      await new Promise<void>((resolve) => first.httpServer.listen(0, resolve));
+      const { port } = first.httpServer.address() as AddressInfo;
+      decisionId = (await routeDecision(port, "task-persist")).decision_id;
+    } finally {
+      first.stopAll();
+    }
+
+    // The decision is in the StateStore's own file, not an in-memory ledger.
+    const ledger = new RouteLedger(dbPath);
+    assert.ok(ledger.getDecision(decisionId), "decision must be written to the StateStore DB file");
+    ledger.close();
+
+    const second = composeService({ env, fetchImpl: mockFetch(), skipHttpListen: true, port: 0 });
+    try {
+      await new Promise<void>((resolve) => second.httpServer.listen(0, resolve));
+      const { port } = second.httpServer.address() as AddressInfo;
+      const res = await postJson(port, `/route/${decisionId}/outcome`, { outcome: "success" });
+      assert.equal(res.status, 200, "the restarted service must still know the decision");
+    } finally {
+      second.stopAll();
+    }
+  } finally {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalDbPath !== undefined) process.env.HEIMDALL_DB_PATH = originalDbPath;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("PANT-824: a scheduler that fails to start makes GET /readyz report degraded, naming that lane, and is counted in /metrics", async () => {
+  const env = testEnv();
+  // 6-field cron is rejected synchronously by MulticaAutopilotScheduler.start().
+  env.HEIMDALL_AUTOPILOT_CRON = "*/5 * * * * *";
+  const service = composeService({
+    env,
+    commandRunner: mockCommandRunner(),
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port: 0,
+  });
+
+  await new Promise<void>((resolve) => service.httpServer.listen(0, resolve));
+  const { port } = service.httpServer.address() as AddressInfo;
+
+  try {
+    // Probe both lanes so freshness passes — the scheduler failure alone must degrade readiness.
+    for (const laneId of ["claude@mathew.dostal", "codex"]) {
+      await fetch(`http://localhost:${port}/lanes/${encodeURIComponent(laneId)}/refresh`, { method: "POST" });
+    }
+
+    const res = await fetch(`http://localhost:${port}/readyz`);
+    assert.equal(res.status, 503);
+    const body = await res.json();
+    assert.equal(body.status, "degraded");
+    assert.equal(body.checks.schedulers.ok, false);
+    assert.deepEqual(body.checks.schedulers.failed_lanes.sort(), ["claude@mathew.dostal", "codex"]);
+    assert.ok(body.reasons.some((r: string) => r.includes("claude@mathew.dostal") && r.includes("multica_autopilot")));
+    assert.equal(body.checks.state_db.ok, true);
+    assert.equal(body.checks.probe_freshness.ok, true);
+
+    const metrics = await (await fetch(`http://localhost:${port}/metrics`)).text();
+    assert.match(metrics, /heimdall_scheduler_start_failures_total\{lane="claude@mathew\.dostal",scheduler="multica_autopilot"\} 1/);
+
+    // Liveness is unaffected.
+    const health = await fetch(`http://localhost:${port}/healthz`);
+    assert.equal(health.status, 200);
+  } finally {
+    service.stopAll();
+  }
+});
+
+test("PANT-824: GET /readyz is ready once every lane's scheduler started and a lane has been probed", async () => {
+  const service = composeService({
+    env: testEnv(),
+    commandRunner: mockCommandRunner(),
+    fetchImpl: mockFetch(),
+    skipHttpListen: true,
+    port: 0,
+  });
+
+  await new Promise<void>((resolve) => service.httpServer.listen(0, resolve));
+  const { port } = service.httpServer.address() as AddressInfo;
+
+  try {
+    await fetch(`http://localhost:${port}/lanes/${encodeURIComponent("codex")}/refresh`, { method: "POST" });
+    const res = await fetch(`http://localhost:${port}/readyz`);
+    const body = await res.json();
+    assert.equal(res.status, 200, JSON.stringify(body));
+    assert.equal(body.status, "ready");
+    assert.deepEqual(body.reasons, []);
+  } finally {
+    service.stopAll();
+  }
+});
+
+test("PANT-824: a lane whose provider has no adapters is recorded as an in_process scheduler start failure", () => {
+  const env = testEnv();
+  env.HEIMDALL_LANE_3_ID = "mystery";
+  env.HEIMDALL_LANE_3_PROVIDER = "some-fictional-llm-provider";
+  env.HEIMDALL_LANE_3_CREDENTIAL_REF = "GEMINI_TOKEN";
+  env.GEMINI_TOKEN = "fake";
+  const service = composeService({ env, commandRunner: mockCommandRunner(), fetchImpl: mockFetch(), skipHttpListen: true, port: 0 });
+  try {
+    const failures = service.sensing.listSchedulerStartFailures();
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0].lane, "mystery");
+    assert.equal(failures[0].scheduler, "in_process");
+  } finally {
+    service.stopAll();
+  }
+});
+
+// PANT-932 (heimdall#116): after a host reboot Docker restarts every container
+// at once, so Heimdall can start before Pantheon core-api is listening. The
+// lanes must recover on their own once core-api comes up — no restart.
+test("PANT-932: started with core-api unreachable, lanes report credential_unavailable and recover without a restart once core-api is up", async () => {
+  const sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), "heimdall-pant932-"));
+  // Reserve a free port, then release it: nothing listens there yet.
+  const probe = createServer();
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const coreApiPort = (probe.address() as AddressInfo).port;
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+
+  const env: NodeJS.ProcessEnv = {
+    HEIMDALL_LANE_1_ID: "claude@ffevents",
+    HEIMDALL_LANE_1_PROVIDER: "claude",
+    HEIMDALL_LANE_1_CREDENTIAL_REF: "CLAUDE_FFEVENTS_TOKEN",
+    HEIMDALL_CREDENTIAL_SOURCE: "pantheon",
+    PANTHEON_API_URL: `http://127.0.0.1:${coreApiPort}`,
+    PANTHEON_SECRETS_SHARED_DIR: sharedDir,
+    HEIMDALL_DB_PATH: ":memory:",
+  };
+  const service = composeService({ env, fetchImpl: mockFetch(), port: 0, commandRunner: mockCommandRunner() });
+  let coreApi: ChildProcess | null = null;
+  try {
+    await new Promise<void>((resolve) => service.httpServer.once("listening", resolve));
+    const heimdallUrl = `http://127.0.0.1:${(service.httpServer.address() as AddressInfo).port}`;
+    const laneId = "claude@ffevents";
+
+    const waitFor = async (predicate: () => boolean, what: string): Promise<void> => {
+      const deadline = Date.now() + 10_000;
+      while (!predicate()) {
+        if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}; last status: ${JSON.stringify(service.store.getCurrentStatus(laneId))}`);
+        await new Promise((r) => setTimeout(r, 25));
+      }
+    };
+
+    await waitFor(() => service.store.hasRecordedStatus(laneId), "the startup probe");
+    const before = service.store.getCurrentStatus(laneId);
+    assert.equal(before?.status, "down");
+    assert.match(before?.reason ?? "", /^credential_unavailable/);
+    const lanesBefore = (await (await fetch(`${heimdallUrl}/lanes`)).json()) as Array<Record<string, unknown>>;
+    assert.equal(lanesBefore[0].credential_state, "credential_unavailable", "a reboot must not read as 'no credential configured'");
+    assert.equal(lanesBefore[0].credential_configured, false);
+
+    // core-api comes up: a stand-in for pantheon-v2's POST /api/secrets/inject
+    // (file target, env format), writing into the shared volume. A separate
+    // process, like the real one — the credential fetch is a blocking curl,
+    // so an in-process fake could never answer it.
+    const fakeCoreApi = `
+      const http = require("node:http");
+      const fs = require("node:fs");
+      http.createServer((req, res) => {
+        let body = "";
+        req.on("data", (c) => (body += c));
+        req.on("end", () => {
+          const p = JSON.parse(body);
+          if (req.url !== "/api/secrets/inject" || p.tags !== "CLAUDE_FFEVENTS_TOKEN") return res.writeHead(404).end();
+          fs.writeFileSync(p.path, p.key + "=sk-ant-ffevents\\n");
+          res.writeHead(200, { "content-type": "application/json" }).end("{}");
+        });
+      }).listen(${coreApiPort}, "127.0.0.1", () => console.log("ready"));
+    `;
+    const child = spawn(process.execPath, ["-e", fakeCoreApi], { stdio: ["ignore", "pipe", "inherit"] });
+    coreApi = child;
+    await new Promise<void>((resolve) => child.stdout!.once("data", () => resolve()));
+
+    // No restart: the scheduler's own probe ticks (5s interval, 1s-then-2s
+    // credential backoff) re-resolve the credential and probe the lane.
+    await waitFor(() => service.store.getCurrentStatus(laneId)?.status === "up", "the lane to recover to up");
+    const lanesAfter = (await (await fetch(`${heimdallUrl}/lanes`)).json()) as Array<Record<string, unknown>>;
+    assert.equal(lanesAfter[0].credential_state, "resolved");
+    assert.equal(lanesAfter[0].credential_configured, true);
+    assert.equal(lanesAfter[0].status, "up");
+    assert.deepEqual(fs.readdirSync(sharedDir), [], "the shared secret file is deleted after use");
+  } finally {
+    service.stopAll();
+    coreApi?.kill();
+    fs.rmSync(sharedDir, { recursive: true, force: true });
   }
 });

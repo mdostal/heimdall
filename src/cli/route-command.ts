@@ -6,11 +6,13 @@
 import { getScoredRoute, reportRouteOutcome, parseTaskType } from "../core/route-selector.js";
 import type { LaneRegistry } from "../core/lane-registry.js";
 import type { StateStore } from "../core/state-store.js";
+import { describeCause } from "../core/model-swap.js";
 
 export function runRouteCommand(args: string[], registry: LaneRegistry, store: StateStore): void {
   let taskId = "";
   let rawTaskType = "";
   let estimatedCost: number | undefined;
+  let workClass: string | undefined;
   let jsonMode = false;
 
   for (let i = 0; i < args.length; i++) {
@@ -29,11 +31,15 @@ export function runRouteCommand(args: string[], registry: LaneRegistry, store: S
       estimatedCost = Number(arg.split("=")[1]);
     } else if (arg === "--estimated-cost") {
       estimatedCost = Number(args[++i]);
+    } else if (arg.startsWith("--work-class=")) {
+      workClass = arg.split("=")[1] || undefined;
+    } else if (arg === "--work-class") {
+      workClass = args[++i] || undefined;
     }
   }
 
   if (!taskId || !rawTaskType) {
-    console.error("Usage: heimdall route --task-type=<type> --task-id=<id> [--estimated-cost=<cost>] [--json]");
+    console.error("Usage: heimdall route --task-type=<type> --task-id=<id> [--work-class=<class>] [--estimated-cost=<cost>] [--json]");
     process.exit(1);
   }
 
@@ -43,13 +49,18 @@ export function runRouteCommand(args: string[], registry: LaneRegistry, store: S
     process.exit(1);
   }
 
-  const result = getScoredRoute({ task_id: taskId, task_type: taskType, estimated_cost: estimatedCost }, registry, store);
+  const result = getScoredRoute({ task_id: taskId, task_type: taskType, estimated_cost: estimatedCost, work_class: workClass }, registry, store);
 
   if (jsonMode) {
     console.error(JSON.stringify(result, null, 2));
     console.log(result.chosen_lane ?? "null");
   } else {
     console.log(`Chosen Lane: ${result.chosen_lane ?? "None"}`);
+    if (result.model) {
+      const swap = result.model_swap ? ` (swapped from ${result.preferred_model}: ${describeCause(result.model_swap.cause)})` : "";
+      console.log(`Model: ${result.model}${swap}`);
+    }
+    if (result.verdict === "queue") console.log(`Verdict: queue until ${result.resets_at ?? "unknown"}`);
     console.log(`Rationale: ${result.rationale}`);
   }
 }

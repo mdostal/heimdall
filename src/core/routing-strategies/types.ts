@@ -28,6 +28,32 @@ export interface RouteSelectionContext {
    * experiment bucketing isn't sticky for /available-route callers, only
    * for POST /route callers who supply one). */
   readonly taskId?: string;
+  /** heimdall#123 — lanes that were otherwise eligible but were withheld
+   * from `candidates` by the policy's excluded_lanes. Already removed
+   * upstream; only the scored strategy reads it, to record the withholding
+   * in its rationale and ledger. */
+  readonly excludedLanes?: readonly string[];
+  /** heimdall#142 slice 3 — the level gate `candidates` were filtered by,
+   * when the policy configures levels. Already applied upstream; only the
+   * scored strategy reads it, for its rationale and ledger. */
+  readonly levelGate?: {
+    readonly work_class: string;
+    readonly allowed_levels: readonly string[];
+    readonly floor: boolean;
+    readonly resets_at: string | null;
+  };
+  /** heimdall#142 slice 3 — lanes the level gate withheld, and why. */
+  readonly levelWithheld?: ReadonlyArray<{ readonly lane_id: string; readonly reason: string }>;
+  /** heimdall#142 slice 4 — candidates that route a model other than their
+   * preferred one, and the limit (or toggle) that caused it. Already decided
+   * upstream; only the scored strategy reads it, for its rationale and ledger. */
+  readonly modelSwaps?: ReadonlyArray<{
+    readonly lane_id: string;
+    readonly preferred_model: string;
+    readonly model: string;
+    readonly cause: string;
+    readonly preferred_available_at: string | null;
+  }>;
 }
 
 export interface RouteSelectionDetail {
@@ -36,6 +62,7 @@ export interface RouteSelectionDetail {
   experimentArm?: string;
   rankedCandidates?: ReadonlyArray<{ laneId: string; score: number }>;
   policyVersion?: string;
+  excludedLanes?: readonly string[];
 }
 
 export interface RouteSelectionResult {

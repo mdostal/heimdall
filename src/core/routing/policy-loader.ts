@@ -3,6 +3,7 @@ import { homedir as osHomedir } from "node:os";
 import { join } from "node:path";
 import { parseDocument } from "yaml";
 import { TASK_TYPES, type TaskType } from "../task-type.js";
+import { LevelConfigError, validateLevelPolicy, type LevelPolicy } from "./levels.js";
 
 // HEIMDALL_REPO_ROOT (introduced for the docs viewer, see http-server.ts's
 // docsRepoRoot) takes precedence over cwd for the same reason here: the
@@ -60,7 +61,37 @@ export interface Policy {
   headroom_floor: number;
   cost_preference: CostPreference;
   experiments: PolicyExperiments;
+  /** heimdall#123: lane ids that must never be routed to, under any strategy. Optional in the file; [] when absent. */
+  excluded_lanes: string[];
+  /**
+   * heimdall#142 slice 3: level bindings and work-class levels, from the
+   * optional `levels` and `work_classes` sections. null when neither is
+   * present: level routing is off. See levels.ts.
+   */
+  levels: LevelPolicy | null;
+  /**
+   * heimdall#142 slice 4: whether a lane whose preferred model is blocked may
+   * route another model it serves at the same or a higher level. Optional in
+   * the file; on when absent. Only acts when `levels` is configured, because
+   * without level bindings Heimdall can't tell a premium model from a lower one.
+   */
+  model_swap: { enabled: boolean };
+  /**
+   * heimdall#142 slice 5: limits for the per-account "max usage" switch.
+   * Optional in the file. `max_hours` caps how far ahead an operator may set
+   * its expiry (default 168, one weekly window); `prefer_account` (default
+   * true) routes work to a max-usage account ahead of other lanes while it
+   * has a usable premium model.
+   */
+  max_usage: MaxUsagePolicy;
 }
+
+export interface MaxUsagePolicy {
+  max_hours: number;
+  prefer_account: boolean;
+}
+
+export const DEFAULT_MAX_USAGE_POLICY: MaxUsagePolicy = { max_hours: 168, prefer_account: true };
 
 export class PolicyLoader {
   static load(path: string = DEFAULT_POLICY_PATH): Policy {
@@ -102,7 +133,54 @@ function validatePolicy(value: unknown): Policy {
     headroom_floor: requireNonNegativeNumber(policy, "headroom_floor"),
     cost_preference: validateCostPreference(requireString(policy, "cost_preference")),
     experiments: validateExperiments(requireRecord(policy.experiments, "experiments")),
+    excluded_lanes: validateExcludedLanes(policy.excluded_lanes),
+    levels: validateLevels(policy.levels, policy.work_classes),
+    model_swap: validateModelSwap(policy.model_swap),
+    max_usage: validateMaxUsage(policy.max_usage),
   };
+}
+
+function validateMaxUsage(value: unknown): MaxUsagePolicy {
+  if (value === undefined || value === null) return { ...DEFAULT_MAX_USAGE_POLICY };
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new PolicyValidationError(`Invalid field "max_usage": expected { max_hours, prefer_account }`);
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (key !== "max_hours" && key !== "prefer_account") {
+      throw new PolicyValidationError(`Invalid field "max_usage.${key}": expected only "max_hours" and "prefer_account"`);
+    }
+  }
+  const maxHours = record.max_hours ?? DEFAULT_MAX_USAGE_POLICY.max_hours;
+  if (typeof maxHours !== "number" || !Number.isFinite(maxHours) || maxHours <= 0) {
+    throw new PolicyValidationError(`Invalid field "max_usage.max_hours": expected a positive number`);
+  }
+  const prefer = record.prefer_account ?? DEFAULT_MAX_USAGE_POLICY.prefer_account;
+  if (typeof prefer !== "boolean") throw new PolicyValidationError(`Invalid field "max_usage.prefer_account": expected boolean`);
+  return { max_hours: maxHours, prefer_account: prefer };
+}
+
+function validateModelSwap(value: unknown): Policy["model_swap"] {
+  if (value === undefined || value === null) return { enabled: true };
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new PolicyValidationError(`Invalid field "model_swap": expected { enabled: true | false }`);
+  }
+  for (const key of Object.keys(value)) {
+    if (key !== "enabled") throw new PolicyValidationError(`Invalid field "model_swap.${key}": expected only "enabled"`);
+  }
+  const enabled = (value as Record<string, unknown>).enabled;
+  if (enabled === undefined) return { enabled: true };
+  if (typeof enabled !== "boolean") throw new PolicyValidationError(`Invalid field "model_swap.enabled": expected boolean`);
+  return { enabled };
+}
+
+function validateLevels(levels: unknown, workClasses: unknown): LevelPolicy | null {
+  try {
+    return validateLevelPolicy(levels, workClasses);
+  } catch (error) {
+    if (error instanceof LevelConfigError) throw new PolicyValidationError(error.message);
+    throw error;
+  }
 }
 
 function validateTaskTypeWeights(value: Record<string, unknown>): Policy["task_type_weights"] {
@@ -122,6 +200,23 @@ function validateTaskTypeWeights(value: Record<string, unknown>): Policy["task_t
   }
 
   return weights;
+}
+
+// heimdall#123: optional so every existing policy file stays valid. Lane
+// ids are not checked against the registry here -- the policy is loaded
+// without one, and an id for a lane this deployment doesn't declare simply
+// never matches a candidate.
+function validateExcludedLanes(value: unknown): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new PolicyValidationError(`Invalid field "excluded_lanes": expected list of lane ids`);
+  }
+  return value.map((laneId, index) => {
+    if (typeof laneId !== "string" || laneId.trim() === "") {
+      throw new PolicyValidationError(`Invalid field "excluded_lanes.${index}": expected non-empty lane id`);
+    }
+    return laneId;
+  });
 }
 
 function validateCostPreference(value: string): CostPreference {

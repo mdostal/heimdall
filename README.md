@@ -145,14 +145,16 @@ npm run dev:http-only  # HTTP server only, no scheduling (isolated debugging)
 ```
 
 Runs `src/main.ts` — the full composed service: lane registry + SQLite state
-store + Argus OTEL telemetry + a per-lane `MulticaAutopilotScheduler` (coarse
-cron, default) and `InProcessScheduler` (fine ~5s, suspect-lane only) + the
+store + Argus OTEL telemetry + a per-lane `InProcessScheduler` (probes
+never-probed lanes at startup, fine ~5s while suspect, periodic while healthy)
+and an opt-in `MulticaAutopilotScheduler` (coarse cron) + the
 HTTP server on `http://localhost:4870` (override with `PORT=<n>`). See
 [`docs/decisions/DEC-hdl-scheduler-backend.md`](docs/decisions/DEC-hdl-scheduler-backend.md)
 for the scheduler design and the `multica-native-no-box-runners` HARD LAW it
-satisfies. Requires `MULTICA_AUTOPILOT_AGENT` to be set (see `.env.example`)
-for the Multica backend to register cron triggers; missing it fails that
-lane's coarse scheduling clearly without crashing the rest of the service.
+satisfies. The Multica backend is opt-in: it registers cron triggers only
+when `MULTICA_AUTOPILOT_AGENT` is set (see `.env.example`). Each trigger
+dispatches a full agent session and spends quota, so it is off by default —
+lanes are still probed in-process without it (PANT-753).
 
 `GET /lanes` reads the SQLite state store (override the DB path with
 `HEIMDALL_DB_PATH`, default in-memory), reflecting whatever each provider's
@@ -200,6 +202,7 @@ access, fetched on demand.
 curl http://localhost:4870/lanes
 curl -X POST http://localhost:4870/lanes/<laneId>/refresh   # force a refresh
 curl http://localhost:4870/healthz                          # liveness only, no lane data
+curl http://localhost:4870/readyz                           # readiness: 503 + reasons if lanes aren't being sensed
 curl -X POST http://localhost:4870/lanes/<laneId>/override \
   -H "content-type: application/json" -d '{"state":"disabled"}'   # manual override: enabled | disabled | auto
 curl -X POST http://localhost:4870/lanes/<laneId>/reset-at \
@@ -261,7 +264,8 @@ unrecognized tool *name* throws a real MCP protocol error.
 
 Other scripts: `npm test` (Node built-in test runner via `tsx`),
 `npm run build` (type-check + compile to `dist/`), `npm run sla-report`
-(status-correctness SLA harness).
+(status-correctness SLA harness; the only thing that rewrites the tracked
+`test/sla-harness/report.md`).
 
 **Actuation** (v2) is enabled per-lane by mapping it to Multica agents via
 `HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS` plus `MULTICA_BASE_URL` /
@@ -291,3 +295,13 @@ Heimdall is free, open-source, and built in the open by [Mathew Dostal](https://
 | ❤️ Sponsor | **[github.com/sponsors/mdostal](https://github.com/sponsors/mdostal)** |
 | ☕ Buy Me A Coffee | **[buymeacoffee.com/mdostal](https://www.buymeacoffee.com/mdostal)** |
 | 📬 Consulting / collab | **[mathew.dostal@gmail.com](mailto:mathew.dostal@gmail.com)** |
+
+Lane overrides can be time-boxed: `POST /lanes/:id/override` accepts
+`{"state":"disabled","reason":"maintenance","until":"2027-01-01T12:00:00Z"}`.
+`until` must be a future ISO-8601 timestamp with a timezone; omit it (or use
+`null`) for an indefinite override. Both enabled and disabled overrides revert
+to Auto when the deadline passes, including after downtime. Expiry clears the
+reason and emits `lane.status_changed` with cause `override_expired`.
+`GET /lanes` includes `override_until` and `effective_enabled` (credential
+configured and either forced enabled or automatically up). The dashboard's
+optional **Override until** field uses local time and displays the saved deadline.
