@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   createMcpServer,
   listLaneToolsDescriptor,
+  callStatusTool,
   callLanesListTool,
   callLaneOverrideTool,
   callLaneSetResetAtTool,
@@ -37,6 +38,7 @@ import {
   ROUTE_REPORT_OUTCOME_TOOL_NAME,
   ROUTE_MODEL_SWAPS_TOOL_NAME,
   LANES_MAX_USAGE_GET_TOOL_NAME,
+  STATUS_TOOL_NAME,
   LANES_MAX_USAGE_SET_TOOL_NAME,
 } from "./mcp-server.js";
 import { getLaneStatuses } from "./http-server.js";
@@ -61,9 +63,9 @@ function tmpEnvPath(): string {
   return path.join(os.tmpdir(), `heimdall-mcp-server-test-${Date.now()}-${Math.random().toString(36).slice(2)}.env`);
 }
 
-test("listLaneToolsDescriptor exposes 16 tools: list, override, setResetAt, add, lanes.models.list/setEnabled, routingStrategy.get/set, models.list/refresh/setEnabled, route_selection, route.reportOutcome (hdl-rof-02), route.modelSwaps (heimdall#142), lanes.maxUsage.get/set (PANT-1325)", () => {
+test("listLaneToolsDescriptor exposes 17 tools: list, override, setResetAt, add, lanes.models.list/setEnabled, routingStrategy.get/set, models.list/refresh/setEnabled, route_selection, route.reportOutcome (hdl-rof-02), route.modelSwaps (heimdall#142), lanes.maxUsage.get/set (PANT-1325), status (PANT-1326)", () => {
   const tools = listLaneToolsDescriptor();
-  assert.equal(tools.length, 16);
+  assert.equal(tools.length, 17);
   const names = tools.map((t) => t.name);
   assert.deepEqual(
     names.sort(),
@@ -84,8 +86,10 @@ test("listLaneToolsDescriptor exposes 16 tools: list, override, setResetAt, add,
       ROUTE_MODEL_SWAPS_TOOL_NAME,
       LANES_MAX_USAGE_GET_TOOL_NAME,
       LANES_MAX_USAGE_SET_TOOL_NAME,
+      STATUS_TOOL_NAME,
     ].sort(),
   );
+  assert.equal(STATUS_TOOL_NAME, "heimdall.status");
   assert.equal(LANES_LIST_TOOL_NAME, "heimdall.lanes.list");
   assert.equal(LANES_OVERRIDE_TOOL_NAME, "heimdall.lanes.override");
   assert.equal(LANES_SET_RESET_AT_TOOL_NAME, "heimdall.lanes.setResetAt");
@@ -464,6 +468,29 @@ test("PANT-1325: heimdall.lanes.maxUsage.set turns max usage on with an expiry a
     const dispatch = buildToolDispatch(registry, store);
     assert.doesNotThrow(() => dispatchToolCall(dispatch, LANES_MAX_USAGE_GET_TOOL_NAME, {}));
     assert.doesNotThrow(() => dispatchToolCall(dispatch, LANES_MAX_USAGE_SET_TOOL_NAME, { lane_id: "ghost", enabled: true }));
+  } finally {
+    store.close();
+  }
+});
+
+test("PANT-1326: heimdall.status returns the limits / models / mode / swaps view, read-only", () => {
+  const registry = registryWithOneConfiguredLane();
+  const store = new StateStore(":memory:");
+  try {
+    const laneId = "claude@mathew.dostal";
+    store.recordLimit(laneId, { kind: "five_hour", scope: "account", model: null, state: "exhausted", used_percent: null, resets_at: null, reason: "5-hour limit" }, "passive", new Date().toISOString());
+    const view = JSON.parse(callStatusTool(registry, store, {}).content[0].text);
+    const account = view.accounts.find((a: { lane_id: string }) => a.lane_id === laneId);
+    assert.deepEqual(
+      account.limits.map((l: { kind: string; state: string; used_percent: unknown; resets_at: unknown }) => [l.kind, l.state, l.used_percent, l.resets_at]),
+      [["five_hour", "exhausted", "unknown", "unknown"]],
+    );
+    assert.equal(account.mode.max_usage, false);
+    assert.ok(Array.isArray(view.last_swaps));
+    assert.ok(!JSON.stringify(view).includes("secret"), "no credential in the status view");
+    const bad = JSON.parse(callStatusTool(registry, store, { swaps: 0 }).content[0].text);
+    assert.equal(bad.error, "invalid_swaps");
+    assert.doesNotThrow(() => dispatchToolCall(buildToolDispatch(registry, store), STATUS_TOOL_NAME, {}));
   } finally {
     store.close();
   }

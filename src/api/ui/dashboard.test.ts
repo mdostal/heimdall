@@ -191,3 +191,46 @@ test("PANT-1325: each lane row shows max usage (state, expiry, On/Off) and its p
   // No control to change credits or a spend cap exists.
   assert.doesNotMatch(table, /data-(credits|spend)/);
 });
+
+test("PANT-1326: the alerts banner lists the open alert with its choices, and the last swaps panel renders", async () => {
+  const view = {
+    generated_at: "2026-11-24T12:00:00.000Z", routing_strategy: "scored", levels: "configured", levels_error: null,
+    accounts: [],
+    last_swaps: [{ event: "swap", laneId: "ff.events", fromModel: "claude-fable-5-2", toModel: "claude-opus-5-5", cause: "limit", resolution: null, recordedAt: "2026-11-24T11:00:00.000Z" }],
+    alerts: {
+      open: [{
+        id: 1, type: "premium_unavailable", lane_id: "ff.events", limit_kind: "weekly_model:claude-fable-5-2",
+        message: "claude-fable-5-2 unavailable on ff.events",
+        choices: [
+          { action: "swap", available: true, options: [{ lane_id: "ff.events", model_id: "claude-opus-5-5", level: "premium", same_account: true }] },
+          { action: "wait", until: "unknown" },
+          { action: "human_reset", path: "/lanes/ff.events/limits/clear", body: { kind: "weekly_model:claude-fable-5-2" } },
+        ],
+      }],
+      recent: [],
+    },
+  };
+  const written = new Map<string, string>();
+  const document = new Proxy({}, {
+    get(_t, prop) {
+      if (prop === "getElementById") return (id: string) => stub(written, id);
+      return stub(written, `document.${String(prop)}`);
+    },
+  });
+  // Only GET /status answers: the panels must render without /lanes.
+  const fetch = (url: string) =>
+    url === "/status" ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(view) }) : new Promise(() => {});
+  const context = vm.createContext({
+    document, fetch, console, setTimeout, clearTimeout, setInterval: () => 0, clearInterval: () => {},
+    window: stub(written, "window"), localStorage: stub(written, "localStorage"), navigator: stub(written, "navigator"),
+  });
+  for (const script of inlineScripts(renderDashboardHtml())) new vm.Script(script).runInContext(context);
+  for (let i = 0; i < 100 && !written.has("last-swaps-root"); i++) await new Promise((resolve) => setImmediate(resolve));
+
+  const alerts = written.get("alerts-root") ?? "";
+  assert.match(alerts, /claude-fable-5-2 unavailable on ff\.events/);
+  assert.match(alerts, /Swap now to claude-opus-5-5/);
+  assert.match(alerts, /Wait: reset time unknown/);
+  assert.match(alerts, /Human reset: POST \/lanes\/ff\.events\/limits\/clear/);
+  assert.match(written.get("last-swaps-root") ?? "", /ff\.events: swap claude-fable-5-2 -> claude-opus-5-5 \(limit\)/);
+});

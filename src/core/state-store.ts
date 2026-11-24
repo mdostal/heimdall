@@ -123,6 +123,19 @@ CREATE TABLE IF NOT EXISTS lane_max_usage (
   until TEXT NOT NULL,
   set_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS operator_alerts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL,
+  lane_id TEXT NOT NULL,
+  limit_kind TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  raised_at TEXT NOT NULL,
+  resolved_at TEXT,
+  resolution TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_operator_alerts_open
+  ON operator_alerts(type, lane_id, limit_kind) WHERE resolved_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_operator_alerts_raised ON operator_alerts(raised_at DESC);
 `;
 
 export type ManualOverride = "enabled" | "disabled" | null;
@@ -152,6 +165,18 @@ export interface LaneMaxUsage {
  * preferred one. `cause` is the JSON-encoded ModelSwapCause (see
  * model-swap.ts); the store keeps it opaque.
  */
+/** heimdall#142 slice 6: one stored operator alert. `payload` is the alert JSON. */
+export interface OperatorAlertRow {
+  id: number;
+  type: string;
+  lane_id: string;
+  limit_kind: string;
+  payload: string;
+  raised_at: string;
+  resolved_at: string | null;
+  resolution: string | null;
+}
+
 export interface LaneModelSwapRow {
   lane_id: string;
   preferred_model: string;
@@ -814,7 +839,9 @@ export class StateStore {
         source,
         observedAt,
       );
-    return Number(result.changes) > 0;
+    const stored = Number(result.changes) > 0;
+    if (stored) this.events.emitLimitsChanged({ lane_id: laneId, kind: limit.kind, cause: "observed" });
+    return stored;
   }
 
   /**
@@ -845,7 +872,41 @@ export class StateStore {
   /** heimdall#142: operator clear of one limit. Returns false when the lane had no such limit. */
   clearLimit(laneId: string, kind: string): boolean {
     const result = this.db.prepare(`DELETE FROM lane_limits WHERE lane_id = ? AND kind = ?`).run(laneId, kind);
+    const cleared = Number(result.changes) > 0;
+    if (cleared) this.events.emitLimitsChanged({ lane_id: laneId, kind, cause: "cleared" });
+    return cleared;
+  }
+
+  /**
+   * heimdall#142 slice 6: raises an operator alert unless one is already open
+   * for the same (type, lane, limit kind). Returns the new alert's id, or
+   * null when an open one exists. The partial unique index makes this hold
+   * across processes sharing the database, so one limit raises one alert.
+   */
+  raiseOperatorAlert(type: string, laneId: string, limitKind: string, payload: string, raisedAt: string): number | null {
+    const result = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO operator_alerts (type, lane_id, limit_kind, payload, raised_at) VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(type, laneId, limitKind, payload, raisedAt);
+    return Number(result.changes) > 0 ? Number(result.lastInsertRowid) : null;
+  }
+
+  /** heimdall#142 slice 6: closes one open alert. Returns false when it was already resolved. */
+  resolveOperatorAlert(id: number, resolution: string, resolvedAt: string): boolean {
+    const result = this.db
+      .prepare(`UPDATE operator_alerts SET resolved_at = ?, resolution = ? WHERE id = ? AND resolved_at IS NULL`)
+      .run(resolvedAt, resolution, id);
     return Number(result.changes) > 0;
+  }
+
+  /** heimdall#142 slice 6: alerts newest first; open ones only when `openOnly`. */
+  listOperatorAlerts(options: { openOnly?: boolean; limit?: number } = {}): OperatorAlertRow[] {
+    const where = options.openOnly ? "WHERE resolved_at IS NULL" : "";
+    const rows = this.db
+      .prepare(`SELECT * FROM operator_alerts ${where} ORDER BY raised_at DESC, id DESC LIMIT ?`)
+      .all(options.limit ?? 50) as unknown as OperatorAlertRow[];
+    return rows.map((row) => ({ ...row }));
   }
 
   /**

@@ -216,6 +216,10 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
   .reason { color: var(--hd-text-muted); font-size: 0.85rem; }
   .limits { margin-top: 0.35rem; display: flex; flex-direction: column; gap: 0.2rem; }
   .limit-row { font-size: 0.8rem; color: var(--hd-text-muted); }
+  .alerts-panel { border-color: var(--hd-status-down); }
+  .alert-item { margin: 0.4rem 0; }
+  .alert-choices { margin: 0.2rem 0 0 1rem; }
+  .swap-row { font-family: monospace; margin: 0.15rem 0; }
   .limit-chip { display: inline-block; padding: 0 0.35rem; border-radius: 4px; border: 1px solid currentColor; margin-right: 0.3rem; font-family: monospace; }
   .limit-exhausted .limit-chip { color: var(--hd-status-credit); }
   .limit-available .limit-chip { color: var(--hd-status-up); }
@@ -484,6 +488,12 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
     </div>
   </div>
 
+  <div class="panel alerts-panel" id="alerts-panel" hidden>
+    <h2>Operator alerts</h2>
+    <div class="strategy-status">A premium model became unavailable. Each alert is raised once per limit and closes itself when the limit resets or is cleared.</div>
+    <div id="alerts-root"></div>
+  </div>
+
   <div class="panel">
     <h2>Fleet Scope</h2>
     <div class="strategy-status">Every lane plotted by severity — distance from center: outer ring = up, mid ring = degraded, inner ring = out of credit or down. A hollow ring means the lane is manually overridden.</div>
@@ -496,6 +506,12 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       <span><i class="legend-dot" style="background:var(--hd-status-off)"></i>no signal</span>
       <span><i class="legend-dot" style="border:1.3px solid var(--hd-status-off);background:transparent"></i>overridden</span>
     </div>
+  </div>
+
+  <div class="panel">
+    <h2>Last swaps</h2>
+    <div class="strategy-status">The most recent model swaps and swap-backs, newest first. Levels and limits per model are shown in each lane row.</div>
+    <div id="last-swaps-root"><div class="empty-state">Loading…</div></div>
   </div>
 
   <div class="panel">
@@ -789,6 +805,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       return "<div class=\\"lane-model-row " + stateClass + "\\" title=\\"" + escapeHtml(model.override_reason || "") + "\\">" +
         "<span class=\\"limit-chip\\">" + escapeHtml(model.model_id) + "</span>" +
         (model.tier ? escapeHtml(model.tier) + " / " : "") +
+        (levelFor(lane.lane_id, model.model_id) ? "level " + escapeHtml(levelFor(lane.lane_id, model.model_id)) + " / " : "") +
         (model.enabled ? "on" : "off") + " / " + availability + expiry +
         btn("on", "On") + btn("off", "Off") + btn("auto", "Auto") +
         "</div>";
@@ -960,7 +977,70 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       "</svg>";
   }
 
+  // heimdall#142 slice 6: GET /status feeds the alerts banner, the last
+  // swaps panel and each model's level. It loads independently of /lanes,
+  // so a slow or failed /status never blocks the lanes table.
+  var statusView = null;
+  var lastLanes = null;
+
+  function levelFor(laneId, modelId) {
+    if (!statusView) return null;
+    for (var i = 0; i < statusView.accounts.length; i++) {
+      var account = statusView.accounts[i];
+      if (account.lane_id !== laneId) continue;
+      for (var j = 0; j < account.models.length; j++) {
+        if (account.models[j].model_id === modelId && account.models[j].level !== "unbound") return account.models[j].level;
+      }
+    }
+    return null;
+  }
+
+  function alertChoiceText(choice) {
+    if (choice.action === "swap") {
+      if (!choice.available || !choice.options.length) return "Swap: no other model at this level is usable now";
+      return "Swap now to " + choice.options.map(function (option) {
+        return option.model_id + (option.same_account ? "" : " on " + option.lane_id);
+      }).join(" or ");
+    }
+    if (choice.action === "wait") return choice.until === "unknown" ? "Wait: reset time unknown" : "Wait until " + formatResetAt(choice.until);
+    if (choice.action === "human_reset") return "Human reset: POST " + choice.path + " once the limit is lifted";
+    if (choice.action === "credits") return "Use credits" + (choice.state ? " (" + choice.state + ")" : "");
+    return choice.action;
+  }
+
+  function renderStatus(view) {
+    statusView = view;
+    var panel = document.getElementById("alerts-panel");
+    var open = (view.alerts && view.alerts.open) || [];
+    panel.hidden = open.length === 0;
+    document.getElementById("alerts-root").innerHTML = open.map(function (alert) {
+      return "<div class=\\"alert-item\\"><strong>" + escapeHtml(alert.message) + "</strong>" +
+        "<ul class=\\"alert-choices\\">" + alert.choices.map(function (choice) {
+          return "<li>" + escapeHtml(alertChoiceText(choice)) + "</li>";
+        }).join("") + "</ul></div>";
+    }).join("");
+    var swaps = view.last_swaps || [];
+    document.getElementById("last-swaps-root").innerHTML = swaps.length === 0
+      ? "<div class=\\"empty-state\\">No swaps recorded.</div>"
+      : swaps.map(function (swap) {
+        return "<div class=\\"swap-row\\">" + escapeHtml(formatResetAt(swap.recordedAt)) + " " + escapeHtml(swap.laneId) + ": " +
+          escapeHtml(swap.event) + " " + escapeHtml(swap.fromModel) + " -> " + escapeHtml(swap.toModel) +
+          (swap.cause ? " (" + escapeHtml(swap.cause) + ")" : "") + "</div>";
+      }).join("");
+    if (lastLanes) render(lastLanes);
+  }
+
+  function pollStatus() {
+    fetch("/status")
+      .then(function (res) { return res.json(); })
+      .then(renderStatus)
+      .catch(function (err) {
+        document.getElementById("last-swaps-root").innerHTML = "<div class=\\"empty-state\\">Failed to load status: " + escapeHtml(err) + "</div>";
+      });
+  }
+
   function render(lanes) {
+    lastLanes = lanes;
     var root = document.getElementById("root");
     renderFleetScope(lanes);
     if (!lanes || lanes.length === 0) {
@@ -1000,6 +1080,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
       poll();
     });
     source.addEventListener("lane.status_changed", function () { poll(); });
+    source.addEventListener("operator.alert", function () { pollStatus(); });
     source.addEventListener("error", function () {
       // Never connected, or the browser stopped auto-reconnecting: poll instead.
       if (!connected || source.readyState === EventSource.CLOSED) {
@@ -1010,6 +1091,7 @@ export function renderDashboardHtml(activeTheme: string = "mission-control", age
   }
 
   function poll() {
+    pollStatus();
     fetch("/lanes")
       .then(function (res) { return res.json(); })
       .then(render)

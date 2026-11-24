@@ -50,6 +50,7 @@ import {
 import { SensingMetrics } from "./core/telemetry/sensing-metrics.js";
 import { resolveReadinessStalenessMs } from "./api/readiness.js";
 import { closeRouteLedgers, onRouteOutcome, useRouteLedgerPath } from "./core/route-selector.js";
+import { installPremiumAlerts } from "./core/premium-alerts.js";
 import { RouteOutcomeTracker, routeOutcomeToPassiveResponse } from "./core/signal-sources/route-outcome.js";
 
 const PROVIDER_ADAPTERS: Record<string, () => ProviderAdapters> = {
@@ -306,6 +307,10 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
   // telemetry_events are otherwise append-only forever.
   backgroundJobs.push(startHistoryRetentionJob(store, { retentionDays: resolveRetentionDays(env) }));
 
+  // heimdall#142 slice 6: one operator alert when a premium model becomes
+  // unavailable, re-evaluated on every limit change and on a timer.
+  const stopPremiumAlerts = installPremiumAlerts(registry, store, { env, fetchImpl: options.fetchImpl });
+
   const httpServer = createHttpServer(registry, store, refreshLane, undefined, options.fetchImpl, rotationControllers, resolver, sensing, resolveReadinessStalenessMs(env));
   // PANT-829: without a listener, EADDRINUSE and friends surface as an
   // uncaught exception with a raw stack. Log what actually went wrong and
@@ -371,6 +376,7 @@ export function composeService(options: ComposeServiceOptions = {}): ComposedSer
     for (const s of multicaSchedulers) s.stop();
     for (const s of inProcessSchedulers) s.stop();
     for (const job of backgroundJobs) job.stop();
+    stopPremiumAlerts();
     unsubscribeRouteOutcomes();
   }
 }

@@ -28,6 +28,21 @@ Each lane also has `limits`: the account's separate limits Heimdall has observed
 still works). `used_percent` or `resets_at` of `null` means the provider did not say. Report it
 as unknown and never estimate it.
 
+## Limits, models, mode and swaps in one call — `heimdall.status`
+
+When the question is about limits or models ("is Fable out", "why did it swap to Opus", "when
+does it reset"), call `heimdall.status` instead of piecing it together:
+
+```json
+{ "tool": "heimdall.status", "arguments": { "swaps": 10 } }
+```
+
+Per account lane it returns `limits` (type, `state`, `used_percent`, `resets_at`), `models`
+(`enabled`, `available`, `level`), `mode` (max usage on/off with `until`) and `current_swap`, plus
+`last_swaps` and `alerts.open`. Values of `"unknown"` mean the provider did not report them: say
+so, never estimate. Each open alert lists its `choices` (swap now, wait until the reset, human
+reset, credits); relay them to the operator as they are, and don't act on one yourself.
+
 ## Step 2 — `heimdall.routingStrategy.get`
 
 No parameters.
