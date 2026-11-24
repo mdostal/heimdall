@@ -1076,15 +1076,20 @@ export function createHttpServer(
       // only know "no route", with verdict/resets_at for those that wait.
       const workClass = url.searchParams.get("work-class")?.trim() || undefined;
       const verdict = getRouteVerdict(taskType, registry, store, { workClass });
-      if (verdict.verdict !== "route") {
-        const { verdict: kind, ...rest } = verdict;
+      if (verdict.verdict === "queue") {
+        const { verdict: _kind, task_type: _taskType, ...rest } = verdict;
         res.writeHead(404, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: "no_available_route", verdict: kind, ...rest, task_type: taskType }));
+        res.end(JSON.stringify({ error: "no_available_route", task_type: taskType, verdict: "queue", ...rest }));
+        return;
+      }
+      if (verdict.verdict === "no_route") {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "no_available_route", task_type: taskType }));
         return;
       }
 
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ...verdict.route, verdict: "route" }));
+      res.end(JSON.stringify(verdict.route));
       return;
     }
 
