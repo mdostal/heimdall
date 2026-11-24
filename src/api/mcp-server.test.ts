@@ -17,6 +17,7 @@ import {
   callModelsSetEnabledTool,
   callRouteSelectionTool,
   callRouteReportOutcomeTool,
+  callRouteModelSwapsTool,
   buildToolDispatch,
   dispatchToolCall,
   LANES_LIST_TOOL_NAME,
@@ -32,6 +33,7 @@ import {
   MODELS_SET_ENABLED_TOOL_NAME,
   ROUTE_SELECTION_TOOL_NAME,
   ROUTE_REPORT_OUTCOME_TOOL_NAME,
+  ROUTE_MODEL_SWAPS_TOOL_NAME,
 } from "./mcp-server.js";
 import { getLaneStatuses } from "./http-server.js";
 import { LaneRegistry } from "../core/lane-registry.js";
@@ -55,9 +57,9 @@ function tmpEnvPath(): string {
   return path.join(os.tmpdir(), `heimdall-mcp-server-test-${Date.now()}-${Math.random().toString(36).slice(2)}.env`);
 }
 
-test("listLaneToolsDescriptor exposes 13 tools: list, override, setResetAt, add, lanes.models.list/setEnabled, routingStrategy.get/set, models.list/refresh/setEnabled, route_selection, route.reportOutcome (hdl-rof-02)", () => {
+test("listLaneToolsDescriptor exposes 14 tools: list, override, setResetAt, add, lanes.models.list/setEnabled, routingStrategy.get/set, models.list/refresh/setEnabled, route_selection, route.reportOutcome (hdl-rof-02), route.modelSwaps (heimdall#142)", () => {
   const tools = listLaneToolsDescriptor();
-  assert.equal(tools.length, 13);
+  assert.equal(tools.length, 14);
   const names = tools.map((t) => t.name);
   assert.deepEqual(
     names.sort(),
@@ -75,6 +77,7 @@ test("listLaneToolsDescriptor exposes 13 tools: list, override, setResetAt, add,
       MODELS_SET_ENABLED_TOOL_NAME,
       ROUTE_SELECTION_TOOL_NAME,
       ROUTE_REPORT_OUTCOME_TOOL_NAME,
+      ROUTE_MODEL_SWAPS_TOOL_NAME,
     ].sort(),
   );
   assert.equal(LANES_LIST_TOOL_NAME, "heimdall.lanes.list");
@@ -406,6 +409,20 @@ test("hdl-mcp-02: createMcpServer still constructs a connectable Server instance
     const server = createMcpServer(registry, store);
     assert.ok(server);
     assert.equal(typeof server.connect, "function");
+  } finally {
+    store.close();
+  }
+});
+
+test("heimdall#142 slice 4: heimdall.route.modelSwaps reports current swaps and rejects a bad limit", () => {
+  const store = new StateStore(":memory:");
+  try {
+    store.startLaneModelSwap("lane-a", "claude-fable-5-2", "claude-opus-5-5", JSON.stringify({ type: "limit" }), new Date());
+    const ok = JSON.parse(callRouteModelSwapsTool(store, {}).content[0].text);
+    assert.deepEqual(ok.current.map((row: { lane_id: string; model: string }) => [row.lane_id, row.model]), [["lane-a", "claude-opus-5-5"]]);
+    assert.ok(Array.isArray(ok.events));
+    const bad = JSON.parse(callRouteModelSwapsTool(store, { limit: 0 }).content[0].text);
+    assert.equal(bad.error, "invalid_limit");
   } finally {
     store.close();
   }
