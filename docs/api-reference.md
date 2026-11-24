@@ -42,6 +42,9 @@ All request/response bodies are JSON. Errors return `{"error":"<message>"}` with
 | `POST` | `/lanes/:id/cost-tier` | Update the lane's cost tier scoring input. |
 | `PATCH` | `/lanes/:id` | Passive status push from an external observer: `{ "status": "...", "error"?: "<provider error text>" }`. See [Limits](#limits-heimdall142). |
 | `GET` | `/lanes/:id/models` | The lane's models with `enabled` / `available`. 200 `{ lane_id, models }`, 404 `unknown_lane`. See [Lane models](#lane-models-heimdall142). |
+| `GET` | `/max-usage` | Max-usage status of every lane: `{ lanes: [{ lane_id, enabled, reason, until, set_at, effective, ineffective_reason, paid_switches, paid_switches_note }] }`. See [routing.md](routing.md#max-usage-per-account-heimdall142-slice-5). |
+| `GET` | `/lanes/:id/max-usage` | One lane's max-usage status. 200, 404 `unknown_lane`. |
+| `POST` | `/lanes/:id/max-usage` | `{ "enabled": true, "until": "<ISO-8601 with zone>", "reason"?: "..." }` turns max usage on, `{ "enabled": false }` off. 200 `{ lane_id, max_usage }`, 400 `invalid_enabled` / `invalid_until` / `invalid_reason` / `unknown_field` / `not_a_heimdall_switch` (any credits / spend-cap field), 404 `unknown_lane`, 503 `invalid_policy`. Never changes credits or a spend cap. |
 | `POST` | `/lanes/:id/models/:model` | Turn one model on or off on this lane: `{ "enabled": true \| false \| null, "until"?: "<ISO-8601 with zone>", "reason"?: "..." }`. `null` returns to auto. 200 `{ lane_id, model }`, 400 `invalid_enabled` / `invalid_until` / `invalid_reason`, 404 `unknown_lane` / `unknown_model`. |
 | `POST` | `/lanes/:id/limits/clear` | Remove one recorded limit: `{ "kind": "weekly_model:claude-fable-5-2" }`. 200 with the lane's remaining `limits`, 400 `invalid_kind`, 404 `unknown_lane` / `unknown_limit`. |
 
@@ -259,6 +262,8 @@ npx heimdall agent init
 | `heimdall.lanes.setResetAt` | Set or clear a scheduled reset time on a lane |
 | `heimdall.lanes.add` | Add a new lane at runtime |
 | `heimdall.lanes.models.list` | List one lane's models with `enabled` / `available` (`{ lane_id }`) |
+| `heimdall.lanes.maxUsage.get` | Max-usage status per lane, with its credits / spend-cap state (report only) (`{ lane_id? }`) |
+| `heimdall.lanes.maxUsage.set` | Turn max usage on until an expiry, or off (`{ lane_id, enabled, until?, reason? }`) |
 | `heimdall.lanes.models.setEnabled` | Turn one model on a lane on, off, or back to auto (`{ lane_id, model_id, enabled: true\|false\|null, until?, reason? }`) |
 | `heimdall.routingStrategy.get` | Get the current strategy and available options |
 | `heimdall.routingStrategy.set` | Change the active routing strategy |

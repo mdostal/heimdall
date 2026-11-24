@@ -98,3 +98,15 @@ experiments:
 # instead:
 # model_swap:
 #   enabled: false
+#
+# max_usage (heimdall#142 slice 5): the operator can turn on "max usage" for
+# one account lane until an expiry (POST /lanes/:id/max-usage, MCP
+# heimdall.lanes.maxUsage.set, or the dashboard). While on, that lane works
+# through every premium model it serves, in its declared order, as each
+# limit is reached (even with model_swap.enabled: false), and takes work
+# ahead of other lanes; once it is exhausted, other lanes route as normal,
+# then the verdict is queue. It never turns on paid credits or raises a
+# spend cap. Needs levels. Defaults:
+# max_usage:
+#   max_hours: 168        # longest expiry the operator may set
+#   prefer_account: true  # false = per-lane swap only, no preference

@@ -207,6 +207,54 @@ When the block lifts it routes the preferred model again, with no manual step.
   list the lanes swapped right now (`current`) and the recent events
   (`events`, newest first).
 
+### Max usage per account (heimdall#142, slice 5)
+
+"Get the max usage out of this account" is an operator switch, per lane (one
+lane is one account), always time-boxed and off by default.
+
+- **Turning it on.** `POST /lanes/:id/max-usage` with
+  `{ "enabled": true, "until": "<ISO-8601 with zone>", "reason"?: "..." }`,
+  the MCP tool `heimdall.lanes.maxUsage.set` (same fields plus `lane_id`), or
+  the dashboard's Max usage On button (pick an until time first). `until` is
+  required, must be in the future, and may be at most `max_usage.max_hours`
+  ahead (default 168). `{ "enabled": false }` turns it off.
+- **What it does to routing.**
+  1. The lane runs the slice-4 swap even when `model_swap.enabled` is false:
+     as each premium model's limit is reached, the next one it declares (same
+     level or higher) is routed.
+  2. With `max_usage.prefer_account: true` (default), work goes to max-usage
+     lanes ahead of other lanes while any of them has a usable model at an
+     allowed level, whatever the strategy would otherwise pick. Routes carry
+     `max_usage: true` and `max_usage_preferred: true`.
+  3. Once every allowed model on those lanes is exhausted, the other lanes
+     route exactly as they would with max usage off; with nothing left at an
+     allowed level the verdict is `queue` (it lists `max_usage_lanes`).
+- **The floor holds.** Code work never routes below premium, and like the
+  slice-4 swap max usage never steps below the preferred model's level.
+- **Paid switches are reported, never changed.** Heimdall never turns on paid
+  credits or raises a spend cap. The status shows the lane's `credits` and
+  `spend_cap` limits under `paid_switches` (`reported`, `state`,
+  `used_percent`, `resets_at`) with a note saying so, and a request carrying
+  any field about credits, spend, caps, budget or overage is refused with
+  `not_a_heimdall_switch` (other unknown fields: `unknown_field`).
+- **Expiry and restarts.** The switch is stored in SQLite
+  (`lane_max_usage`), so it survives a restart. It turns itself off when
+  `until` passes (a timer, plus a check on every read) and records the
+  telemetry event `max_usage_expired`; turning it on or off records
+  `max_usage_on` / `max_usage_off`.
+- **Needs levels.** Without a `levels` section Heimdall can't tell premium
+  from lower models, so max usage doesn't act; the status says
+  `effective: false, ineffective_reason: "levels_not_configured"`.
+- **Reading it.** `GET /max-usage` (every lane), `GET /lanes/:id/max-usage`,
+  `max_usage` on each lane in `GET /lanes`, and the MCP tool
+  `heimdall.lanes.maxUsage.get`.
+
+  ```yaml
+  max_usage:
+    max_hours: 168        # longest expiry an operator may set
+    prefer_account: true  # false = per-lane swap only, no account preference
+  ```
+
 ## Requesting a route
 
 ```bash
@@ -282,6 +330,8 @@ curl -X POST http://localhost:4870/route/dec-abc123/outcome \
 | `route_selection` | Select the best available route for a task |
 | `heimdall.route.reportOutcome` | Report the result of a routed task |
 | `heimdall.route.modelSwaps` | Current model swaps per lane and the recent swap / swap-back log |
+| `heimdall.lanes.maxUsage.get` | Max-usage status per lane, with its paid switches (report only) |
+| `heimdall.lanes.maxUsage.set` | Turn max usage on for a lane until an expiry, or off |
 | `heimdall.routingStrategy.get` | Get the current strategy and available options |
 | `heimdall.routingStrategy.set` | Change the active strategy |
 
