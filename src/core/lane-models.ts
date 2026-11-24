@@ -185,3 +185,33 @@ export function setLaneModelEnabled(
   const model = getLaneModels(lane, store, now).find((entry) => entry.model_id === modelId)!;
   return { ok: true, lane_id: laneId, model };
 }
+
+export interface ModelUsability {
+  enabled: boolean;
+  available: boolean;
+  blocked_by: string[];
+  available_at: string | null;
+}
+
+/**
+ * heimdall#142 slice 3: whether `modelId` is usable on `lane` right now, for
+ * routing. Uses the lane's model list when the model is on it; otherwise (a
+ * catalog substitute, or a lane with no model id) applies the same rules
+ * directly: the lane toggle, then the catalog flag, and any exhausted limit
+ * that blocks the model.
+ */
+export function getModelUsability(lane: Lane, modelId: string, store: StateStore, now: Date = new Date()): ModelUsability {
+  const listed = getLaneModels(lane, store, now).find((model) => model.model_id === modelId);
+  if (listed) {
+    return { enabled: listed.enabled, available: listed.available, blocked_by: listed.blocked_by, available_at: listed.available_at };
+  }
+  const toggle = store.getLaneModelToggles(lane.lane_id, now).find((entry) => entry.model_id === modelId);
+  const catalogEntry = store.getModelCatalog(lane.provider).find((entry) => entry.model_id === modelId);
+  const blocking = blockingLimits(modelId, store.getLimits(lane.lane_id, now));
+  return {
+    enabled: toggle ? toggle.enabled : catalogEntry ? catalogEntry.enabled : true,
+    available: blocking.length === 0,
+    blocked_by: blocking.map((limit) => limit.kind),
+    available_at: availableAt(blocking),
+  };
+}

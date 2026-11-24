@@ -211,6 +211,11 @@ export function listLaneToolsDescriptor() {
           task_id: { type: "string" as const, description: "Caller-supplied identifier — also the deterministic key for experiment-arm assignment." },
           task_type: { type: "string" as const, enum: ["planning", "build", "review"] },
           estimated_cost: { type: "number" as const },
+          work_class: {
+            type: "string" as const,
+            description:
+              "Work class to judge levels under (e.g. release, code); defaults to task_type. Build, review, release and code work never route below premium; with no premium model available the verdict is queue with resets_at.",
+          },
         },
         required: ["task_id", "task_type"],
       },
@@ -305,14 +310,15 @@ export function callModelsSetEnabledTool(store: StateStore, args: unknown) {
 }
 
 export function callRouteSelectionTool(registry: LaneRegistry, store: StateStore, args: unknown) {
-  const input = (args ?? {}) as { task_id?: unknown; task_type?: unknown; estimated_cost?: unknown };
+  const input = (args ?? {}) as { task_id?: unknown; task_type?: unknown; estimated_cost?: unknown; work_class?: unknown };
   const taskId = typeof input.task_id === "string" ? input.task_id : "";
   const taskType = parseTaskType(typeof input.task_type === "string" ? input.task_type : null);
   if (!taskId || !taskType) {
     return textResult({ ok: false, error: "invalid_request", required: ["task_id", "task_type"], allowed_task_types: ["planning", "build", "review"] });
   }
   const estimatedCost = typeof input.estimated_cost === "number" ? input.estimated_cost : undefined;
-  return textResult(getScoredRoute({ task_id: taskId, task_type: taskType, estimated_cost: estimatedCost }, registry, store));
+  const workClass = typeof input.work_class === "string" && input.work_class.trim() !== "" ? input.work_class.trim() : undefined;
+  return textResult(getScoredRoute({ task_id: taskId, task_type: taskType, estimated_cost: estimatedCost, work_class: workClass }, registry, store));
 }
 
 export function callRouteReportOutcomeTool(args: unknown) {
