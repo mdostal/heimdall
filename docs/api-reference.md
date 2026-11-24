@@ -41,6 +41,8 @@ All request/response bodies are JSON. Errors return `{"error":"<message>"}` with
 | `POST` | `/lanes/:id/headroom` | Update the lane's headroom scoring input. |
 | `POST` | `/lanes/:id/cost-tier` | Update the lane's cost tier scoring input. |
 | `PATCH` | `/lanes/:id` | Passive status push from an external observer: `{ "status": "...", "error"?: "<provider error text>" }`. See [Limits](#limits-heimdall142). |
+| `GET` | `/lanes/:id/models` | The lane's models with `enabled` / `available`. 200 `{ lane_id, models }`, 404 `unknown_lane`. See [Lane models](#lane-models-heimdall142). |
+| `POST` | `/lanes/:id/models/:model` | Turn one model on or off on this lane: `{ "enabled": true \| false \| null, "until"?: "<ISO-8601 with zone>", "reason"?: "..." }`. `null` returns to auto. 200 `{ lane_id, model }`, 400 `invalid_enabled` / `invalid_until` / `invalid_reason`, 404 `unknown_lane` / `unknown_model`. |
 | `POST` | `/lanes/:id/limits/clear` | Remove one recorded limit: `{ "kind": "weekly_model:claude-fable-5-2" }`. 200 with the lane's remaining `limits`, 400 `invalid_kind`, 404 `unknown_lane` / `unknown_limit`. |
 
 #### `GET /lanes` response shape
@@ -128,6 +130,22 @@ The staleness window:
 - N is `HEIMDALL_SIGNAL_STALE_MULTIPLIER` (default `3`), so the default window is 15 minutes.
 - While a lane is `degraded`/`down`/`out_of_credit` with a known reset time (`manual_reset_at`, else `reset_at`), the scheduler deliberately waits until that time before re-probing. The window then starts at the reset time instead of the last observation.
 - Any recorded observation counts, including a passive status push or a reported route outcome.
+
+#### Lane models (heimdall#142)
+
+Every lane in `GET /lanes` (and `heimdall.lanes.list`) carries `models`: the models it can serve. The list comes from config, never constants: the lane's `HEIMDALL_LANE_<N>_MODELS` / JSON `models` (with `tier`), its own `model`, the provider's enabled catalog models when the lane declares no `models`, and any model a recorded `weekly_model:<id>` limit names.
+
+| Field | Meaning |
+|---|---|
+| `model_id`, `tier` | `tier` is the operator-configured value, else `null`. Pass-through only. |
+| `source` | `lane_config` · `lane_model` · `catalog` · `limit` |
+| `enabled` | The operator toggle if set, else the provider-wide catalog flag (`POST /models/:provider/:model`) if the catalog knows the model, else `true`. |
+| `manual`, `override_reason`, `override_until` | The lane toggle (`enabled` / `disabled` / `null` = auto), its reason and its expiry. |
+| `available` | `false` while an exhausted limit blocks the model: its own `weekly_model:<id>`, or an account-wide `five_hour` / `weekly_all_models`. Turns `true` once `resets_at` passes or the limit is cleared. |
+| `blocked_by`, `available_at` | The blocking limit kinds, and the latest of their `resets_at` (`null` if any reset time is unknown). |
+| `usable` | `enabled && available` |
+
+"Turn Fable off" is one call: `POST /lanes/:id/models/claude-fable-5-2 { "enabled": false }`, the MCP tool `heimdall.lanes.models.setEnabled`, or the dashboard's per-model On / Off / Auto buttons. An optional `until` makes the toggle time-boxed (the #126 override pattern): after it passes the model returns to auto. Toggles persist in SQLite (`lane_model_toggles`) and survive a restart. This slice only reports: routing and spend do not read these fields yet, and a toggle change does not emit `lane.status_changed` (the dashboard re-polls after a click).
 
 ### Routing
 
@@ -240,6 +258,8 @@ npx heimdall agent init
 | `heimdall.lanes.override` | Set or clear a manual health override on a lane |
 | `heimdall.lanes.setResetAt` | Set or clear a scheduled reset time on a lane |
 | `heimdall.lanes.add` | Add a new lane at runtime |
+| `heimdall.lanes.models.list` | List one lane's models with `enabled` / `available` (`{ lane_id }`) |
+| `heimdall.lanes.models.setEnabled` | Turn one model on a lane on, off, or back to auto (`{ lane_id, model_id, enabled: true\|false\|null, until?, reason? }`) |
 | `heimdall.routingStrategy.get` | Get the current strategy and available options |
 | `heimdall.routingStrategy.set` | Change the active routing strategy |
 | `heimdall.models.list` | List known models (optionally filter by provider) |

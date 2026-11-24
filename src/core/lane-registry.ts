@@ -14,6 +14,50 @@ import { resolveCredential, type CredentialSource } from "./credential-source.js
 export type LaneCostTier = "low" | "medium" | "high";
 
 /**
+ * heimdall#142 slice 2: one model a lane can serve, as declared in lane
+ * config. `tier` is free-form operator config (slice 3 binds it to levels);
+ * Heimdall keeps no list of model names or tiers of its own.
+ */
+export interface LaneModelConfig {
+  id: string;
+  tier?: string;
+}
+
+/**
+ * Parses HEIMDALL_LANE_<N>_MODELS: comma-separated `model_id[=tier]`
+ * entries, e.g. `claude-fable-5-2=premium,claude-opus-5-5=premium`.
+ * Blank entries are skipped; a repeated id keeps its last declaration.
+ */
+export function parseLaneModels(raw: string | undefined | null): LaneModelConfig[] {
+  if (!raw) return [];
+  const byId = new Map<string, LaneModelConfig>();
+  for (const entry of raw.split(",")) {
+    const [id, tier] = entry.split("=").map((part) => part?.trim() ?? "");
+    if (!id) continue;
+    byId.set(id, tier ? { id, tier } : { id });
+  }
+  return [...byId.values()];
+}
+
+function parseJsonLaneModels(value: unknown): LaneModelConfig[] | null {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return null;
+  const byId = new Map<string, LaneModelConfig>();
+  for (const entry of value) {
+    if (typeof entry === "string" && entry.trim() !== "") {
+      byId.set(entry.trim(), { id: entry.trim() });
+    } else if (entry && typeof entry === "object" && typeof entry.id === "string" && entry.id.trim() !== "" &&
+      (entry.tier === undefined || (typeof entry.tier === "string" && entry.tier.trim() !== ""))) {
+      const id = entry.id.trim();
+      byId.set(id, entry.tier === undefined ? { id } : { id, tier: entry.tier.trim() });
+    } else {
+      return null;
+    }
+  }
+  return [...byId.values()];
+}
+
+/**
  * PANT-932 (heimdall#116): why a lane does or doesn't hold a credential.
  * `unconfigured` = no credential registered under credential_ref (final
  * until the operator adds one). `credential_unavailable` = the credential
@@ -32,12 +76,15 @@ export interface LaneDeclaration {
   /** Optional scoring inputs (hdl-rr-03) — see routing-strategies/scored-strategy.ts. Defaulted on Lane when unset. */
   headroom?: number;
   cost_tier?: LaneCostTier;
+  /** heimdall#142 slice 2 — models this lane serves, from config. */
+  models?: LaneModelConfig[];
 }
 
 export interface Lane extends LaneDeclaration {
   model: string;
   headroom: number;
   cost_tier: LaneCostTier;
+  models: LaneModelConfig[];
   /** Resolved secret, or null when the credential_ref didn't resolve (REQ-07: down/unconfigured). */
   credential: string | null;
   credential_state: CredentialState;
@@ -69,6 +116,7 @@ export function loadLaneDeclarations(
     const rawPriority = env[`HEIMDALL_LANE_${i}_PRIORITY`];
     const rawHeadroom = env[`HEIMDALL_LANE_${i}_HEADROOM`];
     const rawCostTier = env[`HEIMDALL_LANE_${i}_COST_TIER`];
+    const models = parseLaneModels(env[`HEIMDALL_LANE_${i}_MODELS`]);
     if (!provider || !credentialRef) {
       // Malformed declaration (missing a required field) — skip this lane
       // rather than crashing the whole service.
@@ -107,6 +155,7 @@ export function loadLaneDeclarations(
       ...(priority !== undefined ? { priority } : {}),
       ...(rawHeadroom !== undefined ? { headroom: Number(rawHeadroom) } : {}),
       ...(rawCostTier !== undefined ? { cost_tier: rawCostTier as LaneCostTier } : {}),
+      ...(models.length > 0 ? { models } : {}),
     });
   }
   // A single JSON value crosses container boundaries without numbered compose slots.
@@ -123,8 +172,12 @@ export function loadLaneDeclarations(
           (value.cost_tier !== undefined && !COST_TIERS.includes(value.cost_tier))) {
         throw new Error("Invalid lane declaration in HEIMDALL_LANES_JSON");
       }
+      const models = parseJsonLaneModels(value.models);
+      if (models === null) {
+        throw new Error("Invalid models in HEIMDALL_LANES_JSON: expected an array of model ids or { id, tier } objects");
+      }
       const { lane_id, provider, credential_ref, model, priority, headroom, cost_tier } = value;
-      const lane = { lane_id, provider, credential_ref, model, priority, headroom, cost_tier };
+      const lane: LaneDeclaration = { lane_id, provider, credential_ref, model, priority, headroom, cost_tier, ...(models.length > 0 ? { models } : {}) };
       const index = declarations.findIndex((entry) => entry.lane_id === lane_id);
       if (index < 0) declarations.push(lane);
       else declarations[index] = lane;
@@ -155,6 +208,7 @@ export class LaneRegistry {
         model: decl.model ?? decl.provider,
         headroom: decl.headroom ?? DEFAULT_HEADROOM,
         cost_tier: decl.cost_tier ?? DEFAULT_COST_TIER,
+        models: decl.models ?? [],
         credential: null,
         credential_state: "unconfigured",
         credential_detail: null,

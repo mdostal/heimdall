@@ -101,9 +101,29 @@ CREATE TABLE IF NOT EXISTS lane_limits (
   observed_at TEXT NOT NULL,
   PRIMARY KEY (lane_id, kind)
 );
+CREATE TABLE IF NOT EXISTS lane_model_toggles (
+  lane_id TEXT NOT NULL REFERENCES lanes(lane_id),
+  model_id TEXT NOT NULL,
+  enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+  reason TEXT,
+  until TEXT,
+  set_at TEXT NOT NULL,
+  PRIMARY KEY (lane_id, model_id)
+);
 `;
 
 export type ManualOverride = "enabled" | "disabled" | null;
+
+/** heimdall#142 slice 2: an operator's on/off for one model inside one lane. */
+export interface LaneModelToggle {
+  lane_id: string;
+  model_id: string;
+  enabled: boolean;
+  reason: string | null;
+  /** ISO-8601 expiry; the toggle is deleted (back to auto) once it passes. null = until cleared. */
+  until: string | null;
+  set_at: string;
+}
 
 interface LaneRow {
   lane_id: string;
@@ -241,10 +261,14 @@ export class StateStore {
   private scheduleOverrideExpiry(): void {
     if (this.overrideTimer) clearTimeout(this.overrideTimer);
     if (this.closed) return;
-    const row = this.db.prepare(`SELECT MIN(override_until) AS deadline FROM lanes WHERE manual_override IS NOT NULL`).get() as { deadline: string | null };
+    // heimdall#142 slice 2: per-model toggles share this timer and the #126 expiry pattern.
+    const row = this.db.prepare(`SELECT MIN(deadline) AS deadline FROM (
+      SELECT MIN(override_until) AS deadline FROM lanes WHERE manual_override IS NOT NULL
+      UNION ALL SELECT MIN(until) FROM lane_model_toggles)`).get() as { deadline: string | null };
     const delay = row.deadline ? Math.max(1, Math.min(1000, Date.parse(row.deadline) - Date.now())) : 1000;
     this.overrideTimer = setTimeout(() => {
       this.expireOverrides();
+      this.expireModelToggles();
       this.scheduleOverrideExpiry();
     }, delay);
     this.overrideTimer.unref();
@@ -254,6 +278,58 @@ export class StateStore {
     const rows = this.db.prepare(`UPDATE lanes SET manual_override = NULL, override_reason = NULL, override_until = NULL
       WHERE manual_override IS NOT NULL AND override_until <= ? RETURNING lane_id`).all(now.toISOString()) as { lane_id: string }[];
     for (const row of rows) this.emitStatusChanged(row.lane_id, this.currentStatusValue(row.lane_id), "override_expired");
+  }
+
+  /** heimdall#142 slice 2: drop model toggles whose expiry has passed. Returns how many expired. */
+  expireModelToggles(now: Date = new Date()): number {
+    const result = this.db.prepare(`DELETE FROM lane_model_toggles WHERE until IS NOT NULL AND until <= ?`).run(now.toISOString());
+    return Number(result.changes);
+  }
+
+  /**
+   * heimdall#142 slice 2: set (true/false) or clear (null, back to auto) one
+   * model's toggle inside a lane. `until` is an ISO-8601 expiry after which
+   * the toggle is dropped. Persisted, so it survives a restart.
+   */
+  setLaneModelToggle(
+    laneId: string,
+    modelId: string,
+    enabled: boolean | null,
+    reason: string | null = null,
+    until: string | null = null,
+    now: Date = new Date(),
+  ): void {
+    if (until !== null && !Number.isFinite(Date.parse(until))) throw new Error("Invalid model toggle expiry");
+    if (enabled === null) {
+      this.db.prepare(`DELETE FROM lane_model_toggles WHERE lane_id = ? AND model_id = ?`).run(laneId, modelId);
+    } else {
+      this.db
+        .prepare(
+          `INSERT INTO lanes (lane_id, provider, credential_ref) VALUES (?, '', '')
+           ON CONFLICT(lane_id) DO NOTHING`,
+        )
+        .run(laneId);
+      this.db
+        .prepare(
+          `INSERT INTO lane_model_toggles (lane_id, model_id, enabled, reason, until, set_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(lane_id, model_id) DO UPDATE SET
+             enabled = excluded.enabled, reason = excluded.reason, until = excluded.until, set_at = excluded.set_at`,
+        )
+        .run(laneId, modelId, enabled ? 1 : 0, reason, until === null ? null : new Date(until).toISOString(), now.toISOString());
+    }
+    this.scheduleOverrideExpiry();
+  }
+
+  /** heimdall#142 slice 2: live (unexpired) model toggles, for one lane or all lanes. */
+  getLaneModelToggles(laneId?: string, now: Date = new Date()): LaneModelToggle[] {
+    this.expireModelToggles(now);
+    const rows = (
+      laneId === undefined
+        ? this.db.prepare(`SELECT * FROM lane_model_toggles ORDER BY lane_id, model_id`).all()
+        : this.db.prepare(`SELECT * FROM lane_model_toggles WHERE lane_id = ? ORDER BY model_id`).all(laneId)
+    ) as unknown as Array<Omit<LaneModelToggle, "enabled"> & { enabled: 0 | 1 }>;
+    return rows.map((row) => ({ ...row, enabled: row.enabled === 1 }));
   }
 
   getOverrideUntil(laneId: string): string | null {

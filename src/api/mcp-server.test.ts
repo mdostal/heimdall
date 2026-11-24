@@ -22,6 +22,8 @@ import {
   LANES_LIST_TOOL_NAME,
   LANES_OVERRIDE_TOOL_NAME,
   LANES_SET_RESET_AT_TOOL_NAME,
+  LANES_MODELS_LIST_TOOL_NAME,
+  LANES_MODELS_SET_ENABLED_TOOL_NAME,
   LANES_ADD_TOOL_NAME,
   ROUTING_STRATEGY_GET_TOOL_NAME,
   ROUTING_STRATEGY_SET_TOOL_NAME,
@@ -53,9 +55,9 @@ function tmpEnvPath(): string {
   return path.join(os.tmpdir(), `heimdall-mcp-server-test-${Date.now()}-${Math.random().toString(36).slice(2)}.env`);
 }
 
-test("listLaneToolsDescriptor exposes 11 tools: list, override, setResetAt, add, routingStrategy.get/set, models.list/refresh/setEnabled, route_selection, route.reportOutcome (hdl-rof-02)", () => {
+test("listLaneToolsDescriptor exposes 13 tools: list, override, setResetAt, add, lanes.models.list/setEnabled, routingStrategy.get/set, models.list/refresh/setEnabled, route_selection, route.reportOutcome (hdl-rof-02)", () => {
   const tools = listLaneToolsDescriptor();
-  assert.equal(tools.length, 11);
+  assert.equal(tools.length, 13);
   const names = tools.map((t) => t.name);
   assert.deepEqual(
     names.sort(),
@@ -64,6 +66,8 @@ test("listLaneToolsDescriptor exposes 11 tools: list, override, setResetAt, add,
       LANES_LIST_TOOL_NAME,
       LANES_OVERRIDE_TOOL_NAME,
       LANES_SET_RESET_AT_TOOL_NAME,
+      LANES_MODELS_LIST_TOOL_NAME,
+      LANES_MODELS_SET_ENABLED_TOOL_NAME,
       ROUTING_STRATEGY_GET_TOOL_NAME,
       ROUTING_STRATEGY_SET_TOOL_NAME,
       MODELS_LIST_TOOL_NAME,

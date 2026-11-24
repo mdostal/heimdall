@@ -44,6 +44,7 @@ import {
 } from "./http-server.js";
 import { getActiveRoutingStrategyName, getRoutingStrategyNames, getScoredRoute, reportRouteOutcome, parseTaskType } from "../core/route-selector.js";
 import { refreshModelCatalog, getModelCatalog, setModelEnabled } from "../core/model-catalog.js";
+import { listLaneModels, setLaneModelEnabled } from "../core/lane-models.js";
 import { StateStore, resolveDefaultDbPath } from "../core/state-store.js";
 import type { LaneRegistry } from "../core/lane-registry.js";
 
@@ -51,6 +52,8 @@ export const LANES_LIST_TOOL_NAME = "heimdall.lanes.list";
 export const LANES_OVERRIDE_TOOL_NAME = "heimdall.lanes.override";
 export const LANES_SET_RESET_AT_TOOL_NAME = "heimdall.lanes.setResetAt";
 export const LANES_ADD_TOOL_NAME = "heimdall.lanes.add";
+export const LANES_MODELS_LIST_TOOL_NAME = "heimdall.lanes.models.list";
+export const LANES_MODELS_SET_ENABLED_TOOL_NAME = "heimdall.lanes.models.setEnabled";
 export const ROUTING_STRATEGY_GET_TOOL_NAME = "heimdall.routingStrategy.get";
 export const ROUTING_STRATEGY_SET_TOOL_NAME = "heimdall.routingStrategy.set";
 export const MODELS_LIST_TOOL_NAME = "heimdall.models.list";
@@ -121,6 +124,32 @@ export function listLaneToolsDescriptor() {
           token: { type: "string" as const, description: "The lane's credential — stored locally in the state DB, never returned by any Heimdall API." },
         },
         required: ["lane_id", "provider", "model", "token"],
+      },
+    },
+    {
+      name: LANES_MODELS_LIST_TOOL_NAME,
+      description:
+        "List the models one lane serves, each with enabled (operator toggle), available (false while a limit that blocks it is exhausted, with blocked_by and available_at), usable, and the configured tier.",
+      inputSchema: {
+        type: "object" as const,
+        properties: { lane_id: { type: "string" as const } },
+        required: ["lane_id"],
+      },
+    },
+    {
+      name: LANES_MODELS_SET_ENABLED_TOOL_NAME,
+      description:
+        "Turn one model inside a lane off (enabled: false) or back on (enabled: true), or return it to auto (enabled: null). Optional until: the toggle expires then and the model returns to auto. Persists across restarts. Reports only; it does not dispatch work.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          lane_id: { type: "string" as const },
+          model_id: { type: "string" as const, description: "A model id the lane serves, e.g. claude-fable-5-2." },
+          enabled: { type: ["boolean", "null"] as const, description: "true = on, false = off, null = back to auto." },
+          until: { type: "string" as const, description: "Optional future ISO-8601 expiry with timezone; reverts to auto." },
+          reason: { type: "string" as const, description: "Optional free-text note for why." },
+        },
+        required: ["lane_id", "model_id", "enabled"],
       },
     },
     {
@@ -227,6 +256,20 @@ export function callAddLaneTool(registry: LaneRegistry, store: StateStore, args:
   return textResult(addLane(registry, store, (args ?? {}) as AddLaneInput));
 }
 
+export function callLaneModelsListTool(registry: LaneRegistry, store: StateStore, args: unknown) {
+  const input = (args ?? {}) as { lane_id?: unknown };
+  return textResult(listLaneModels(registry, store, typeof input.lane_id === "string" ? input.lane_id : ""));
+}
+
+export function callLaneModelsSetEnabledTool(registry: LaneRegistry, store: StateStore, args: unknown) {
+  const input = (args ?? {}) as { lane_id?: unknown; model_id?: unknown; enabled?: unknown; reason?: unknown; until?: unknown };
+  const laneId = typeof input.lane_id === "string" ? input.lane_id : "";
+  const modelId = typeof input.model_id === "string" ? input.model_id : "";
+  // An omitted `enabled` is a malformed call, not "back to auto".
+  const enabled = input.enabled === undefined ? "missing" : input.enabled;
+  return textResult(setLaneModelEnabled(registry, store, laneId, modelId, enabled, input.reason, input.until));
+}
+
 export function callRoutingStrategyGetTool(store: StateStore) {
   return textResult({
     active: getActiveRoutingStrategyName(store),
@@ -303,6 +346,8 @@ export function buildToolDispatch(
     [LANES_OVERRIDE_TOOL_NAME]: (args) => callLaneOverrideTool(registry, store, args),
     [LANES_SET_RESET_AT_TOOL_NAME]: (args) => callLaneSetResetAtTool(registry, store, args),
     [LANES_ADD_TOOL_NAME]: (args) => callAddLaneTool(registry, store, args),
+    [LANES_MODELS_LIST_TOOL_NAME]: (args) => callLaneModelsListTool(registry, store, args),
+    [LANES_MODELS_SET_ENABLED_TOOL_NAME]: (args) => callLaneModelsSetEnabledTool(registry, store, args),
     [ROUTING_STRATEGY_GET_TOOL_NAME]: () => callRoutingStrategyGetTool(store),
     [ROUTING_STRATEGY_SET_TOOL_NAME]: (args) => callRoutingStrategySetTool(store, args),
     [MODELS_LIST_TOOL_NAME]: (args) => callModelsListTool(store, args),

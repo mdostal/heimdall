@@ -28,12 +28,15 @@ Lanes are declared as **contiguous numbered triples** starting at 1. Loading sto
 | `HEIMDALL_LANE_<N>_HEADROOM` | No | Scoring input — estimated remaining token budget. Default: `10000`. |
 | `HEIMDALL_LANE_<N>_COST_TIER` | No | `low` \| `medium` \| `high`. Used by the scored strategy. Default: `medium`. |
 | `HEIMDALL_LANE_<N>_PRIORITY` | No | Integer rank for the priority strategy. Lower = higher priority. Unset = treated as last. |
+| `HEIMDALL_LANE_<N>_MODELS` | No | The models this lane can serve, as comma-separated `id[=tier]` entries, e.g. `claude-fable-5-2=premium,claude-opus-5-5=premium`. `tier` is passed through as reported, nothing in Heimdall acts on it yet. Each model gets an operator toggle and a limit-derived `available` (see `docs/api-reference.md#lane-models-heimdall142`). Unset: the lane lists its `MODEL` plus the provider's enabled catalog models. |
 | `HEIMDALL_LANE_<N>_MULTICA_AGENT_IDS` | No | Comma-separated Multica agent IDs bound to this lane. Reported on `GET /lanes` for downstream actuators. |
 
 ### Unbounded JSON declarations
 
 `HEIMDALL_LANES_JSON` accepts an array with `lane_id`, `provider`,
-`credential_ref`, and optional `model`, `priority`, `headroom`, `cost_tier`.
+`credential_ref`, and optional `model`, `models`, `priority`, `headroom`, `cost_tier`.
+`models` is an array of model ids or `{ "id": "...", "tier": "..." }` objects
+(same meaning as `HEIMDALL_LANE_<N>_MODELS`).
 It removes the need for a numbered compose slot per lane:
 
 ```dotenv
